@@ -14,7 +14,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
   useEffect(() => {
     const stored =
       typeof window !== "undefined"
-        ? (window.localStorage.getItem("circle-theme") as Theme | null)
+        ? (window.localStorage.getItem("symphonia-theme") as Theme | null)
         : null;
     const initial: Theme = stored ?? "dark";
     setTheme(initial);
@@ -26,7 +26,7 @@ export function ThemeProvider({ children }: { children: ReactNode }) {
     root.classList.toggle("dark", theme === "dark");
     root.style.colorScheme = theme;
     try {
-      window.localStorage.setItem("circle-theme", theme);
+      window.localStorage.setItem("symphonia-theme", theme);
     } catch {
       // ignore
     }

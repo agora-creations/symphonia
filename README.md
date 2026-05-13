@@ -152,7 +152,6 @@ tracker:
   terminal_states:
     - "Done"
     - "Closed"
-    - "Cancelled"
     - "Canceled"
     - "Duplicate"
   page_size: 50

@@ -38,13 +38,6 @@ export function StatusIcon({ status, className }: { status: ProjectStatus; class
           <path d="M4.2 7.2 L6.2 9 L9.8 5.2" fill="none" stroke="white" strokeWidth="1.5" strokeLinecap="round" strokeLinejoin="round" />
         </svg>
       );
-    case "cancelled":
-      return (
-        <svg viewBox="0 0 14 14" className={cn(base, "h-3.5 w-3.5 text-muted-foreground", className)}>
-          <circle cx="7" cy="7" r="6" fill="currentColor" />
-          <path d="M4.5 4.5 L9.5 9.5 M9.5 4.5 L4.5 9.5" stroke="var(--background)" strokeWidth="1.5" strokeLinecap="round" />
-        </svg>
-      );
   }
 }
 
