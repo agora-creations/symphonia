@@ -26,6 +26,10 @@ export type WorkflowErrorCode =
   | "workflow_tracker_states_invalid"
   | "workflow_tracker_page_size_invalid"
   | "workflow_tracker_max_pages_invalid"
+  | "workflow_github_repo_missing"
+  | "workflow_github_page_size_invalid"
+  | "workflow_github_max_pages_invalid"
+  | "workflow_github_write_guard_invalid"
   | "workflow_hook_timeout_invalid"
   | "workflow_agent_max_turns_invalid"
   | "workflow_agent_max_concurrent_invalid"
@@ -63,6 +67,21 @@ const defaultTrackerPageSize = 50;
 const defaultTrackerMaxPages = 5;
 const maxTrackerPageSize = 100;
 const maxTrackerMaxPages = 20;
+const defaultGithubEndpoint = "https://api.github.com";
+const defaultGithubPageSize = 50;
+const defaultGithubMaxPages = 3;
+const maxGithubPageSize = 100;
+const maxGithubMaxPages = 20;
+const defaultPrTitleTemplate = "{{ issue.identifier }}: {{ issue.title }}";
+const defaultPrBodyTemplate = `## Summary
+
+Automated work for {{ issue.identifier }}.
+
+Issue: {{ issue.url }}
+
+## Validation
+
+See Symphonia run timeline and review artifacts.`;
 
 export function discoverWorkflowPath(options: Pick<LoadWorkflowOptions, "workflowPath" | "cwd"> = {}): string {
   if (options.workflowPath) return resolve(options.workflowPath);
@@ -216,7 +235,62 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
   const hooksRaw = readObject(raw, "hooks");
   const agentRaw = readObject(raw, "agent");
   const codexRaw = readObject(raw, "codex");
+  const githubRaw = readObject(raw, "github");
   const provider = resolveProvider(raw, agentRaw, definition.workflowPath);
+  const githubEnabled = readBoolean(githubRaw, false, "enabled");
+  const githubReadOnly = readBoolean(githubRaw, true, "readOnly", "read_only");
+  const githubWriteRaw = readObject(githubRaw, "write");
+  const githubWriteEnabled = !githubReadOnly && readBoolean(githubWriteRaw, false, "enabled");
+  const githubAllowCreatePr = githubWriteEnabled && readBoolean(githubWriteRaw, false, "allowCreatePr", "allow_create_pr");
+  const githubAllowPush = githubWriteEnabled && readBoolean(githubWriteRaw, false, "allowPush", "allow_push");
+  const githubAllowUpdatePr = githubWriteEnabled && readBoolean(githubWriteRaw, false, "allowUpdatePr", "allow_update_pr");
+  const githubAllowComment = githubWriteEnabled && readBoolean(githubWriteRaw, false, "allowComment", "allow_comment");
+  const githubAllowRequestReviewers =
+    githubWriteEnabled && readBoolean(githubWriteRaw, false, "allowRequestReviewers", "allow_request_reviewers");
+  const githubOwner = readString(githubRaw, "owner") ?? null;
+  const githubRepo = readString(githubRaw, "repo") ?? null;
+  const githubPageSize = readPositiveInteger(githubRaw, defaultGithubPageSize, "pageSize", "page_size");
+  const githubMaxPages = readPositiveInteger(githubRaw, defaultGithubMaxPages, "maxPages", "max_pages");
+
+  if (githubEnabled && (!githubOwner || !githubRepo)) {
+    throw new WorkflowError(
+      "workflow_github_repo_missing",
+      "github.owner and github.repo are required when github.enabled is true.",
+      definition.workflowPath,
+    );
+  }
+
+  if (githubPageSize < 1 || githubPageSize > maxGithubPageSize) {
+    throw new WorkflowError(
+      "workflow_github_page_size_invalid",
+      `github.page_size must be between 1 and ${maxGithubPageSize}.`,
+      definition.workflowPath,
+    );
+  }
+
+  if (githubMaxPages < 1 || githubMaxPages > maxGithubMaxPages) {
+    throw new WorkflowError(
+      "workflow_github_max_pages_invalid",
+      `github.max_pages must be between 1 and ${maxGithubMaxPages}.`,
+      definition.workflowPath,
+    );
+  }
+
+  if (!githubWriteEnabled) {
+    const invalidWriteFlag =
+      readBoolean(githubWriteRaw, false, "allowCreatePr", "allow_create_pr") ||
+      readBoolean(githubWriteRaw, false, "allowPush", "allow_push") ||
+      readBoolean(githubWriteRaw, false, "allowUpdatePr", "allow_update_pr") ||
+      readBoolean(githubWriteRaw, false, "allowComment", "allow_comment") ||
+      readBoolean(githubWriteRaw, false, "allowRequestReviewers", "allow_request_reviewers");
+    if (!githubReadOnly && invalidWriteFlag) {
+      throw new WorkflowError(
+        "workflow_github_write_guard_invalid",
+        "GitHub write options require github.write.enabled: true.",
+        definition.workflowPath,
+      );
+    }
+  }
 
   const hookTimeoutMs = readPositiveInteger(hooksRaw, 60000, "timeoutMs", "timeout_ms");
   const maxTurns = readPositiveInteger(agentRaw, 20, "maxTurns", "max_turns");
@@ -308,6 +382,30 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
       readTimeoutMs: readPositiveInteger(codexRaw, 5000, "readTimeoutMs", "read_timeout_ms"),
       stallTimeoutMs: readPositiveInteger(codexRaw, 300000, "stallTimeoutMs", "stall_timeout_ms"),
     },
+    github: {
+      enabled: githubEnabled,
+      endpoint: readString(githubRaw, "endpoint") ?? defaultGithubEndpoint,
+      token: resolveEnvReference(readString(githubRaw, "token")) ?? null,
+      owner: githubOwner,
+      repo: githubRepo,
+      defaultBaseBranch: readString(githubRaw, "defaultBaseBranch", "default_base_branch") ?? "main",
+      remoteName: readString(githubRaw, "remoteName", "remote_name") ?? "origin",
+      readOnly: githubReadOnly,
+      pageSize: githubPageSize,
+      maxPages: githubMaxPages,
+      write: {
+        enabled: githubWriteEnabled,
+        allowPush: githubAllowPush,
+        allowCreatePr: githubAllowCreatePr,
+        allowUpdatePr: githubAllowUpdatePr,
+        allowComment: githubAllowComment,
+        allowRequestReviewers: githubAllowRequestReviewers,
+        draftPrByDefault: readBoolean(githubWriteRaw, true, "draftPrByDefault", "draft_pr_by_default"),
+        prTitleTemplate:
+          readString(githubWriteRaw, "prTitleTemplate", "pr_title_template") ?? defaultPrTitleTemplate,
+        prBodyTemplate: readString(githubWriteRaw, "prBodyTemplate", "pr_body_template") ?? defaultPrBodyTemplate,
+      },
+    },
   };
 
   try {
@@ -345,6 +443,20 @@ export function summarizeWorkflowConfig(config: WorkflowConfig): WorkflowConfigS
     hookTimeoutMs: config.hooks.timeoutMs,
     codexCommand: config.codex.command,
     codexModel: config.codex.model,
+    github: {
+      enabled: config.github.enabled,
+      endpoint: config.github.endpoint,
+      owner: config.github.owner,
+      repo: config.github.repo,
+      defaultBaseBranch: config.github.defaultBaseBranch,
+      remoteName: config.github.remoteName,
+      readOnly: config.github.readOnly,
+      writeEnabled: config.github.write.enabled,
+      allowCreatePr: config.github.write.allowCreatePr,
+      tokenConfigured: Boolean(config.github.token),
+      pageSize: config.github.pageSize,
+      maxPages: config.github.maxPages,
+    },
   };
 }
 

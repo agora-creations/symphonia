@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EventStore } from "@symphonia/db";
-import { LinearFetch } from "@symphonia/core";
+import { GitHubFetch, LinearFetch } from "@symphonia/core";
 import { AgentEvent, ApprovalState, WorkflowStatus } from "@symphonia/types";
 import { createDaemonServer, SymphoniaDaemon } from "../src/daemon";
 
@@ -66,6 +66,33 @@ describe("daemon API", () => {
     const issues = await daemon.refreshIssueCache();
     expect(issues.some((issue) => issue.identifier === "SYM-1")).toBe(true);
     expect(daemon.getTrackerStatus().issueCount).toBeGreaterThan(0);
+  });
+
+  it("reports github status and health without requiring credentials by default", async () => {
+    const status = daemon.getGithubStatus();
+    const health = await daemon.getGithubHealth();
+
+    expect(status).toMatchObject({ enabled: false, status: "disabled" });
+    expect(health).toMatchObject({ enabled: false, healthy: true, error: null });
+  });
+
+  it("reports fake github health with redacted token", async () => {
+    const created = createDaemonServer(new EventStore(join(directory, "github.sqlite")), {
+      workflowPath,
+      cwd: directory,
+      githubFetch: fakeGitHubFetch(),
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeWorkflow({ githubToken: "github-secret" });
+
+    const health = await daemon.getGithubHealth();
+    const status = daemon.getGithubStatus();
+
+    expect(health).toMatchObject({ enabled: true, healthy: true, error: null });
+    expect(status).toMatchObject({ enabled: true, status: "healthy" });
+    expect(status.config?.tokenConfigured).toBe(true);
+    expect(JSON.stringify(status)).not.toContain("github-secret");
   });
 
   it("reports linear setup errors without exposing secrets", () => {
@@ -160,7 +187,7 @@ describe("daemon API", () => {
     expect(types).toContain("hook.started");
     expect(types).toContain("hook.succeeded");
     expect(types).toContain("agent.message");
-    expect(types.at(-1)).toBe("hook.succeeded");
+    expect(types).toContain("github.review_artifacts.refreshed");
 
     const workspaceEvent = events.find((event) => event.type === "workspace.ready");
     expect(workspaceEvent?.type === "workspace.ready" ? workspaceEvent.workspace.path : "").toContain("SYM-1");
@@ -212,6 +239,27 @@ describe("daemon API", () => {
     expect(types).toEqual(expect.arrayContaining(["provider.started", "codex.thread.started", "codex.turn.started"]));
     expect(types).toContain("codex.assistant.delta");
     expect(types).toContain("codex.turn.completed");
+  });
+
+  it("persists and serves review artifact snapshots through daemon endpoints", async () => {
+    const created = await daemon.startRun("issue-frontend-board");
+
+    await waitForEvent(created.id, "github.review_artifacts.refreshed");
+    const stored = daemon.getReviewArtifacts(created.id);
+    expect(stored).toMatchObject({
+      runId: created.id,
+      issueIdentifier: "SYM-1",
+      trackerKind: "mock",
+    });
+
+    const fromEndpoint = await requestJson<{ reviewArtifacts: unknown }>("GET", `/runs/${created.id}/review-artifacts`);
+    expect(fromEndpoint.reviewArtifacts).toMatchObject({ runId: created.id });
+
+    const refreshed = await requestJson<{ reviewArtifacts: unknown }>("POST", `/runs/${created.id}/review-artifacts/refresh`);
+    expect(refreshed.reviewArtifacts).toMatchObject({ runId: created.id });
+
+    const byIssue = await requestJson<{ reviewArtifacts: unknown }>("GET", `/issues/${created.issueId}/review-artifacts`);
+    expect(byIssue.reviewArtifacts).toMatchObject({ runId: created.id });
   });
 
   it("handles codex approval requests through the daemon registry", async () => {
@@ -283,6 +331,36 @@ function getEvents(runId: string): AgentEvent[] {
   return (daemon as unknown as { eventStore: EventStore }).eventStore.getEventsForRun(runId);
 }
 
+async function requestJson<T>(method: "GET" | "POST", path: string): Promise<T> {
+  let statusCode = 0;
+  let body = "";
+  const response = {
+    setHeader: () => undefined,
+    writeHead: (status: number) => {
+      statusCode = status;
+      return response;
+    },
+    end: (chunk?: unknown) => {
+      body += chunk === undefined ? "" : String(chunk);
+    },
+  };
+  const request = {
+    method,
+    url: path,
+    async *[Symbol.asyncIterator]() {
+      // No body is needed for current test requests.
+    },
+  };
+
+  await (daemon as unknown as {
+    route: (request: unknown, response: unknown) => Promise<void>;
+  }).route(request, response);
+
+  expect(statusCode).toBeGreaterThanOrEqual(200);
+  expect(statusCode).toBeLessThan(300);
+  return JSON.parse(body) as T;
+}
+
 function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
@@ -293,7 +371,7 @@ async function respondApproval(approvalId: string, decision: "accept" | "acceptF
   }).respondApproval(approvalId, decision);
 }
 
-function writeWorkflow(options: { codexCommand?: string; provider?: "mock" | "codex" } = {}): void {
+function writeWorkflow(options: { codexCommand?: string; provider?: "mock" | "codex"; githubToken?: string } = {}): void {
   writeFileSync(
     workflowPath,
     `---
@@ -302,7 +380,20 @@ tracker:
   kind: mock
 workspace:
   root: "./workspaces"
-codex:
+${options.githubToken ? `github:
+  enabled: true
+  endpoint: "https://api.github.test"
+  token: ${JSON.stringify(options.githubToken)}
+  owner: "agora-creations"
+  repo: "symphonia"
+  default_base_branch: "main"
+  remote_name: "origin"
+  read_only: true
+  page_size: 5
+  max_pages: 2
+  write:
+    enabled: false
+` : ""}codex:
   command: ${JSON.stringify(options.codexCommand ?? "codex app-server")}
   model: "fake-model"
   approval_policy: "on-request"
@@ -440,6 +531,20 @@ function jsonResponse(payload: unknown, status = 200): Response {
     status,
     headers: { "Content-Type": "application/json" },
   });
+}
+
+function fakeGitHubFetch(): GitHubFetch {
+  return async (input) => {
+    if (input.includes("/repos/agora-creations/symphonia")) {
+      return jsonResponse({
+        id: 1,
+        name: "symphonia",
+        full_name: "agora-creations/symphonia",
+        default_branch: "main",
+      });
+    }
+    return jsonResponse({ message: `Unexpected GitHub URL: ${input}` }, 404);
+  };
 }
 
 function fakeCodexCommand(mode: string): string {

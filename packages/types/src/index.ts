@@ -228,6 +228,34 @@ export const CodexConfigSchema = z.object({
 });
 export type CodexConfig = z.infer<typeof CodexConfigSchema>;
 
+export const GitHubWriteConfigSchema = z.object({
+  enabled: z.boolean(),
+  allowPush: z.boolean(),
+  allowCreatePr: z.boolean(),
+  allowUpdatePr: z.boolean(),
+  allowComment: z.boolean(),
+  allowRequestReviewers: z.boolean(),
+  draftPrByDefault: z.boolean(),
+  prTitleTemplate: z.string(),
+  prBodyTemplate: z.string(),
+});
+export type GitHubWriteConfig = z.infer<typeof GitHubWriteConfigSchema>;
+
+export const GitHubConfigSchema = z.object({
+  enabled: z.boolean(),
+  endpoint: z.string().min(1),
+  token: z.string().min(1).nullable(),
+  owner: z.string().min(1).nullable(),
+  repo: z.string().min(1).nullable(),
+  defaultBaseBranch: z.string().min(1),
+  remoteName: z.string().min(1),
+  readOnly: z.boolean(),
+  write: GitHubWriteConfigSchema,
+  pageSize: z.number().int().positive(),
+  maxPages: z.number().int().positive(),
+});
+export type GitHubConfig = z.infer<typeof GitHubConfigSchema>;
+
 export const WorkflowConfigSchema = z.object({
   provider: ProviderIdSchema,
   tracker: TrackerConfigSchema,
@@ -236,6 +264,7 @@ export const WorkflowConfigSchema = z.object({
   hooks: HooksConfigSchema,
   agent: AgentConfigSchema,
   codex: CodexConfigSchema,
+  github: GitHubConfigSchema,
 });
 export type WorkflowConfig = z.infer<typeof WorkflowConfigSchema>;
 
@@ -270,6 +299,20 @@ export const WorkflowConfigSummarySchema = z.object({
   hookTimeoutMs: z.number().int().positive(),
   codexCommand: z.string().min(1),
   codexModel: z.string().min(1).nullable(),
+  github: z.object({
+    enabled: z.boolean(),
+    endpoint: z.string().min(1),
+    owner: z.string().min(1).nullable(),
+    repo: z.string().min(1).nullable(),
+    defaultBaseBranch: z.string().min(1),
+    remoteName: z.string().min(1),
+    readOnly: z.boolean(),
+    writeEnabled: z.boolean(),
+    allowCreatePr: z.boolean(),
+    tokenConfigured: z.boolean(),
+    pageSize: z.number().int().positive(),
+    maxPages: z.number().int().positive(),
+  }),
 });
 export type WorkflowConfigSummary = z.infer<typeof WorkflowConfigSummarySchema>;
 
@@ -360,6 +403,201 @@ export const ProviderStderrEventSchema = BaseAgentEventSchema.extend({
   type: z.literal("provider.stderr"),
   provider: ProviderIdSchema,
   message: z.string().min(1),
+});
+
+export const GitRepositoryStateSchema = z.object({
+  workspacePath: z.string().min(1),
+  isGitRepo: z.boolean(),
+  remoteUrl: z.string().nullable(),
+  remoteName: z.string().min(1),
+  currentBranch: z.string().min(1).nullable(),
+  baseBranch: z.string().min(1).nullable(),
+  headSha: z.string().min(1).nullable(),
+  baseSha: z.string().min(1).nullable(),
+  mergeBaseSha: z.string().min(1).nullable(),
+  isDirty: z.boolean(),
+  changedFileCount: z.number().int().nonnegative(),
+  untrackedFileCount: z.number().int().nonnegative(),
+  stagedFileCount: z.number().int().nonnegative(),
+  unstagedFileCount: z.number().int().nonnegative(),
+  lastCheckedAt: isoDateTime,
+  error: z.string().nullable().optional(),
+});
+export type GitRepositoryState = z.infer<typeof GitRepositoryStateSchema>;
+
+export const ChangedFileSchema = z.object({
+  path: z.string().min(1),
+  status: z.string().min(1),
+  additions: z.number().int().nonnegative(),
+  deletions: z.number().int().nonnegative(),
+  isBinary: z.boolean(),
+  oldPath: z.string().min(1).nullable(),
+  patch: z.string().nullable(),
+  source: z.enum(["local", "github_pr", "github_compare"]),
+});
+export type ChangedFile = z.infer<typeof ChangedFileSchema>;
+
+export const DiffSummarySchema = z.object({
+  filesChanged: z.number().int().nonnegative(),
+  additions: z.number().int().nonnegative(),
+  deletions: z.number().int().nonnegative(),
+  files: z.array(ChangedFileSchema),
+});
+export type DiffSummary = z.infer<typeof DiffSummarySchema>;
+
+export const PullRequestSummarySchema = z.object({
+  id: z.number().int().nonnegative(),
+  number: z.number().int().positive(),
+  title: z.string(),
+  url: z.string().url(),
+  state: z.string().min(1),
+  draft: z.boolean(),
+  merged: z.boolean(),
+  mergeable: z.boolean().nullable(),
+  baseBranch: z.string().min(1),
+  headBranch: z.string().min(1),
+  headSha: z.string().min(1).nullable(),
+  baseSha: z.string().min(1).nullable(),
+  author: z.string().min(1).nullable(),
+  createdAt: isoDateTime,
+  updatedAt: isoDateTime,
+});
+export type PullRequestSummary = z.infer<typeof PullRequestSummarySchema>;
+
+export const CheckRunSummarySchema = z.object({
+  id: z.number().int().nonnegative(),
+  name: z.string().min(1),
+  status: z.string().min(1).nullable(),
+  conclusion: z.string().nullable(),
+  startedAt: isoDateTime.nullable(),
+  completedAt: isoDateTime.nullable(),
+  url: z.string().url().nullable(),
+  detailsUrl: z.string().url().nullable(),
+  appName: z.string().min(1).nullable(),
+});
+export type CheckRunSummary = z.infer<typeof CheckRunSummarySchema>;
+
+export const CommitStatusItemSchema = z.object({
+  id: z.number().int().nonnegative().nullable(),
+  context: z.string().min(1),
+  state: z.string().min(1),
+  description: z.string().nullable(),
+  targetUrl: z.string().url().nullable(),
+  createdAt: isoDateTime.nullable(),
+  updatedAt: isoDateTime.nullable(),
+});
+export type CommitStatusItem = z.infer<typeof CommitStatusItemSchema>;
+
+export const CommitStatusSummarySchema = z.object({
+  state: z.string().min(1),
+  totalCount: z.number().int().nonnegative(),
+  statuses: z.array(CommitStatusItemSchema),
+  sha: z.string().min(1).nullable(),
+});
+export type CommitStatusSummary = z.infer<typeof CommitStatusSummarySchema>;
+
+export const WorkflowRunSummarySchema = z.object({
+  id: z.number().int().nonnegative(),
+  name: z.string().min(1),
+  status: z.string().min(1).nullable(),
+  conclusion: z.string().nullable(),
+  event: z.string().min(1).nullable(),
+  branch: z.string().min(1).nullable(),
+  headSha: z.string().min(1).nullable(),
+  url: z.string().url().nullable(),
+  createdAt: isoDateTime,
+  updatedAt: isoDateTime,
+  runStartedAt: isoDateTime.nullable(),
+});
+export type WorkflowRunSummary = z.infer<typeof WorkflowRunSummarySchema>;
+
+export const ReviewArtifactSnapshotSchema = z.object({
+  runId: z.string().min(1),
+  issueId: z.string().min(1),
+  issueIdentifier: z.string().min(1),
+  provider: ProviderIdSchema,
+  trackerKind: TrackerKindSchema,
+  workspace: WorkspaceInfoSchema.nullable(),
+  git: GitRepositoryStateSchema,
+  pr: PullRequestSummarySchema.nullable(),
+  diff: DiffSummarySchema,
+  checks: z.array(CheckRunSummarySchema),
+  commitStatus: CommitStatusSummarySchema.nullable(),
+  workflowRuns: z.array(WorkflowRunSummarySchema),
+  lastRefreshedAt: isoDateTime,
+  error: z.string().nullable(),
+});
+export type ReviewArtifactSnapshot = z.infer<typeof ReviewArtifactSnapshotSchema>;
+
+export const GitHubHealthCheckedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("github.health.checked"),
+  healthy: z.boolean(),
+  status: z.string().min(1),
+  message: z.string().min(1).optional(),
+  error: z.string().min(1).optional(),
+});
+
+export const GitHubRepoDetectedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("github.repo.detected"),
+  git: GitRepositoryStateSchema,
+});
+
+export const GitStatusCheckedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("git.status.checked"),
+  git: GitRepositoryStateSchema,
+});
+
+export const GitDiffGeneratedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("git.diff.generated"),
+  diff: DiffSummarySchema,
+});
+
+export const GitHubPrFoundEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("github.pr.found"),
+  pr: PullRequestSummarySchema,
+});
+
+export const GitHubPrNotFoundEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("github.pr.not_found"),
+  branch: z.string().min(1).nullable(),
+  message: z.string().min(1),
+});
+
+export const GitHubPrCreatedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("github.pr.created"),
+  pr: PullRequestSummarySchema,
+});
+
+export const GitHubPrFilesFetchedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("github.pr.files.fetched"),
+  fileCount: z.number().int().nonnegative(),
+});
+
+export const GitHubStatusFetchedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("github.status.fetched"),
+  commitStatus: CommitStatusSummarySchema,
+});
+
+export const GitHubChecksFetchedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("github.checks.fetched"),
+  checkCount: z.number().int().nonnegative(),
+});
+
+export const GitHubWorkflowRunsFetchedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("github.workflow_runs.fetched"),
+  workflowRunCount: z.number().int().nonnegative(),
+});
+
+export const GitHubReviewArtifactsRefreshedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("github.review_artifacts.refreshed"),
+  snapshot: ReviewArtifactSnapshotSchema,
+});
+
+export const GitHubErrorEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("github.error"),
+  operation: z.string().min(1),
+  message: z.string().min(1),
+  status: z.number().int().positive().nullable().optional(),
 });
 
 export const TrackerSyncEventSchema = BaseAgentEventSchema.extend({
@@ -463,6 +701,19 @@ export const AgentEventSchema = z.discriminatedUnion("type", [
   PromptRenderedEventSchema,
   ProviderStartedEventSchema,
   ProviderStderrEventSchema,
+  GitHubHealthCheckedEventSchema,
+  GitHubRepoDetectedEventSchema,
+  GitStatusCheckedEventSchema,
+  GitDiffGeneratedEventSchema,
+  GitHubPrFoundEventSchema,
+  GitHubPrNotFoundEventSchema,
+  GitHubPrCreatedEventSchema,
+  GitHubPrFilesFetchedEventSchema,
+  GitHubStatusFetchedEventSchema,
+  GitHubChecksFetchedEventSchema,
+  GitHubWorkflowRunsFetchedEventSchema,
+  GitHubReviewArtifactsRefreshedEventSchema,
+  GitHubErrorEventSchema,
   TrackerSyncEventSchema,
   TrackerReconciledEventSchema,
   CodexThreadStartedEventSchema,
@@ -521,6 +772,47 @@ export const TrackerHealthResponseSchema = z.object({
   tracker: TrackerHealthSchema,
 });
 export type TrackerHealthResponse = z.infer<typeof TrackerHealthResponseSchema>;
+
+export const GitHubStatusSchema = z.object({
+  enabled: z.boolean(),
+  status: z.enum(["disabled", "healthy", "invalid_config", "unavailable", "stale", "unknown"]),
+  config: WorkflowConfigSummarySchema.shape.github.nullable(),
+  lastCheckedAt: isoDateTime.nullable(),
+  lastArtifactRefreshAt: isoDateTime.nullable(),
+  error: z.string().nullable(),
+});
+export type GitHubStatus = z.infer<typeof GitHubStatusSchema>;
+
+export const GitHubHealthSchema = z.object({
+  enabled: z.boolean(),
+  healthy: z.boolean(),
+  checkedAt: isoDateTime,
+  error: z.string().nullable(),
+  rateLimit: z
+    .object({
+      limit: z.number().int().nonnegative().nullable(),
+      remaining: z.number().int().nonnegative().nullable(),
+      resetAt: isoDateTime.nullable(),
+      retryAfterSeconds: z.number().int().nonnegative().nullable(),
+    })
+    .nullable(),
+});
+export type GitHubHealth = z.infer<typeof GitHubHealthSchema>;
+
+export const GitHubStatusResponseSchema = z.object({
+  github: GitHubStatusSchema,
+});
+export type GitHubStatusResponse = z.infer<typeof GitHubStatusResponseSchema>;
+
+export const GitHubHealthResponseSchema = z.object({
+  github: GitHubHealthSchema,
+});
+export type GitHubHealthResponse = z.infer<typeof GitHubHealthResponseSchema>;
+
+export const ReviewArtifactResponseSchema = z.object({
+  reviewArtifacts: ReviewArtifactSnapshotSchema.nullable(),
+});
+export type ReviewArtifactResponse = z.infer<typeof ReviewArtifactResponseSchema>;
 
 export const RunsResponseSchema = z.object({
   runs: z.array(RunSchema),

@@ -1,5 +1,188 @@
 # Symphonia Goal Progress
 
+## Milestone 5 Objective
+
+Add GitHub as the first review-artifact integration while preserving mock tracker, Linear tracker, mock provider, Codex provider, `WORKFLOW.md` runtime, workspace lifecycle, hooks, SQLite/SSE event flow, approvals, stop/retry, and UI behavior. The milestone is read-first: users should be able to inspect local git status, changed files, branch metadata, matching GitHub PRs, PR files, combined commit status, check runs, and workflow runs from the run detail view. GitHub writes must remain disabled by default, with PR creation either safely gated behind explicit config or explicitly deferred.
+
+## Milestone 5 Starting Repo State
+
+- Branch at start: `milestone-4-linear-tracker...origin/milestone-4-linear-tracker`, clean working tree.
+- Milestone 4 checkpoint commit: `d7a1c38` (`Add Linear tracker adapter`).
+- Milestone 5 branch: `milestone-5-github-review-artifacts`.
+- Root `WORKFLOW.md` is in safe mock tracker mode by default and should stay that way.
+- Existing Milestone 4 behavior present: mock tracker, Linear tracker, mock provider, Codex provider, workflow parsing, workspace manager, hooks, SQLite event and issue-cache persistence, SSE run event streams, provider health, approvals, stop/retry, tracker status/health, issue refresh/cache, polling, reconciliation, and UI tracker controls.
+
+## Milestone 5 Planned Checkpoints
+
+1. Add shared review-artifact schemas for GitHub config, git repository state, changed files, diffs, PR summaries, commit status, check runs, workflow runs, snapshots, and GitHub event variants.
+2. Extend `WORKFLOW.md` config resolution with optional GitHub settings, token environment indirection, redacted summaries, pagination bounds, and write guards.
+3. Implement a local git inspector that works without GitHub credentials and handles non-git, clean, dirty, untracked, branch, diff, timeout, and failure cases.
+4. Implement a small GitHub REST client with injectable fetch, auth headers, pagination, rate-limit diagnostics, PR/status/check/workflow operations, and write guards.
+5. Build a review artifact service that combines local git inspection and optional GitHub API data into bounded `ReviewArtifactSnapshot` payloads and append-only events.
+6. Persist latest review snapshots in SQLite and expose daemon endpoints for GitHub status/health and run review artifact fetch/refresh.
+7. Refresh review artifacts after run completion/failure/cancel where possible and keep refresh failures non-fatal.
+8. Keep PR creation disabled by default; implement only if it stays safely user-triggered and gated.
+9. Update the UI with GitHub status, local git metadata, changed files, PR summaries, commit status, check runs, workflow runs, refresh controls, and optional gated PR creation state.
+10. Update README examples and keep root `WORKFLOW.md` mock/GitHub-disabled by default.
+11. Add deterministic tests that do not require GitHub, Linear, network, or real Codex credentials.
+12. Run full validation: `pnpm test`, `pnpm lint`, `pnpm build`, `git diff --check`, and `pnpm dev` smoke.
+
+## Milestone 5 Validation Commands
+
+- `pnpm --filter @symphonia/types test`
+- `pnpm --filter @symphonia/core test`
+- `pnpm --filter @symphonia/db test`
+- `pnpm --filter @symphonia/daemon test`
+- `pnpm test`
+- `pnpm lint`
+- `pnpm build`
+- `git diff --check`
+- `pnpm dev` smoke check
+
+## Milestone 5 External Dependency Notes
+
+- Real GitHub manual validation requires `GITHUB_TOKEN` or `GITHUB_PAT` with access to the configured repository.
+- Automated tests must not require GitHub credentials, Linear credentials, network access, or real Codex/OpenAI credentials.
+- Local git artifact collection should work without a GitHub token.
+- GitHub writes must remain disabled unless explicitly configured and user-triggered.
+- GitHub webhooks, OAuth, GitHub App installation flow, auto-merge, and auto-push are out of scope.
+
+## Milestone 5 Checkpoint Progress
+
+### Review Artifact Types, Config, and Core Client Slice
+
+- Added shared review artifact schemas and event variants for GitHub health, local git detection, git diffs, PR lookup, PR files, commit status, check runs, workflow runs, refresh snapshots, and GitHub errors.
+- Added optional `github` workflow config resolution with `token` env indirection, safe redacted summaries, default `read_only: true`, default `write.enabled: false`, owner/repo validation, pagination bounds, and write guard validation.
+- Kept root `WORKFLOW.md` untouched and safe in mock tracker mode.
+- Implemented a local git inspector using `git` argument arrays rather than shell strings. It handles non-git workspaces, clean repos, dirty files, untracked files, branch/head/base detection, merge base fallback, local diff summaries, bounded per-file patches, and credential redaction in remote URLs.
+- Implemented a small GitHub REST client with injectable `fetch`, repo health, PR lookup, PR files, compare summaries, combined commit status, check runs, workflow runs, rate-limit diagnostics, pagination, and guarded PR creation.
+- Implemented a review artifact refresh service that combines local git artifacts with optional GitHub API data and returns partial snapshots on GitHub failures instead of crashing.
+
+Validation so far:
+
+- `pnpm --filter @symphonia/types build` - passed.
+- `pnpm --filter @symphonia/types test` - passed; 9 tests.
+- `pnpm --filter @symphonia/core test` - passed; 79 tests.
+- `pnpm --filter @symphonia/core build` - passed.
+- `pnpm --filter @symphonia/db build` - passed.
+- `pnpm --filter @symphonia/db test` - passed; 5 tests.
+- `pnpm --filter @symphonia/daemon test` - passed; 18 tests.
+- `pnpm --filter @symphonia/web lint` - passed.
+
+### Daemon Persistence and UI Slice
+
+- Added SQLite persistence for latest review artifact snapshots by run, issue id, and issue identifier.
+- Added daemon GitHub status/health APIs and run/issue review artifact fetch/refresh APIs.
+- Wired review artifact refresh into the run lifecycle after workspace preparation and after provider completion/failure/cancel where a workspace exists.
+- Review artifact refresh emits append-only events and stores snapshots without replacing terminal provider status.
+- Manual review artifact refresh uses the same event stream and persistence path.
+- Added web client calls for GitHub status and review artifact fetch/refresh.
+- Added a GitHub status indicator and GitHub config/read-only/write status to the workflow panel.
+- Added a Review Artifacts section to run details with local git metadata, changed files, patch previews, PR metadata, combined status, check runs, workflow runs, and manual refresh.
+- PR creation remains deferred for Milestone 5 to keep the read-first artifact path stable; GitHub writes remain disabled by default.
+
+## Milestone 5 Final Status
+
+Milestone 5 is implemented and validated. Mock tracker mode remains the safe root `WORKFLOW.md` default. GitHub is optional, read-first, and disabled unless configured. GitHub writes and PR creation are deferred; no automatic push, PR creation, comments, reviewer requests, merge, or other GitHub mutations are performed.
+
+## Milestone 5 Implemented Files and Directories
+
+- `README.md`
+- `GOAL_PROGRESS.md`
+- `apps/daemon/src/daemon.ts`
+- `apps/daemon/test/http.test.ts`
+- `apps/web/components/issues-view.tsx`
+- `apps/web/lib/api.ts`
+- `packages/core/src/git-inspector.ts`
+- `packages/core/src/github-client.ts`
+- `packages/core/src/review-artifacts.ts`
+- `packages/core/src/workflow.ts`
+- `packages/core/src/index.ts`
+- `packages/core/test/git-inspector.test.ts`
+- `packages/core/test/github-client.test.ts`
+- `packages/core/test/review-artifacts.test.ts`
+- `packages/core/test/workflow.test.ts`
+- `packages/db/src/event-store.ts`
+- `packages/db/test/event-store.test.ts`
+- `packages/types/src/index.ts`
+- `packages/types/test/schemas.test.ts`
+
+## Milestone 5 Final Command Results
+
+- `pnpm --filter @symphonia/types build` - passed.
+- `pnpm --filter @symphonia/types test` - passed; 9 tests.
+- `pnpm --filter @symphonia/core test` - passed; 79 tests.
+- `pnpm --filter @symphonia/core build` - passed.
+- `pnpm --filter @symphonia/db build` - passed.
+- `pnpm --filter @symphonia/db test` - passed; 5 tests.
+- `pnpm --filter @symphonia/daemon test` - passed; 18 tests.
+- `pnpm --filter @symphonia/web lint` - passed.
+- `pnpm test` - passed; packages rebuilt and 111 total tests passed across types/core/db/daemon.
+- `pnpm lint` - passed.
+- `pnpm build` - passed. Next.js still prints the existing warning that the Next.js ESLint plugin was not detected.
+- `git diff --check` - passed.
+- `pnpm dev` smoke - passed on alternate ports with `SYMPHONIA_DAEMON_PORT=4110`, `PORT=3002`, and `NEXT_PUBLIC_DAEMON_URL=http://localhost:4110` after the default ports were already in use. Verified daemon health, web `/issues` HTTP 200, mock issues, mock run success, persisted events, and review artifact fetch/refresh endpoints.
+
+## Milestone 5 Fake and Local Validation Results
+
+- Fake GitHub REST client tests cover repo health, unauthorized/not found/rate-limit responses, pagination, PR lookup, PR files, compare summaries, combined commit status, check runs, workflow runs, and guarded PR creation.
+- Local git inspector tests cover non-git workspace, clean repo, modified file, untracked file, branch/head/base detection, and merge-base fallback.
+- Review artifact service tests cover local-only snapshots, missing-token local fallback, GitHub-backed snapshots, no PR found, and partial GitHub API failure.
+- Daemon tests cover GitHub status/health, persisted review artifacts, review artifact endpoints, mock/Linear/Codex regressions, stop/retry, approvals, and terminal Linear reconciliation.
+
+## Milestone 5 Real GitHub Validation Result
+
+Real GitHub read-only validation was performed because `GITHUB_TOKEN` was available in the environment. A temporary ignored workflow override enabled GitHub read-only mode for `agora-creations/symphonia`; the root `WORKFLOW.md` was not changed.
+
+- `GET /github/status` showed GitHub enabled with token configured and no secret exposed.
+- `GET /github/health` succeeded and returned safe rate-limit diagnostics.
+- A mock provider run succeeded with GitHub enabled.
+- Review artifact events recorded local git state, changed files, GitHub health, no matching PR for branch `milestone-5-github-review-artifacts`, combined commit status, zero check runs, zero workflow runs, and a persisted snapshot.
+- Manual `POST /runs/:runId/review-artifacts/refresh` succeeded.
+- No GitHub writes occurred; `read_only: true` and `write.enabled: false` remained active.
+
+## Milestone 5 How To Run
+
+Mock tracker mode:
+
+1. Keep root `WORKFLOW.md` as committed.
+2. Run `pnpm dev`.
+3. Open `http://localhost:3000/issues`.
+4. Start Mock or Codex runs from mock issue cards.
+
+Linear tracker mode:
+
+1. Export `LINEAR_API_KEY`.
+2. Use a local workflow override with `tracker.kind: linear`, `api_key: "$LINEAR_API_KEY"`, and a team/project filter.
+3. Run `SYMPHONIA_WORKFLOW_PATH=/absolute/path/to/linear.WORKFLOW.md pnpm dev`.
+4. Click Refresh issues, then start Mock or Codex runs from Linear cards.
+
+GitHub read-only review artifacts:
+
+1. Export `GITHUB_TOKEN` or `GITHUB_PAT`.
+2. Use a local workflow override with `github.enabled: true`, `github.token: "$GITHUB_TOKEN"`, owner/repo, and `read_only: true`.
+3. Run `SYMPHONIA_WORKFLOW_PATH=/absolute/path/to/github.WORKFLOW.md pnpm dev`.
+4. Start a run, open Run details, and inspect the Review Artifacts section.
+5. Click Refresh review artifacts to update local git and GitHub data.
+
+## Milestone 5 Known Limitations
+
+- PR creation is deferred. GitHub writes remain disabled by default and no user-triggered create-PR UI is shipped in Milestone 5.
+- Auto-push, auto-merge, GitHub comments, reviewer requests, GitHub OAuth, GitHub App installation flow, and GitHub webhooks are not implemented.
+- Claude Code provider is still not implemented.
+- Cursor provider is still not implemented.
+- Real GitHub validation depends on token/repo access.
+- CI/check/workflow visibility depends on GitHub data existing for the branch or head SHA.
+- Large diffs are bounded and may be truncated.
+- Linear OAuth and Linear webhooks remain unimplemented.
+- Daemon restart reconstruction of active runs and approvals is still incomplete.
+- Workspace cleanup remains manual.
+- Advanced blocker/dependency handling remains partial.
+
+## Recommended Next Milestone
+
+Milestone 6 - Add Claude Code and Cursor provider adapters using the established provider interface.
+
 ## Milestone 4 Objective
 
 Add Linear as the first real tracker while preserving mock tracker support, the mock provider, Codex provider, `WORKFLOW.md` runtime, workspace lifecycle, hooks, SQLite/SSE event flow, and UI controls. A user should be able to configure `tracker.kind: linear` with `api_key: "$LINEAR_API_KEY"`, fetch real Linear issues into the board through the daemon, start Mock or Codex runs from those issue cards, reconcile issue state changes through polling, and keep local mock mode safe by default.

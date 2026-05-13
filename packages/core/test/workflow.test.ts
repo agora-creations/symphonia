@@ -107,6 +107,8 @@ describe("workflow config resolution", () => {
     expect(config.provider).toBe("mock");
     expect(config.tracker.kind).toBe("mock");
     expect(config.tracker.apiKey).toBeNull();
+    expect(config.github.enabled).toBe(false);
+    expect(config.github.token).toBeNull();
     expect(config.polling.intervalMs).toBe(30000);
     expect(config.agent.maxConcurrentAgents).toBe(10);
     expect(config.codex.command).toBe("codex app-server");
@@ -255,6 +257,87 @@ describe("workflow config resolution", () => {
     ).toThrow("tracker.max_pages must be between");
   });
 
+  it("resolves optional github config with redacted token summary", () => {
+    process.env.SYMPHONIA_TEST_GITHUB_TOKEN = "github-secret";
+
+    const config = resolveWorkflowConfig(
+      definition({
+        tracker: { kind: "mock" },
+        github: {
+          enabled: true,
+          endpoint: "https://api.github.com",
+          token: "$SYMPHONIA_TEST_GITHUB_TOKEN",
+          owner: "agora-creations",
+          repo: "symphonia",
+          default_base_branch: "main",
+          remote_name: "origin",
+          read_only: true,
+          page_size: 25,
+          max_pages: 2,
+          write: { enabled: false },
+        },
+      }),
+    );
+
+    expect(config.github.enabled).toBe(true);
+    expect(config.github.token).toBe("github-secret");
+    expect(config.github.owner).toBe("agora-creations");
+    expect(config.github.repo).toBe("symphonia");
+    expect(config.github.write.enabled).toBe(false);
+
+    const summary = summarizeWorkflowConfig(config);
+    expect(summary.github.tokenConfigured).toBe(true);
+    expect(summary.github.owner).toBe("agora-creations");
+    expect(JSON.stringify(summary)).not.toContain("github-secret");
+    expect(JSON.stringify(summary)).not.toContain("token\":\"");
+  });
+
+  it("allows github enabled without token for local-only artifacts", () => {
+    const config = resolveWorkflowConfig(
+      definition({
+        tracker: { kind: "mock" },
+        github: {
+          enabled: true,
+          owner: "agora-creations",
+          repo: "symphonia",
+        },
+      }),
+    );
+
+    expect(config.github.enabled).toBe(true);
+    expect(config.github.token).toBeNull();
+  });
+
+  it("validates github repository, pagination, and write guards", () => {
+    expect(() =>
+      resolveWorkflowConfig(definition({ tracker: { kind: "mock" }, github: { enabled: true, owner: "agora-creations" } })),
+    ).toThrow("github.owner and github.repo are required");
+    expect(() =>
+      resolveWorkflowConfig(
+        definition({ tracker: { kind: "mock" }, github: { enabled: true, owner: "agora-creations", repo: "symphonia", page_size: 0 } }),
+      ),
+    ).toThrow("github.page_size must be between");
+    expect(() =>
+      resolveWorkflowConfig(
+        definition({ tracker: { kind: "mock" }, github: { enabled: true, owner: "agora-creations", repo: "symphonia", max_pages: 0 } }),
+      ),
+    ).toThrow("github.max_pages must be between");
+    expect(() =>
+      resolveWorkflowConfig(
+        definition({
+          tracker: { kind: "mock" },
+          github: {
+            enabled: true,
+            owner: "agora-creations",
+            repo: "symphonia",
+            read_only: false,
+            write: { enabled: false, allow_create_pr: true },
+          },
+        }),
+      ),
+    ).toThrow("GitHub write options require github.write.enabled");
+  });
+
   it("fails invalid positive numeric settings", () => {
     expect(() =>
       resolveWorkflowConfig(definition({ tracker: { kind: "mock" }, hooks: { timeout_ms: 0 } })),
@@ -290,6 +373,20 @@ describe("prompt rendering", () => {
     hookTimeoutMs: 30000,
     codexCommand: "codex app-server",
     codexModel: null,
+    github: {
+      enabled: false,
+      endpoint: "https://api.github.com",
+      owner: null,
+      repo: null,
+      defaultBaseBranch: "main",
+      remoteName: "origin",
+      readOnly: true,
+      writeEnabled: false,
+      allowCreatePr: false,
+      tokenConfigured: false,
+      pageSize: 50,
+      maxPages: 3,
+    },
   };
 
   it("renders issue fields, labels, and attempt", () => {

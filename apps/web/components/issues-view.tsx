@@ -10,11 +10,13 @@ import { IssueStatusIcon } from "@/components/icons/issue-status-icons";
 import { PriorityIcon } from "@/components/icons/status-icons";
 import { UserAvatar } from "@/components/avatar-stack";
 import { cn } from "@/lib/utils";
-import { ExternalLink, Filter, Plus, RefreshCw, SlidersHorizontal, LayoutGrid, List, X } from "lucide-react";
+import { CheckCircle2, ExternalLink, FileDiff, Filter, GitBranch, GitPullRequest, LayoutGrid, List, Plus, RefreshCw, SlidersHorizontal, X } from "lucide-react";
 import {
   DAEMON_URL,
+  getGithubStatus,
   getIssues,
   getProviders,
+  getReviewArtifacts,
   getRunApprovals,
   getRunEvents,
   getRunPrompt,
@@ -22,6 +24,7 @@ import {
   getTrackerStatus,
   getWorkspace,
   getWorkflowStatus,
+  refreshReviewArtifacts,
   refreshIssues,
   reloadWorkflow,
   respondApproval,
@@ -38,8 +41,10 @@ import {
   type Issue as DaemonIssue,
   type IssuePriority,
   type IssueState,
+  type GitHubStatus,
   type ProviderHealth,
   type ProviderId,
+  type ReviewArtifactSnapshot,
   type Run,
   type RunStatus,
   type TrackerStatus,
@@ -186,12 +191,15 @@ export function IssuesView() {
   const [selectedEvents, setSelectedEvents] = useState<AgentEvent[]>([]);
   const [selectedPrompt, setSelectedPrompt] = useState<string | null>(null);
   const [selectedWorkspace, setSelectedWorkspace] = useState<WorkspaceInfo | null>(null);
+  const [selectedReviewArtifacts, setSelectedReviewArtifacts] = useState<ReviewArtifactSnapshot | null>(null);
   const [selectedApprovals, setSelectedApprovals] = useState<ApprovalState[]>([]);
   const [providers, setProviders] = useState<ProviderHealth[]>([]);
   const [selectedProvider, setSelectedProvider] = useState<ProviderId>("mock");
   const [workflow, setWorkflow] = useState<WorkflowStatus | null>(null);
   const [trackerStatus, setTrackerStatus] = useState<TrackerStatus | null>(null);
+  const [githubStatus, setGithubStatus] = useState<GitHubStatus | null>(null);
   const [refreshingIssues, setRefreshingIssues] = useState(false);
+  const [refreshingReviewArtifacts, setRefreshingReviewArtifacts] = useState(false);
   const [workflowOpen, setWorkflowOpen] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const sourcesRef = useRef<Map<string, EventSource>>(new Map());
@@ -228,6 +236,10 @@ export function IssuesView() {
 
       if (event.type === "workspace.ready") {
         setSelectedWorkspace(event.workspace);
+      }
+
+      if (event.type === "github.review_artifacts.refreshed") {
+        setSelectedReviewArtifacts(event.snapshot);
       }
 
       if (event.type === "approval.requested") {
@@ -299,11 +311,12 @@ export function IssuesView() {
     const sources = sourcesRef.current;
 
     async function loadIssues() {
-      const [loadedIssues, loadedRuns, loadedProviders, loadedWorkflow] = await Promise.all([
+      const [loadedIssues, loadedRuns, loadedProviders, loadedWorkflow, loadedGithubStatus] = await Promise.all([
         getIssues(),
         getRuns(),
         getProviders(),
         getWorkflowStatus(),
+        getGithubStatus().catch(() => null),
       ]);
       const loadedTrackerStatus = await getTrackerStatus();
       if (!alive) return;
@@ -311,6 +324,7 @@ export function IssuesView() {
       setProviders(loadedProviders);
       setWorkflow(loadedWorkflow);
       setTrackerStatus(loadedTrackerStatus);
+      setGithubStatus(loadedGithubStatus);
       const defaultProvider = loadedWorkflow.effectiveConfigSummary?.defaultProvider;
       if (defaultProvider === "mock" || defaultProvider === "codex") {
         setSelectedProvider((current) => current ?? defaultProvider);
@@ -335,6 +349,7 @@ export function IssuesView() {
       setSelectedEvents([]);
       setSelectedPrompt(null);
       setSelectedWorkspace(null);
+      setSelectedReviewArtifacts(null);
       setSelectedApprovals([]);
       return;
     }
@@ -345,12 +360,14 @@ export function IssuesView() {
       getRunPrompt(selectedRunId),
       selectedIssueKey ? getWorkspace(selectedIssueKey) : Promise.resolve(null),
       getRunApprovals(selectedRunId),
+      getReviewArtifacts(selectedRunId),
     ])
-      .then(([events, prompt, workspace, approvals]) => {
+      .then(([events, prompt, workspace, approvals, reviewArtifacts]) => {
         setSelectedEvents(events);
         setSelectedPrompt(prompt);
         setSelectedWorkspace(workspace);
         setSelectedApprovals(approvals);
+        setSelectedReviewArtifacts(reviewArtifacts);
       })
       .catch((caught) => {
         setDetailError(caught instanceof Error ? caught.message : "Failed to load run events.");
@@ -364,6 +381,7 @@ export function IssuesView() {
     setSelectedEvents([]);
     setSelectedPrompt(null);
     setSelectedWorkspace(null);
+    setSelectedReviewArtifacts(null);
     setSelectedApprovals([]);
     setDetailError(null);
   }, []);
@@ -374,6 +392,7 @@ export function IssuesView() {
     setSelectedEvents([]);
     setSelectedPrompt(null);
     setSelectedWorkspace(null);
+    setSelectedReviewArtifacts(null);
     setSelectedApprovals([]);
     setDetailError(null);
   }, []);
@@ -389,6 +408,7 @@ export function IssuesView() {
         setSelectedEvents([]);
         setSelectedPrompt(null);
         setSelectedWorkspace(null);
+        setSelectedReviewArtifacts(null);
         setSelectedApprovals([]);
         subscribeRun(run.id);
       } catch (caught) {
@@ -420,6 +440,7 @@ export function IssuesView() {
         setSelectedEvents([]);
         setSelectedPrompt(null);
         setSelectedWorkspace(null);
+        setSelectedReviewArtifacts(null);
         setSelectedApprovals([]);
         subscribeRun(nextRun.id);
       } catch (caught) {
@@ -435,6 +456,7 @@ export function IssuesView() {
       setWorkflow(await reloadWorkflow());
       setProviders(await getProviders());
       setTrackerStatus(await getTrackerStatus());
+      setGithubStatus(await getGithubStatus().catch(() => null));
     } catch (caught) {
       setDetailError(caught instanceof Error ? caught.message : "Failed to reload workflow.");
     }
@@ -447,11 +469,25 @@ export function IssuesView() {
       const [loadedIssues, loadedRuns] = await Promise.all([refreshIssues(), getRuns()]);
       setAllIssues(mapDaemonIssues(loadedIssues, loadedRuns));
       setTrackerStatus(await getTrackerStatus());
+      setGithubStatus(await getGithubStatus().catch(() => null));
     } catch (caught) {
       setDetailError(caught instanceof Error ? caught.message : "Failed to refresh issues.");
       setTrackerStatus(await getTrackerStatus().catch(() => null));
     } finally {
       setRefreshingIssues(false);
+    }
+  }, []);
+
+  const handleRefreshReviewArtifacts = useCallback(async (run: Run) => {
+    try {
+      setRefreshingReviewArtifacts(true);
+      setDetailError(null);
+      setSelectedReviewArtifacts(await refreshReviewArtifacts(run.id));
+      setGithubStatus(await getGithubStatus().catch(() => null));
+    } catch (caught) {
+      setDetailError(caught instanceof Error ? caught.message : "Failed to refresh review artifacts.");
+    } finally {
+      setRefreshingReviewArtifacts(false);
     }
   }, []);
 
@@ -508,6 +544,9 @@ export function IssuesView() {
           </span>
           <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", trackerStatusClass(trackerStatus?.status))}>
             Tracker {trackerStatus ? `${trackerStatus.kind} ${trackerStatus.status.replaceAll("_", " ")}` : "unknown"}
+          </span>
+          <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", githubStatusClass(githubStatus?.status))}>
+            GitHub {githubStatus ? githubStatus.status.replaceAll("_", " ") : "unknown"}
           </span>
           <span className="rounded-full border px-2 py-0.5 text-[11px]">
             Codex {providerLabel(providers.find((provider) => provider.id === "codex"))}
@@ -599,6 +638,7 @@ export function IssuesView() {
 
       {workflowOpen && (
         <WorkflowPanel
+          githubStatus={githubStatus}
           onReload={handleWorkflowReload}
           providers={providers}
           trackerStatus={trackerStatus}
@@ -615,9 +655,12 @@ export function IssuesView() {
           onClose={closeDetails}
           onRespondApproval={handleApprovalResponse}
           onRetry={handleRetry}
+          onRefreshReviewArtifacts={handleRefreshReviewArtifacts}
           onStart={handleStart}
           onStop={handleStop}
           prompt={selectedPrompt}
+          refreshingReviewArtifacts={refreshingReviewArtifacts}
+          reviewArtifacts={selectedReviewArtifacts}
           run={selectedRun}
           selectedProvider={selectedProvider}
           workspace={selectedWorkspace}
@@ -683,9 +726,12 @@ function RunDetailsCard({
   onClose,
   onRespondApproval,
   onRetry,
+  onRefreshReviewArtifacts,
   onStart,
   onStop,
   prompt,
+  refreshingReviewArtifacts,
+  reviewArtifacts,
   run,
   selectedProvider,
   workspace,
@@ -697,9 +743,12 @@ function RunDetailsCard({
   onClose: () => void;
   onRespondApproval: (approval: ApprovalState, decision: ApprovalDecision) => Promise<void>;
   onRetry: (run: Run) => Promise<void>;
+  onRefreshReviewArtifacts: (run: Run) => Promise<void>;
   onStart: (issue: Issue) => Promise<void>;
   onStop: (run: Run) => Promise<void>;
   prompt: string | null;
+  refreshingReviewArtifacts: boolean;
+  reviewArtifacts: ReviewArtifactSnapshot | null;
   run?: Run | null;
   selectedProvider: ProviderId;
   workspace: WorkspaceInfo | null;
@@ -834,6 +883,13 @@ function RunDetailsCard({
             </p>
           )}
 
+          <ReviewArtifactsPanel
+            onRefresh={onRefreshReviewArtifacts}
+            refreshing={refreshingReviewArtifacts}
+            reviewArtifacts={reviewArtifacts}
+            run={run ?? null}
+          />
+
           {pendingApprovals.length > 0 && (
             <section aria-labelledby="approvals-heading" className="mt-6">
               <h3 id="approvals-heading" className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
@@ -893,6 +949,193 @@ function RunDetailsCard({
   );
 }
 
+function ReviewArtifactsPanel({
+  onRefresh,
+  refreshing,
+  reviewArtifacts,
+  run,
+}: {
+  onRefresh: (run: Run) => Promise<void>;
+  refreshing: boolean;
+  reviewArtifacts: ReviewArtifactSnapshot | null;
+  run: Run | null;
+}) {
+  const git = reviewArtifacts?.git;
+  const pr = reviewArtifacts?.pr;
+  const files = reviewArtifacts?.diff.files ?? [];
+
+  return (
+    <section aria-labelledby="review-artifacts-heading" className="mt-6">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h3 id="review-artifacts-heading" className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+          Review artifacts
+        </h3>
+        <button
+          type="button"
+          onClick={() => run && void onRefresh(run)}
+          disabled={!run || refreshing}
+          className="inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} />
+          Refresh review artifacts
+        </button>
+      </div>
+
+      {!run ? (
+        <p className="mt-3 rounded-md border p-3 text-sm text-muted-foreground">Start a run to collect local git and GitHub review artifacts.</p>
+      ) : !reviewArtifacts ? (
+        <p className="mt-3 rounded-md border p-3 text-sm text-muted-foreground">No review artifacts have been collected yet.</p>
+      ) : (
+        <div className="mt-3 space-y-3">
+          {reviewArtifacts.error && (
+            <p role="alert" className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
+              {reviewArtifacts.error}
+            </p>
+          )}
+
+          <dl className="grid gap-3 text-sm sm:grid-cols-2">
+            <div className="rounded-md border p-3">
+              <dt className="flex items-center gap-1.5 text-muted-foreground">
+                <GitBranch className="h-3.5 w-3.5" /> Branch
+              </dt>
+              <dd className="mt-1 break-all font-medium">{git?.currentBranch ?? "No branch"}</dd>
+              <dd className="mt-1 text-xs text-muted-foreground">
+                base {git?.baseBranch ?? "unknown"} · head {shortSha(git?.headSha)}
+              </dd>
+            </div>
+            <div className="rounded-md border p-3">
+              <dt className="flex items-center gap-1.5 text-muted-foreground">
+                <FileDiff className="h-3.5 w-3.5" /> Local changes
+              </dt>
+              <dd className="mt-1 font-medium">
+                {git?.isGitRepo ? `${reviewArtifacts.diff.filesChanged} files, +${reviewArtifacts.diff.additions} -${reviewArtifacts.diff.deletions}` : "Workspace is not a git repo"}
+              </dd>
+              <dd className="mt-1 text-xs text-muted-foreground">
+                {git?.isDirty ? "dirty" : "clean"} · untracked {git?.untrackedFileCount ?? 0} · staged {git?.stagedFileCount ?? 0}
+              </dd>
+            </div>
+            <div className="rounded-md border p-3">
+              <dt className="flex items-center gap-1.5 text-muted-foreground">
+                <GitPullRequest className="h-3.5 w-3.5" /> Pull request
+              </dt>
+              <dd className="mt-1 font-medium">
+                {pr ? (
+                  <a href={pr.url} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hover:underline" aria-label={`Open pull request ${pr.number} on GitHub`}>
+                    #{pr.number} {pr.title}
+                    <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+                  </a>
+                ) : (
+                  "No PR found"
+                )}
+              </dd>
+              {pr && (
+                <dd className="mt-1 text-xs text-muted-foreground">
+                  {pr.state} · {pr.draft ? "draft" : "ready"} · {pr.headBranch} → {pr.baseBranch}
+                </dd>
+              )}
+            </div>
+            <div className="rounded-md border p-3">
+              <dt className="flex items-center gap-1.5 text-muted-foreground">
+                <CheckCircle2 className="h-3.5 w-3.5" /> CI status
+              </dt>
+              <dd className="mt-1 font-medium">{reviewArtifacts.commitStatus?.state ?? "No combined status"}</dd>
+              <dd className="mt-1 text-xs text-muted-foreground">
+                {reviewArtifacts.checks.length} check runs · {reviewArtifacts.workflowRuns.length} workflow runs
+              </dd>
+            </div>
+          </dl>
+
+          <div className="rounded-md border">
+            <div className="flex items-center justify-between border-b px-3 py-2">
+              <h4 className="text-sm font-medium">Changed files</h4>
+              <span className="text-xs text-muted-foreground">{files.length}</span>
+            </div>
+            {files.length === 0 ? (
+              <p className="p-3 text-sm text-muted-foreground">No changed files were reported.</p>
+            ) : (
+              <ul className="divide-y">
+                {files.slice(0, 30).map((file) => (
+                  <li key={`${file.source}-${file.path}`} className="p-3">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="break-all text-sm font-medium">{file.path}</span>
+                      <span className="text-xs text-muted-foreground">
+                        {file.source} · {file.status} · +{file.additions} -{file.deletions}
+                      </span>
+                    </div>
+                    {file.patch && (
+                      <details className="mt-2 rounded-md border bg-background p-2">
+                        <summary className="cursor-pointer text-xs font-medium">Patch preview</summary>
+                        <pre className="mt-2 max-h-52 overflow-auto whitespace-pre-wrap text-xs text-muted-foreground">{file.patch}</pre>
+                      </details>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          {(reviewArtifacts.checks.length > 0 ||
+            reviewArtifacts.workflowRuns.length > 0 ||
+            (reviewArtifacts.commitStatus?.statuses.length ?? 0) > 0) && (
+            <div className="grid gap-3 md:grid-cols-2">
+              <ArtifactStatusList
+                title="Check runs"
+                items={reviewArtifacts.checks.map((check) => ({
+                  key: String(check.id),
+                  label: check.name,
+                  status: [check.status, check.conclusion].filter(Boolean).join(" / ") || "unknown",
+                  url: check.url ?? check.detailsUrl,
+                }))}
+              />
+              <ArtifactStatusList
+                title="Workflow runs"
+                items={reviewArtifacts.workflowRuns.map((workflowRun) => ({
+                  key: String(workflowRun.id),
+                  label: workflowRun.name,
+                  status: [workflowRun.status, workflowRun.conclusion].filter(Boolean).join(" / ") || "unknown",
+                  url: workflowRun.url,
+                }))}
+              />
+            </div>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function ArtifactStatusList({
+  items,
+  title,
+}: {
+  items: Array<{ key: string; label: string; status: string; url: string | null }>;
+  title: string;
+}) {
+  return (
+    <div className="rounded-md border">
+      <h4 className="border-b px-3 py-2 text-sm font-medium">{title}</h4>
+      {items.length === 0 ? (
+        <p className="p-3 text-sm text-muted-foreground">No entries.</p>
+      ) : (
+        <ul className="divide-y">
+          {items.map((item) => (
+            <li key={item.key} className="flex items-center justify-between gap-3 p-3 text-sm">
+              <span className="min-w-0 truncate">{item.label}</span>
+              {item.url ? (
+                <a href={item.url} target="_blank" rel="noreferrer" className="shrink-0 text-xs text-muted-foreground hover:text-foreground" aria-label={`Open ${item.label}`}>
+                  {item.status}
+                </a>
+              ) : (
+                <span className="shrink-0 text-xs text-muted-foreground">{item.status}</span>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
+  );
+}
+
 function RunStatusBadge({ status }: { status: RunStatus }) {
   return (
     <span
@@ -907,11 +1150,13 @@ function RunStatusBadge({ status }: { status: RunStatus }) {
 }
 
 function WorkflowPanel({
+  githubStatus,
   onReload,
   providers,
   trackerStatus,
   workflow,
 }: {
+  githubStatus: GitHubStatus | null;
   onReload: () => Promise<void>;
   providers: ProviderHealth[];
   trackerStatus: TrackerStatus | null;
@@ -955,6 +1200,24 @@ function WorkflowPanel({
         <div className="rounded-md border bg-background p-2">
           <dt className="text-muted-foreground">Codex</dt>
           <dd className="mt-1 font-medium">{codex ? providerLabel(codex) : "unknown"}</dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">GitHub</dt>
+          <dd className="mt-1 font-medium">{githubStatus ? `${githubStatus.enabled ? "enabled" : "disabled"} ${githubStatus.status.replaceAll("_", " ")}` : "unknown"}</dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">GitHub repo</dt>
+          <dd className="mt-1 break-all font-medium">
+            {summary?.github?.owner && summary.github.repo ? `${summary.github.owner}/${summary.github.repo}` : "Not configured"}
+          </dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">GitHub token</dt>
+          <dd className="mt-1 font-medium">{summary?.github?.tokenConfigured ? "configured" : "not configured"}</dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">GitHub writes</dt>
+          <dd className="mt-1 font-medium">{summary?.github ? (summary.github.readOnly || !summary.github.writeEnabled ? "disabled" : "enabled") : "disabled"}</dd>
         </div>
         <div className="rounded-md border bg-background p-2">
           <dt className="text-muted-foreground">Tracker</dt>
@@ -1009,6 +1272,11 @@ function WorkflowPanel({
       {trackerStatus?.error && (
         <p role="alert" className="mt-3 rounded-md border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-600 dark:text-red-300">
           {trackerStatus.error}
+        </p>
+      )}
+      {githubStatus?.error && (
+        <p role="alert" className="mt-3 rounded-md border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-600 dark:text-red-300">
+          {githubStatus.error}
         </p>
       )}
       {summary?.trackerKind === "linear" && trackerStatus?.status === "invalid_config" && (
@@ -1156,6 +1424,32 @@ function eventLabel(event: AgentEvent) {
       return `Tracker sync ${event.status}`;
     case "tracker.reconciled":
       return "Tracker reconciled";
+    case "github.health.checked":
+      return "GitHub health checked";
+    case "github.repo.detected":
+      return "Git repository detected";
+    case "git.status.checked":
+      return "Git status checked";
+    case "git.diff.generated":
+      return "Git diff generated";
+    case "github.pr.found":
+      return "GitHub PR found";
+    case "github.pr.not_found":
+      return "GitHub PR not found";
+    case "github.pr.created":
+      return "GitHub PR created";
+    case "github.pr.files.fetched":
+      return "GitHub PR files fetched";
+    case "github.status.fetched":
+      return "GitHub status fetched";
+    case "github.checks.fetched":
+      return "GitHub checks fetched";
+    case "github.workflow_runs.fetched":
+      return "GitHub workflow runs fetched";
+    case "github.review_artifacts.refreshed":
+      return "Review artifacts refreshed";
+    case "github.error":
+      return "GitHub error";
     case "codex.thread.started":
       return "Codex thread started";
     case "codex.turn.started":
@@ -1219,6 +1513,30 @@ function eventSummary(event: AgentEvent) {
       return event.error ?? event.message ?? `${event.tracker} sync ${event.status}${event.issueCount === undefined ? "" : ` (${event.issueCount} issues)`}.`;
     case "tracker.reconciled":
       return `${event.identifier}: ${event.previousState ?? "unknown"} -> ${event.currentState}\n${event.message}`;
+    case "github.health.checked":
+      return event.error ?? event.message ?? event.status;
+    case "github.repo.detected":
+    case "git.status.checked":
+      return `${event.git.isGitRepo ? "git repo" : "not a git repo"}\n${event.git.currentBranch ?? "no branch"}\n${event.git.workspacePath}`;
+    case "git.diff.generated":
+      return `${event.diff.filesChanged} files changed, +${event.diff.additions} -${event.diff.deletions}.`;
+    case "github.pr.found":
+    case "github.pr.created":
+      return `#${event.pr.number} ${event.pr.title}\n${event.pr.url}`;
+    case "github.pr.not_found":
+      return event.message;
+    case "github.pr.files.fetched":
+      return `${event.fileCount} PR files fetched.`;
+    case "github.status.fetched":
+      return `${event.commitStatus.state} (${event.commitStatus.totalCount} statuses).`;
+    case "github.checks.fetched":
+      return `${event.checkCount} check runs fetched.`;
+    case "github.workflow_runs.fetched":
+      return `${event.workflowRunCount} workflow runs fetched.`;
+    case "github.review_artifacts.refreshed":
+      return `${event.snapshot.diff.filesChanged} changed files. Last refreshed ${formatTime(event.snapshot.lastRefreshedAt)}.`;
+    case "github.error":
+      return `${event.operation}: ${event.message}`;
     case "codex.thread.started":
       return [`thread ${event.threadId}`, event.model ? `model ${event.model}` : null, event.cwd ? `cwd ${event.cwd}` : null]
         .filter(Boolean)
@@ -1293,6 +1611,22 @@ function trackerStatusClass(status?: TrackerStatus["status"]) {
   }
 }
 
+function githubStatusClass(status?: GitHubStatus["status"]) {
+  switch (status) {
+    case "healthy":
+      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300";
+    case "stale":
+    case "unknown":
+      return "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300";
+    case "invalid_config":
+    case "unavailable":
+      return "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300";
+    case "disabled":
+    default:
+      return "border-border bg-muted/60 text-muted-foreground";
+  }
+}
+
 function trackerScopeSummary(summary: WorkflowStatus["effectiveConfigSummary"] | undefined) {
   if (!summary) return "Unavailable";
   const scopes = [
@@ -1333,6 +1667,10 @@ function extractCodexMetadata(events: AgentEvent[]): { threadId: string | null; 
     }
   }
   return { threadId, turnId };
+}
+
+function shortSha(sha: string | null | undefined) {
+  return sha ? sha.slice(0, 7) : "unknown";
 }
 
 function formatTime(timestamp: string) {

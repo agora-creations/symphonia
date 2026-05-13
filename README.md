@@ -1,14 +1,14 @@
 # Symphonia
 
-Symphonia is a local-first visual orchestration prototype for coding-agent work. It is a Linear-like control plane for fetching tracker issues, starting Mock or Codex runs, watching timelines, stopping/retrying work, and reconciling active runs against repo-owned workflow configuration.
+Symphonia is a local-first visual orchestration prototype for coding-agent work. It is a Linear-like control plane for fetching tracker issues, starting Mock or Codex runs, watching timelines, stopping/retrying work, reconciling active runs against repo-owned workflow configuration, and inspecting review artifacts from local git and GitHub.
 
-Milestone 4 keeps the mock tracker, mock provider, `WORKFLOW.md` runtime, workspaces, hooks, SQLite/SSE event flow, and Codex provider stable, then adds a real read-only Linear tracker adapter. Users can keep running local mock demos, or configure Linear in `WORKFLOW.md`, refresh real Linear issues into the board, start Mock or Codex runs from Linear issue cards, and let polling stop active runs when Linear state becomes terminal or inactive.
+Milestone 5 keeps the mock tracker, Linear tracker, mock provider, `WORKFLOW.md` runtime, workspaces, hooks, SQLite/SSE event flow, approvals, stop/retry, and Codex provider stable, then adds read-first GitHub PR/CI review artifacts. Users can keep running without GitHub credentials, or configure GitHub in `WORKFLOW.md` to inspect repository health, branch metadata, changed files, PR links, PR files, combined commit status, check runs, and workflow runs from the run detail view.
 
-This prototype still does not integrate GitHub PR/CI, Claude Code, Cursor, Linear OAuth, Linear webhooks, auth, billing, cloud tenancy, Electron, or Tauri.
+This prototype still does not integrate Claude Code, Cursor, GitHub OAuth, GitHub App installation flow, GitHub webhooks, auto-push, auto-merge, Linear OAuth, Linear webhooks, auth, billing, cloud tenancy, Electron, or Tauri. GitHub writes and PR creation are disabled by default; PR creation is deferred to keep Milestone 5 read-first and safe.
 
 Reference: the Codex app-server integration follows the official OpenAI developer docs at <https://developers.openai.com/codex/app-server/>.
 
-## What Milestone 4 Includes
+## What Milestone 5 Includes
 
 - The Milestone 1 mock tracker/provider loop remains available for tests and demos.
 - The Milestone 2 `WORKFLOW.md` parser, config resolver, prompt renderer, workspace manager, and hook runner remain in the run lifecycle.
@@ -27,6 +27,13 @@ Reference: the Codex app-server integration follows the official OpenAI develope
 - SQLite append-only persistence for workflow, workspace, prompt, hook, mock, and Codex events.
 - Fake app-server tests, so automated validation does not require real Codex, network access, or OpenAI credentials.
 - Fake Linear tests, so automated validation does not require Linear credentials, network access, or a real Linear workspace.
+- Optional GitHub workflow config with token environment indirection and redacted summaries.
+- Local git inspector that works without GitHub credentials and reports repo state, branch, base/head SHAs, dirty state, changed files, untracked files, diff stats, and bounded patch previews.
+- Small GitHub REST client with fake-fetch tests for repo health, PR lookup, PR files, compare summaries, combined commit status, check runs, workflow runs, pagination, rate-limit diagnostics, and guarded PR creation.
+- Review artifact snapshots persisted in SQLite and replayed through the existing run event timeline.
+- Daemon APIs for GitHub status/health and review artifact fetch/refresh.
+- UI GitHub status plus a run detail Review Artifacts section for local git state, changed files, PR metadata, commit status, check runs, workflow runs, and manual refresh.
+- GitHub writes remain disabled by default. Automatic PR creation, pushing, commenting, and merging are not part of the read-first Milestone 5 path.
 
 ## Install
 
@@ -62,6 +69,7 @@ Useful daemon environment variables:
 - `SYMPHONIA_PROVIDER`: `mock` or `codex`; overrides workflow default provider.
 - `SYMPHONIA_CODEX_COMMAND`: Codex app-server command, defaults to `codex app-server`.
 - `LINEAR_API_KEY`: Linear personal API key used when `tracker.kind: linear` and `tracker.api_key: "$LINEAR_API_KEY"` are configured.
+- `GITHUB_TOKEN` or `GITHUB_PAT`: GitHub token used when `github.enabled: true` and `github.token: "$GITHUB_TOKEN"` or `"$GITHUB_PAT"` are configured. Local git review artifacts work without a token.
 
 ## Validate
 
@@ -101,12 +109,13 @@ Supported config groups:
 - `hooks`: `after_create`, `before_run`, `after_run`, `before_remove`, `timeout_ms`.
 - `agent`: `max_concurrent_agents`, `max_turns`, `max_retry_backoff_ms`, `max_concurrent_agents_by_state`.
 - `codex`: `command`, `model`, `approval_policy`, `thread_sandbox`, `turn_sandbox_policy`, `turn_timeout_ms`, `read_timeout_ms`, `stall_timeout_ms`.
+- `github`: `enabled`, `endpoint`, `token`, `owner`, `repo`, `default_base_branch`, `remote_name`, `read_only`, `page_size`, `max_pages`, and `write`.
 
 `workspace.root` supports `~`, `$VAR` or `${VAR}`, and relative paths. Relative paths resolve from the `WORKFLOW.md` directory. The effective root is always absolute.
 
 `tracker.kind: mock` runs without credentials. `tracker.kind: linear` requires an API key after environment-variable resolution and at least one practical scope filter: `team_key`, `team_id`, `project_slug`, `project_id`, or `allow_workspace_wide: true`.
 
-Workflow config responses are summaries and never expose `api_key` or resolved secrets.
+Workflow config responses are summaries and never expose `api_key`, GitHub `token`, or resolved secrets.
 
 ## Linear Tracker
 
@@ -212,6 +221,73 @@ Linear troubleshooting:
 - Stale issue cache: click Refresh issues or inspect `GET /tracker/status` for `lastSyncAt` and `error`.
 - Codex provider with Linear issue: confirm local Codex health, then start the run from the Linear card with provider `Codex`.
 
+## GitHub Review Artifacts
+
+The root `WORKFLOW.md` keeps GitHub disabled for safe local development and CI. Local git artifact collection still runs without GitHub credentials. Configure GitHub only when you want repository health, existing PR metadata, PR files, combined commit status, check runs, and workflow runs.
+
+Read-only GitHub example:
+
+```yaml
+github:
+  enabled: true
+  endpoint: "https://api.github.com"
+  token: "$GITHUB_TOKEN"
+  owner: "agora-creations"
+  repo: "symphonia"
+  default_base_branch: "main"
+  remote_name: "origin"
+  read_only: true
+  page_size: 50
+  max_pages: 3
+  write:
+    enabled: false
+```
+
+Optional PR creation config is recognized by the schema, but PR creation is deferred in Milestone 5. Keep these disabled until a later milestone adds a user-triggered create-PR flow:
+
+```yaml
+github:
+  enabled: true
+  token: "$GITHUB_TOKEN"
+  owner: "agora-creations"
+  repo: "symphonia"
+  default_base_branch: "main"
+  read_only: true
+  write:
+    enabled: false
+    allow_create_pr: false
+```
+
+GitHub behavior:
+
+- The frontend never calls GitHub directly. It only calls the local daemon.
+- `GET /github/status` returns enabled/disabled state, safe config summary, last health check, last artifact refresh, and the last error.
+- `GET /github/health` checks repository reachability when a token is configured.
+- `GET /runs/:runId/review-artifacts` returns the latest persisted snapshot for a run.
+- `POST /runs/:runId/review-artifacts/refresh` manually refreshes local git and GitHub artifacts, emits timeline events, and saves the latest snapshot.
+- After workspace creation and after provider completion/failure/cancel, the daemon refreshes review artifacts when possible.
+- If GitHub is disabled or no token is configured, Symphonia still reports local workspace git state.
+- If GitHub API calls fail, refresh returns a partial snapshot and records a `github.error` event without changing the provider terminal status.
+- GitHub writes are disabled by default. The daemon does not push, create PRs, comment, request reviewers, merge, or mutate GitHub in Milestone 5.
+
+Minimal GitHub token permissions:
+
+- Public repositories: unauthenticated local artifacts work, but API rate limits are lower. A token improves rate limits and private repo access.
+- Private repositories: use a token with read access to repository contents, pull requests, commit statuses/checks, and Actions workflow runs.
+- PR creation is deferred. Later write support will require explicit write permissions and explicit workflow flags.
+
+GitHub troubleshooting:
+
+- Token missing: `GET /github/status` shows GitHub unavailable, but local git artifacts still work.
+- Token lacks permissions: `GET /github/health` shows the GitHub REST error without exposing the token.
+- Repo not found: check `owner`, `repo`, token access, and `endpoint`.
+- Branch not pushed: local git artifacts appear, but no matching PR, checks, or workflow runs may be found.
+- No PR found: confirm the workspace branch name and that the branch has an open or closed PR in the configured repo.
+- Checks missing: GitHub only returns checks/statuses that exist for the branch or PR head SHA.
+- Workflow runs missing: Actions data depends on the repo having workflow runs for the branch or head SHA.
+- Rate limit: status and timeline errors include safe rate-limit diagnostics; lower `page_size` or `max_pages` if needed.
+- Large diffs: patch previews are bounded before being persisted.
+
 ## Prompt Template
 
 Prompt templates support strict variable interpolation:
@@ -283,15 +359,20 @@ Troubleshooting:
 - `GET /healthz`
 - `GET /tracker/status`
 - `GET /tracker/health`
+- `GET /github/status`
+- `GET /github/health`
 - `GET /issues`
 - `POST /issues/refresh`
 - `GET /issues/:issueId`
 - `GET /issues/by-identifier/:identifier`
+- `GET /issues/:issueId/review-artifacts`
 - `GET /runs`
 - `GET /runs/:runId`
 - `GET /runs/:runId/events`
 - `GET /runs/:runId/events/stream`
 - `GET /runs/:runId/prompt`
+- `GET /runs/:runId/review-artifacts`
+- `POST /runs/:runId/review-artifacts/refresh`
 - `POST /runs` with `{ "issueId": "...", "provider": "mock" | "codex" }`
 - `POST /runs/:runId/stop`
 - `POST /runs/:runId/retry`
@@ -307,7 +388,7 @@ Troubleshooting:
 - `GET /runs/:runId/approvals`
 - `POST /approvals/:approvalId/respond`
 
-Workflow and tracker config responses are summaries and do not expose API keys or secrets.
+Workflow, tracker, and GitHub config responses are summaries and do not expose API keys, tokens, or secrets.
 
 ## Manual Validation Flow
 
@@ -346,18 +427,41 @@ Linear mode, when credentials are available:
 15. Confirm no Linear comments or state transitions occur while `read_only: true` and `write.enabled: false`.
 16. Restore root `WORKFLOW.md` to mock mode before committing local credential-specific changes.
 
+GitHub review artifacts, when credentials are available:
+
+1. Export `GITHUB_TOKEN` or `GITHUB_PAT`.
+2. Configure `WORKFLOW.md` or `SYMPHONIA_WORKFLOW_PATH` with `github.enabled: true`, `github.token: "$GITHUB_TOKEN"`, owner/repo, and `read_only: true`.
+3. Run `pnpm dev`.
+4. Confirm GitHub status shows enabled and no secret values.
+5. Confirm GitHub health succeeds.
+6. Start a mock provider run from a mock or Linear issue.
+7. Open the run detail panel and confirm Review Artifacts shows workspace path, git repo state, branch, base branch, head SHA, dirty/clean state, and changed file count.
+8. If the workspace branch has a PR, confirm PR title, number, URL, state, draft/ready status, head/base branches, and PR files appear.
+9. Confirm combined commit status, check runs, and workflow runs appear when the configured repo has them for the head SHA.
+10. Click Refresh review artifacts and confirm a new timeline event is recorded.
+11. Refresh the browser and confirm persisted review artifacts and timeline events remain visible.
+12. Start a Codex provider run if safe and confirm artifacts refresh after the run.
+13. Keep GitHub writes disabled and confirm no PR is created automatically.
+
 ## SQLite Data
 
-Run events are append-only in SQLite. The default path is `./.data/agentboard.sqlite`, relative to the daemon process. Workspaces are real folders under the configured workflow workspace root.
+Run events are append-only in SQLite. The daemon also stores the latest issue cache and latest review artifact snapshot per run. The default path is `./.data/agentboard.sqlite`, relative to the daemon process. Workspaces are real folders under the configured workflow workspace root.
 
 ## Known Limitations
 
-- GitHub PR/CI adapter is still not implemented.
 - Claude Code provider is still not implemented.
 - Cursor provider is still not implemented.
+- GitHub OAuth is not implemented.
+- GitHub App installation flow is not implemented.
+- GitHub webhooks are not implemented.
+- Auto-push, auto-merge, GitHub comments, reviewer requests, and automatic PR creation are not implemented.
+- GitHub writes are disabled by default. PR creation is deferred to a later user-triggered write milestone.
+- Real GitHub validation depends on `GITHUB_TOKEN` or `GITHUB_PAT` and repository access.
+- CI/check visibility depends on the configured repository having statuses, check runs, and workflow runs for the branch or head SHA.
+- Large local and PR diffs may be truncated before persistence.
 - Linear OAuth is not implemented.
 - Linear webhooks are not implemented because Symphonia is local-first for now.
-- Linear writes are disabled by default. Config flags exist, but read-only mode is the supported Milestone 4 path.
+- Linear writes are disabled by default. Config flags exist, but read-only mode is the supported path.
 - Real Linear validation depends on `LINEAR_API_KEY` and accessible Linear workspace/team/project data.
 - Advanced blocker/dependency handling is partial; issue selection does not yet map all Linear relationships.
 - Real Codex validation depends on local Codex CLI installation and authentication.
@@ -370,4 +474,4 @@ Run events are append-only in SQLite. The default path is `./.data/agentboard.sq
 
 ## Next Milestone
 
-Milestone 5 - Add GitHub PR/CI integration and review artifacts for Linear-backed Codex runs.
+Milestone 6 - Add Claude Code and Cursor provider adapters using the established provider interface.
