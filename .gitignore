@@ -25,9 +25,7 @@ Screenshot *.png
 .wrangler/
 .dev.vars
 
-# Legacy root scaffold retained locally; Milestone 1 lives in apps/ and packages/.
-/src/
-/public/
+# Legacy root scaffold retained locally
 /bun.lock
 /components.json
 /vite.config.ts
