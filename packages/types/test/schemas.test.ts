@@ -162,6 +162,40 @@ describe("shared schemas", () => {
         readTimeoutMs: 5000,
         stallTimeoutMs: 300000,
       },
+      claude: {
+        enabled: false,
+        command: "claude",
+        model: "sonnet",
+        maxTurns: 8,
+        outputFormat: "stream-json",
+        permissionMode: "default",
+        allowedTools: [],
+        disallowedTools: [],
+        appendSystemPrompt: null,
+        extraArgs: [],
+        env: {},
+        redactedEnvKeys: [],
+        healthCheckCommand: null,
+        timeoutMs: 3600000,
+        stallTimeoutMs: 300000,
+        readTimeoutMs: 5000,
+        cwdBehavior: "workspace",
+      },
+      cursor: {
+        enabled: false,
+        command: "cursor-agent",
+        model: null,
+        outputFormat: "stream-json",
+        force: false,
+        extraArgs: [],
+        env: {},
+        redactedEnvKeys: [],
+        healthCheckCommand: null,
+        timeoutMs: 3600000,
+        stallTimeoutMs: 300000,
+        readTimeoutMs: 5000,
+        cwdBehavior: "workspace",
+      },
       github: {
         enabled: false,
         endpoint: "https://api.github.com",
@@ -225,6 +259,7 @@ describe("shared schemas", () => {
         hookTimeoutMs: 60000,
         codexCommand: "codex app-server",
         codexModel: null,
+        providers: summaryProviders(),
         github: {
           enabled: false,
           endpoint: "https://api.github.com",
@@ -299,6 +334,7 @@ describe("shared schemas", () => {
           hookTimeoutMs: 60000,
           codexCommand: "codex app-server",
           codexModel: null,
+          providers: summaryProviders(),
           github: {
             enabled: false,
             endpoint: "https://api.github.com",
@@ -375,6 +411,32 @@ describe("shared schemas", () => {
         delta: "Hello",
       },
       {
+        id: "event-claude-result",
+        runId: "run-1",
+        type: "claude.result",
+        timestamp,
+        sessionId: "claude-session-1",
+        model: "sonnet",
+        result: "Claude finished.",
+        isError: false,
+        numTurns: 2,
+        durationMs: 1234,
+        totalCostUsd: 0.01,
+      },
+      {
+        id: "event-cursor-result",
+        runId: "run-1",
+        type: "cursor.result",
+        timestamp,
+        sessionId: "cursor-session-1",
+        requestId: "request-1",
+        model: "cursor-test",
+        result: "Cursor finished.",
+        isError: false,
+        durationMs: 1234,
+        durationApiMs: 1000,
+      },
+      {
         id: "event-approval",
         runId: "run-1",
         type: "approval.requested",
@@ -407,7 +469,7 @@ describe("shared schemas", () => {
       },
     ];
 
-    expect(events.map((event) => AgentEventSchema.parse(event))).toHaveLength(9);
+    expect(events.map((event) => AgentEventSchema.parse(event))).toHaveLength(11);
   });
 
   it("parses review artifact snapshots and github events", () => {
@@ -565,3 +627,39 @@ describe("shared schemas", () => {
     ).toThrow();
   });
 });
+
+function summaryProviders() {
+  return {
+    mock: { enabled: true, displayName: "Mock provider" },
+    codex: { enabled: true, command: "codex app-server", model: null },
+    claude: {
+      enabled: false,
+      command: "claude",
+      model: "sonnet",
+      outputFormat: "stream-json",
+      permissionMode: "default",
+      allowedTools: [],
+      disallowedTools: [],
+      appendSystemPromptConfigured: false,
+      extraArgs: [],
+      envKeys: [],
+      redactedEnvKeys: [],
+      timeoutMs: 3600000,
+      stallTimeoutMs: 300000,
+      readTimeoutMs: 5000,
+    },
+    cursor: {
+      enabled: false,
+      command: "cursor-agent",
+      model: null,
+      outputFormat: "stream-json",
+      force: false,
+      extraArgs: [],
+      envKeys: [],
+      redactedEnvKeys: [],
+      timeoutMs: 3600000,
+      stallTimeoutMs: 300000,
+      readTimeoutMs: 5000,
+    },
+  };
+}

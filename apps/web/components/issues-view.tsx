@@ -326,8 +326,8 @@ export function IssuesView() {
       setTrackerStatus(loadedTrackerStatus);
       setGithubStatus(loadedGithubStatus);
       const defaultProvider = loadedWorkflow.effectiveConfigSummary?.defaultProvider;
-      if (defaultProvider === "mock" || defaultProvider === "codex") {
-        setSelectedProvider((current) => current ?? defaultProvider);
+      if (defaultProvider === "mock" || defaultProvider === "codex" || defaultProvider === "claude" || defaultProvider === "cursor") {
+        setSelectedProvider((current) => current || defaultProvider);
       }
     }
 
@@ -549,7 +549,7 @@ export function IssuesView() {
             GitHub {githubStatus ? githubStatus.status.replaceAll("_", " ") : "unknown"}
           </span>
           <span className="rounded-full border px-2 py-0.5 text-[11px]">
-            Codex {providerLabel(providers.find((provider) => provider.id === "codex"))}
+            Providers {providers.filter((provider) => provider.available).length}/{providers.length || 4} available
           </span>
         </div>
         <div className="flex items-center gap-1">
@@ -562,7 +562,13 @@ export function IssuesView() {
               aria-label="Provider mode"
             >
               <option value="mock">Mock</option>
-              <option value="codex">Codex</option>
+              <option value="codex">Codex {providerOptionSuffix(providers.find((provider) => provider.id === "codex"))}</option>
+              <option value="claude" disabled={providerDisabled(providers.find((provider) => provider.id === "claude"))}>
+                Claude Code {providerOptionSuffix(providers.find((provider) => provider.id === "claude"))}
+              </option>
+              <option value="cursor" disabled={providerDisabled(providers.find((provider) => provider.id === "cursor"))}>
+                Cursor Agent {providerOptionSuffix(providers.find((provider) => provider.id === "cursor"))}
+              </option>
             </select>
           </label>
           <button
@@ -756,6 +762,7 @@ function RunDetailsCard({
   const running = run ? !isTerminalRunStatus(run.status) : false;
   const retryable = run?.status === "failed" || run?.status === "cancelled" || run?.status === "timed_out";
   const codexMetadata = extractCodexMetadata(events);
+  const providerMetadata = extractProviderMetadata(events, run?.provider ?? selectedProvider);
   const pendingApprovals = approvals.filter((approval) => approval.status === "pending");
 
   return (
@@ -847,6 +854,11 @@ function RunDetailsCard({
                 {codexMetadata.threadId ? `${codexMetadata.threadId}${codexMetadata.turnId ? ` / ${codexMetadata.turnId}` : ""}` : "No Codex turn"}
               </dd>
             </div>
+            <div className="rounded-md border p-3">
+              <dt className="text-muted-foreground">Provider session</dt>
+              <dd className="mt-1 break-all font-medium">{providerMetadata.primary ?? "No provider session yet"}</dd>
+              <dd className="mt-1 text-xs text-muted-foreground">{providerMetadata.secondary}</dd>
+            </div>
           </dl>
 
           <div className="mt-4 flex flex-wrap gap-2">
@@ -856,7 +868,7 @@ function RunDetailsCard({
                 onClick={() => void onStop(run)}
                 className="inline-flex items-center rounded-md border px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-500/10 dark:text-red-300"
               >
-                {run.provider === "codex" ? "Interrupt Codex" : "Stop run"}
+                {run.provider === "codex" ? "Interrupt Codex" : `Stop ${providerDisplayName(run.provider)}`}
               </button>
             ) : retryable && run ? (
               <button
@@ -872,7 +884,7 @@ function RunDetailsCard({
                 onClick={() => void onStart(issue)}
                 className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90"
               >
-                Start {selectedProvider === "codex" ? "Codex" : "mock"} run
+                Start {providerDisplayName(selectedProvider)} run
               </button>
             )}
           </div>
@@ -901,6 +913,12 @@ function RunDetailsCard({
                 ))}
               </div>
             </section>
+          )}
+
+          {run && run.provider !== "codex" && (
+            <p className="mt-4 rounded-md border p-3 text-xs text-muted-foreground">
+              Codex supports interactive approval requests through app-server. Claude and Cursor CLI permissions are configured before run start; no live approval request is pending for this provider.
+            </p>
           )}
 
           <section aria-labelledby="prompt-heading" className="mt-6">
@@ -1163,7 +1181,6 @@ function WorkflowPanel({
   workflow: WorkflowStatus | null;
 }) {
   const summary = workflow?.effectiveConfigSummary;
-  const codex = providers.find((provider) => provider.id === "codex");
 
   return (
     <section aria-labelledby="workflow-panel-heading" className="border-b bg-muted/20 px-4 py-3">
@@ -1197,10 +1214,18 @@ function WorkflowPanel({
           <dt className="text-muted-foreground">Workspace root</dt>
           <dd className="mt-1 break-all font-medium">{summary?.workspaceRoot ?? "Unavailable"}</dd>
         </div>
-        <div className="rounded-md border bg-background p-2">
-          <dt className="text-muted-foreground">Codex</dt>
-          <dd className="mt-1 font-medium">{codex ? providerLabel(codex) : "unknown"}</dd>
-        </div>
+        {(["mock", "codex", "claude", "cursor"] as ProviderId[]).map((providerId) => {
+          const provider = providers.find((item) => item.id === providerId);
+          return (
+            <div key={providerId} className="rounded-md border bg-background p-2">
+              <dt className="text-muted-foreground">{providerDisplayName(providerId)}</dt>
+              <dd className="mt-1 font-medium">{providerLabel(provider)}</dd>
+              <dd className="mt-1 break-all text-[11px] text-muted-foreground">
+                {provider?.command ?? (providerId === "mock" ? "built-in" : "not configured")}
+              </dd>
+            </div>
+          );
+        })}
         <div className="rounded-md border bg-background p-2">
           <dt className="text-muted-foreground">GitHub</dt>
           <dd className="mt-1 font-medium">{githubStatus ? `${githubStatus.enabled ? "enabled" : "disabled"} ${githubStatus.status.replaceAll("_", " ")}` : "unknown"}</dd>
@@ -1263,7 +1288,22 @@ function WorkflowPanel({
           <dt className="text-muted-foreground">Codex command</dt>
           <dd className="mt-1 break-all font-medium">{summary?.codexCommand ?? "codex app-server"}</dd>
         </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">Claude permissions</dt>
+          <dd className="mt-1 font-medium">{summary?.providers.claude.permissionMode ?? "default"}</dd>
+          <dd className="mt-1 text-[11px] text-muted-foreground">
+            allow {summary?.providers.claude.allowedTools.length ?? 0} · deny {summary?.providers.claude.disallowedTools.length ?? 0}
+          </dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">Cursor force mode</dt>
+          <dd className="mt-1 font-medium">{summary?.providers.cursor.force ? "enabled" : "disabled"}</dd>
+          <dd className="mt-1 text-[11px] text-muted-foreground">CLI permissions are configured before run start.</dd>
+        </div>
       </dl>
+      <p className="mt-3 rounded-md border p-2 text-xs text-muted-foreground">
+        Codex supports interactive approval requests through app-server. Claude Code and Cursor Agent run as CLI stream providers with pre-run permission configuration.
+      </p>
       {workflow?.error && (
         <p role="alert" className="mt-3 rounded-md border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-600 dark:text-red-300">
           {workflow.error}
@@ -1347,11 +1387,11 @@ function EventBody({ event }: { event: AgentEvent }) {
     );
   }
 
-  if (event.type === "provider.stderr" || event.type === "codex.error") {
+  if (event.type === "provider.stderr" || event.type === "codex.error" || event.type === "claude.error" || event.type === "cursor.error") {
     return <pre className="mt-2 overflow-auto whitespace-pre-wrap rounded-md border bg-background p-2 text-xs text-red-600 dark:text-red-300">{eventSummary(event)}</pre>;
   }
 
-  if (event.type === "prompt.rendered" || event.type === "artifact") {
+  if (event.type === "prompt.rendered" || event.type === "artifact" || event.type === "claude.result" || event.type === "cursor.result") {
     return <pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap rounded-md border bg-background p-2 text-xs text-muted-foreground">{eventSummary(event)}</pre>;
   }
 
@@ -1466,6 +1506,38 @@ function eventLabel(event: AgentEvent) {
       return "Codex usage";
     case "codex.error":
       return "Codex error";
+    case "claude.system.init":
+      return "Claude session initialized";
+    case "claude.assistant.message":
+      return "Claude assistant message";
+    case "claude.user.message":
+      return "Claude user message";
+    case "claude.tool.use":
+      return `Claude ${event.toolName}`;
+    case "claude.tool.result":
+      return "Claude tool result";
+    case "claude.result":
+      return event.isError ? "Claude error result" : "Claude result";
+    case "claude.usage":
+      return "Claude usage";
+    case "claude.error":
+      return "Claude error";
+    case "cursor.system.init":
+      return "Cursor session initialized";
+    case "cursor.assistant.delta":
+      return "Cursor assistant delta";
+    case "cursor.assistant.message":
+      return "Cursor assistant message";
+    case "cursor.tool.call":
+      return `Cursor ${event.toolName} ${event.status}`;
+    case "cursor.tool.result":
+      return "Cursor tool result";
+    case "cursor.result":
+      return event.isError ? "Cursor error result" : "Cursor result";
+    case "cursor.usage":
+      return "Cursor usage";
+    case "cursor.error":
+      return "Cursor error";
   }
 }
 
@@ -1554,6 +1626,54 @@ function eventSummary(event: AgentEvent) {
       return `${event.totalTokens.toLocaleString()} total tokens (${event.inputTokens.toLocaleString()} in, ${event.outputTokens.toLocaleString()} out).`;
     case "codex.error":
       return event.message;
+    case "claude.system.init":
+      return [`session ${event.sessionId ?? "unknown"}`, event.model ? `model ${event.model}` : null, event.permissionMode ? `permission ${event.permissionMode}` : null, event.cwd ? `cwd ${event.cwd}` : null]
+        .filter(Boolean)
+        .join("\n");
+    case "claude.assistant.message":
+    case "claude.user.message":
+      return event.message;
+    case "claude.tool.use":
+      return [event.toolUseId ? `tool id ${event.toolUseId}` : null, event.input].filter(Boolean).join("\n");
+    case "claude.tool.result":
+      return [event.toolUseId ? `tool id ${event.toolUseId}` : null, event.status, event.content].filter(Boolean).join("\n");
+    case "claude.result":
+      return [
+        event.result,
+        event.numTurns === null ? null : `${event.numTurns} turns`,
+        event.durationMs === null ? null : `${event.durationMs}ms`,
+        event.totalCostUsd === null ? null : `$${event.totalCostUsd.toFixed(4)}`,
+      ]
+        .filter(Boolean)
+        .join("\n");
+    case "claude.usage":
+      return `${event.totalTokens?.toLocaleString() ?? "unknown"} total tokens (${event.inputTokens?.toLocaleString() ?? "unknown"} in, ${event.outputTokens?.toLocaleString() ?? "unknown"} out).`;
+    case "claude.error":
+      return event.message;
+    case "cursor.system.init":
+      return [`session ${event.sessionId ?? "unknown"}`, event.requestId ? `request ${event.requestId}` : null, event.model ? `model ${event.model}` : null, event.apiKeySource ? `auth ${event.apiKeySource}` : null, event.cwd ? `cwd ${event.cwd}` : null]
+        .filter(Boolean)
+        .join("\n");
+    case "cursor.assistant.delta":
+      return event.delta;
+    case "cursor.assistant.message":
+      return event.message;
+    case "cursor.tool.call":
+      return [event.callId ? `call ${event.callId}` : null, event.status, event.input].filter(Boolean).join("\n");
+    case "cursor.tool.result":
+      return [event.callId ? `call ${event.callId}` : null, event.status, event.content].filter(Boolean).join("\n");
+    case "cursor.result":
+      return [
+        event.result,
+        event.durationMs === null ? null : `${event.durationMs}ms`,
+        event.durationApiMs === null ? null : `${event.durationApiMs}ms API`,
+      ]
+        .filter(Boolean)
+        .join("\n");
+    case "cursor.usage":
+      return `${event.totalTokens?.toLocaleString() ?? "unknown"} total tokens (${event.inputTokens?.toLocaleString() ?? "unknown"} in, ${event.outputTokens?.toLocaleString() ?? "unknown"} out).`;
+    case "cursor.error":
+      return event.message;
   }
 }
 
@@ -1581,7 +1701,31 @@ function approvalStateFromEvent(event: Extract<AgentEvent, { type: "approval.req
 
 function providerLabel(provider?: ProviderHealth) {
   if (!provider) return "unknown";
+  if (provider.status === "disabled" || provider.enabled === false) return "disabled";
   return provider.available ? "available" : "unavailable";
+}
+
+function providerOptionSuffix(provider?: ProviderHealth) {
+  if (!provider) return "(unknown)";
+  if (provider.status === "disabled" || provider.enabled === false) return "(disabled)";
+  return provider.available ? "(available)" : "(unavailable)";
+}
+
+function providerDisabled(provider?: ProviderHealth) {
+  return provider?.status === "disabled" || provider?.enabled === false;
+}
+
+function providerDisplayName(provider: ProviderId) {
+  switch (provider) {
+    case "mock":
+      return "Mock";
+    case "codex":
+      return "Codex";
+    case "claude":
+      return "Claude Code";
+    case "cursor":
+      return "Cursor Agent";
+  }
 }
 
 function workflowStatusClass(status?: WorkflowStatus["status"]) {
@@ -1667,6 +1811,67 @@ function extractCodexMetadata(events: AgentEvent[]): { threadId: string | null; 
     }
   }
   return { threadId, turnId };
+}
+
+function extractProviderMetadata(
+  events: AgentEvent[],
+  provider: ProviderId,
+): { primary: string | null; secondary: string } {
+  if (provider === "codex") {
+    const codex = extractCodexMetadata(events);
+    return {
+      primary: codex.threadId ? `${codex.threadId}${codex.turnId ? ` / ${codex.turnId}` : ""}` : null,
+      secondary: "Codex app-server approvals can appear live during a turn.",
+    };
+  }
+
+  if (provider === "claude") {
+    const init = findLastEvent(events, "claude.system.init");
+    const result = findLastEvent(events, "claude.result");
+    const sessionId = init?.type === "claude.system.init" ? init.sessionId : result?.type === "claude.result" ? result.sessionId : null;
+    const model = init?.type === "claude.system.init" ? init.model : result?.type === "claude.result" ? result.model : null;
+    const resultDetails =
+      result?.type === "claude.result"
+        ? [result.numTurns === null ? null : `${result.numTurns} turns`, result.durationMs === null ? null : `${result.durationMs}ms`, result.totalCostUsd === null ? null : `$${result.totalCostUsd.toFixed(4)}`]
+            .filter(Boolean)
+            .join(" · ")
+        : "CLI permissions are configured before run start.";
+    return {
+      primary: sessionId,
+      secondary: [model, resultDetails].filter(Boolean).join(" · "),
+    };
+  }
+
+  if (provider === "cursor") {
+    const init = findLastEvent(events, "cursor.system.init");
+    const result = findLastEvent(events, "cursor.result");
+    const sessionId = init?.type === "cursor.system.init" ? init.sessionId : result?.type === "cursor.result" ? result.sessionId : null;
+    const requestId = init?.type === "cursor.system.init" ? init.requestId : result?.type === "cursor.result" ? result.requestId : null;
+    const model = init?.type === "cursor.system.init" ? init.model : result?.type === "cursor.result" ? result.model : null;
+    const resultDetails =
+      result?.type === "cursor.result"
+        ? [result.durationMs === null ? null : `${result.durationMs}ms`, result.durationApiMs === null ? null : `${result.durationApiMs}ms API`]
+            .filter(Boolean)
+            .join(" · ")
+        : "CLI permissions are configured before run start.";
+    return {
+      primary: [sessionId, requestId].filter(Boolean).join(" / ") || null,
+      secondary: [model, resultDetails].filter(Boolean).join(" · "),
+    };
+  }
+
+  return {
+    primary: "built-in mock provider",
+    secondary: "Deterministic local provider for tests and demos.",
+  };
+}
+
+function findLastEvent<T extends AgentEvent["type"]>(events: AgentEvent[], type: T): Extract<AgentEvent, { type: T }> | null {
+  for (let index = events.length - 1; index >= 0; index -= 1) {
+    const event = events[index];
+    if (event?.type === type) return event as Extract<AgentEvent, { type: T }>;
+  }
+  return null;
 }
 
 function shortSha(sha: string | null | undefined) {

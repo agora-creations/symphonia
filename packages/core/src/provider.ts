@@ -1,4 +1,14 @@
-import { AgentEvent, CodexConfig, Issue, ProviderHealth, ProviderId, Run, WorkflowConfig } from "@symphonia/types";
+import {
+  AgentEvent,
+  ClaudeConfig,
+  CodexConfig,
+  CursorConfig,
+  Issue,
+  ProviderHealth,
+  ProviderId,
+  Run,
+  WorkflowConfig,
+} from "@symphonia/types";
 
 export type ProviderEmitAgentEvent = (event: AgentEvent) => Promise<void> | void;
 
@@ -10,6 +20,8 @@ export type ProviderRunContext = {
   renderedPrompt: string;
   workflowConfig: WorkflowConfig;
   codexConfig: CodexConfig;
+  claudeConfig: ClaudeConfig;
+  cursorConfig: CursorConfig;
   signal: AbortSignal;
   emit: ProviderEmitAgentEvent;
   requestApproval?: (request: ProviderApprovalRequest) => Promise<ProviderApprovalDecision>;
@@ -37,7 +49,7 @@ export type ProviderApprovalRequest = {
 export type AgentProvider = {
   id: ProviderId;
   displayName: string;
-  health(config?: CodexConfig): Promise<ProviderHealth>;
+  health(config?: CodexConfig | ClaudeConfig | CursorConfig): Promise<ProviderHealth>;
   start(context: ProviderRunContext): Promise<void>;
 };
 
@@ -46,7 +58,13 @@ export const mockProviderHealth: ProviderHealth = {
   displayName: "Mock provider",
   available: true,
   command: null,
+  enabled: true,
+  configured: true,
+  model: null,
+  status: "available",
   version: "built-in",
   error: null,
   hint: "Deterministic local mock provider for tests and demos.",
+  lastCheckedAt: null,
+  config: { builtIn: true },
 };

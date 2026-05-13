@@ -49,11 +49,18 @@ describe("daemon API", () => {
 
     expect(providers.some((provider) => provider.id === "mock" && provider.available)).toBe(true);
     expect(providers.some((provider) => provider.id === "codex")).toBe(true);
+    expect(providers.some((provider) => provider.id === "claude" && provider.status === "disabled")).toBe(true);
+    expect(providers.some((provider) => provider.id === "cursor" && provider.status === "disabled")).toBe(true);
 
     writeWorkflow({ codexCommand: "definitely-not-a-symphonia-command" });
     daemon.refreshWorkflowStatus();
     const codex = await daemon.getProviderHealth("codex");
     expect(codex.available).toBe(false);
+
+    const claudeHealth = await requestJson<{ provider: { id: string; available: boolean } }>("GET", "/providers/claude/health");
+    const cursorHealth = await requestJson<{ provider: { id: string; available: boolean } }>("GET", "/providers/cursor/health");
+    expect(claudeHealth.provider.id).toBe("claude");
+    expect(cursorHealth.provider.id).toBe("cursor");
   });
 
   it("reports tracker status and refreshes mock issue cache", async () => {
@@ -241,6 +248,62 @@ describe("daemon API", () => {
     expect(types).toContain("codex.turn.completed");
   });
 
+  it("runs the Claude provider against a fake CLI and refreshes artifacts", async () => {
+    writeWorkflow({ provider: "claude", claudeCommand: fakeCliCommand("claude-success") });
+
+    const created = await daemon.startRun("issue-frontend-board", "claude");
+    await waitForTerminal(created.id, "succeeded");
+
+    const types = getEvents(created.id).map((event) => event.type);
+    expect(created.provider).toBe("claude");
+    expect(types).toEqual(expect.arrayContaining(["provider.started", "claude.system.init", "claude.result"]));
+    expect(types).toContain("github.review_artifacts.refreshed");
+    expect(daemon.getReviewArtifacts(created.id)).toMatchObject({ runId: created.id, provider: "claude" });
+  });
+
+  it("runs the Cursor provider against a fake CLI and refreshes artifacts", async () => {
+    writeWorkflow({ provider: "cursor", cursorCommand: fakeCliCommand("cursor-success") });
+
+    const created = await daemon.startRun("issue-frontend-board", "cursor");
+    await waitForTerminal(created.id, "succeeded");
+
+    const types = getEvents(created.id).map((event) => event.type);
+    expect(created.provider).toBe("cursor");
+    expect(types).toEqual(expect.arrayContaining(["provider.started", "cursor.system.init", "cursor.result"]));
+    expect(types).toContain("github.review_artifacts.refreshed");
+    expect(daemon.getReviewArtifacts(created.id)).toMatchObject({ runId: created.id, provider: "cursor" });
+  });
+
+  it("stops active Claude and Cursor fake CLI runs", async () => {
+    writeWorkflow({ provider: "claude", claudeCommand: fakeCliCommand("claude-wait") });
+    const claudeRun = await daemon.startRun("issue-frontend-board", "claude");
+    await waitForEvent(claudeRun.id, "claude.system.init");
+    await daemon.stopRun(claudeRun.id);
+    await waitForTerminal(claudeRun.id, "cancelled");
+
+    writeWorkflow({ provider: "cursor", cursorCommand: fakeCliCommand("cursor-wait") });
+    const cursorRun = await daemon.startRun("issue-blocked-looking", "cursor");
+    await waitForEvent(cursorRun.id, "cursor.system.init");
+    await daemon.stopRun(cursorRun.id);
+    await waitForTerminal(cursorRun.id, "cancelled");
+  });
+
+  it("retries failed Claude and Cursor fake CLI runs with the current workflow", async () => {
+    writeWorkflow({ provider: "claude", claudeCommand: fakeCliCommand("claude-error-result") });
+    const failedClaude = await daemon.startRun("issue-frontend-board", "claude");
+    await waitForTerminal(failedClaude.id, "failed");
+    writeWorkflow({ provider: "claude", claudeCommand: fakeCliCommand("claude-success") });
+    const retriedClaude = await daemon.retryRun(failedClaude.id);
+    await waitForTerminal(retriedClaude.id, "succeeded");
+
+    writeWorkflow({ provider: "cursor", cursorCommand: fakeCliCommand("cursor-error-result") });
+    const failedCursor = await daemon.startRun("issue-blocked-looking", "cursor");
+    await waitForTerminal(failedCursor.id, "failed");
+    writeWorkflow({ provider: "cursor", cursorCommand: fakeCliCommand("cursor-success") });
+    const retriedCursor = await daemon.retryRun(failedCursor.id);
+    await waitForTerminal(retriedCursor.id, "succeeded");
+  });
+
   it("persists and serves review artifact snapshots through daemon endpoints", async () => {
     const created = await daemon.startRun("issue-frontend-board");
 
@@ -308,7 +371,12 @@ async function waitForTerminal(runId: string, expectedStatus: string): Promise<v
     if (daemon.requireRun(runId).status === expectedStatus) return;
     await sleep(20);
   }
-  throw new Error(`Run ${runId} did not reach ${expectedStatus}.`);
+  const run = daemon.requireRun(runId);
+  throw new Error(
+    `Run ${runId} did not reach ${expectedStatus}; status=${run.status}; events=${getEvents(runId)
+      .map((event) => `${event.type}${"message" in event ? `:${String(event.message)}` : ""}${"error" in event ? `:${String(event.error)}` : ""}`)
+      .join(",")}`,
+  );
 }
 
 async function waitForEvent(runId: string, eventType: string, minimumCount = 1): Promise<void> {
@@ -316,7 +384,11 @@ async function waitForEvent(runId: string, eventType: string, minimumCount = 1):
     if (getEvents(runId).filter((event) => event.type === eventType).length >= minimumCount) return;
     await sleep(20);
   }
-  throw new Error(`Run ${runId} did not emit ${minimumCount} ${eventType} events.`);
+  throw new Error(
+    `Run ${runId} did not emit ${minimumCount} ${eventType} events; status=${daemon.requireRun(runId).status}; events=${getEvents(runId)
+      .map((event) => `${event.type}${"message" in event ? `:${String(event.message)}` : ""}${"error" in event ? `:${String(event.error)}` : ""}`)
+      .join(",")}`,
+  );
 }
 
 async function waitForApproval(runId: string): Promise<void> {
@@ -371,7 +443,15 @@ async function respondApproval(approvalId: string, decision: "accept" | "acceptF
   }).respondApproval(approvalId, decision);
 }
 
-function writeWorkflow(options: { codexCommand?: string; provider?: "mock" | "codex"; githubToken?: string } = {}): void {
+function writeWorkflow(
+  options: {
+    codexCommand?: string;
+    claudeCommand?: string;
+    cursorCommand?: string;
+    provider?: "mock" | "codex" | "claude" | "cursor";
+    githubToken?: string;
+  } = {},
+): void {
   writeFileSync(
     workflowPath,
     `---
@@ -399,6 +479,29 @@ ${options.githubToken ? `github:
   approval_policy: "on-request"
   turn_sandbox_policy: "workspaceWrite"
   turn_timeout_ms: 2000
+  read_timeout_ms: 1000
+  stall_timeout_ms: 1000
+claude:
+  enabled: ${options.claudeCommand || options.provider === "claude" ? "true" : "false"}
+  command: ${JSON.stringify(options.claudeCommand ?? "claude")}
+  model: "sonnet"
+  max_turns: 3
+  output_format: "stream-json"
+  permission_mode: "default"
+  allowed_tools:
+    - "Read"
+  disallowed_tools:
+    - "Bash(rm:*)"
+  timeout_ms: 2000
+  read_timeout_ms: 1000
+  stall_timeout_ms: 1000
+cursor:
+  enabled: ${options.cursorCommand || options.provider === "cursor" ? "true" : "false"}
+  command: ${JSON.stringify(options.cursorCommand ?? "cursor-agent")}
+  model: "cursor-test"
+  output_format: "stream-json"
+  force: false
+  timeout_ms: 2000
   read_timeout_ms: 1000
   stall_timeout_ms: 1000
 hooks:
@@ -553,6 +656,12 @@ function fakeCodexCommand(mode: string): string {
   return `${JSON.stringify(process.execPath)} ${JSON.stringify(serverPath)} ${mode}`;
 }
 
+function fakeCliCommand(mode: string): string {
+  const serverPath = join(directory, `fake-cli-${mode}.mjs`);
+  writeFileSync(serverPath, fakeCliSource());
+  return `${JSON.stringify(process.execPath)} ${JSON.stringify(serverPath)} ${mode}`;
+}
+
 function fakeServerSource(): string {
   return `
 import readline from "node:readline";
@@ -601,5 +710,51 @@ rl.on("line", (line) => {
     if (activeTurn) complete("interrupted");
   }
 });
+`;
+}
+
+function fakeCliSource(): string {
+  return `
+const mode = process.argv[2] ?? "claude-success";
+
+function write(payload) {
+  process.stdout.write(JSON.stringify(payload) + "\\n");
+}
+
+if (mode === "claude-success") {
+  write({ type: "system", subtype: "init", session_id: "claude-session-1", model: "sonnet", cwd: process.cwd(), permissionMode: "default" });
+  write({ type: "assistant", session_id: "claude-session-1", message: { role: "assistant", content: [{ type: "text", text: "Claude daemon fake message." }] } });
+  write({ type: "result", subtype: "success", session_id: "claude-session-1", is_error: false, result: "Claude daemon fake result", num_turns: 1, duration_ms: 25, usage: { input_tokens: 3, output_tokens: 4 } });
+  process.exit(0);
+}
+
+if (mode === "claude-error-result") {
+  write({ type: "system", subtype: "init", session_id: "claude-session-1" });
+  write({ type: "result", subtype: "error", session_id: "claude-session-1", is_error: true, result: "Claude fake failure" });
+  process.exit(0);
+}
+
+if (mode === "claude-wait") {
+  write({ type: "system", subtype: "init", session_id: "claude-session-1" });
+  setInterval(() => {}, 1000);
+}
+
+if (mode === "cursor-success") {
+  write({ type: "system", subtype: "init", session_id: "cursor-session-1", request_id: "request-1", model: "cursor-test", cwd: process.cwd(), apiKeySource: "login", permissionMode: "default" });
+  write({ type: "assistant", session_id: "cursor-session-1", request_id: "request-1", message: { role: "assistant", content: [{ type: "text", text: "Cursor daemon fake message." }] } });
+  write({ type: "result", subtype: "success", session_id: "cursor-session-1", request_id: "request-1", is_error: false, result: "Cursor daemon fake result", duration_ms: 25, duration_api_ms: 20, usage: { input_tokens: 2, output_tokens: 5 } });
+  process.exit(0);
+}
+
+if (mode === "cursor-error-result") {
+  write({ type: "system", subtype: "init", session_id: "cursor-session-1", request_id: "request-1" });
+  write({ type: "result", subtype: "error", session_id: "cursor-session-1", request_id: "request-1", is_error: true, result: "Cursor fake failure" });
+  process.exit(0);
+}
+
+if (mode === "cursor-wait") {
+  write({ type: "system", subtype: "init", session_id: "cursor-session-1", request_id: "request-1" });
+  setInterval(() => {}, 1000);
+}
 `;
 }

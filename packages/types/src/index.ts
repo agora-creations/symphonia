@@ -58,7 +58,7 @@ export const RunStatusSchema = z.enum([
 ]);
 export type RunStatus = z.infer<typeof RunStatusSchema>;
 
-export const ProviderIdSchema = z.enum(["mock", "codex"]);
+export const ProviderIdSchema = z.enum(["mock", "codex", "claude", "cursor"]);
 export type ProviderId = z.infer<typeof ProviderIdSchema>;
 
 export const terminalRunStatuses: readonly RunStatus[] = [
@@ -228,6 +228,47 @@ export const CodexConfigSchema = z.object({
 });
 export type CodexConfig = z.infer<typeof CodexConfigSchema>;
 
+const ProviderEnvSchema = z.record(z.string(), z.string());
+const CliOutputFormatSchema = z.enum(["text", "json", "stream-json"]);
+
+export const ClaudeConfigSchema = z.object({
+  enabled: z.boolean(),
+  command: z.string().min(1),
+  model: z.string().min(1).nullable(),
+  maxTurns: z.number().int().positive(),
+  outputFormat: CliOutputFormatSchema,
+  permissionMode: z.string().min(1).nullable(),
+  allowedTools: z.array(z.string().min(1)),
+  disallowedTools: z.array(z.string().min(1)),
+  appendSystemPrompt: z.string().min(1).nullable(),
+  extraArgs: z.array(z.string().min(1)),
+  env: ProviderEnvSchema,
+  redactedEnvKeys: z.array(z.string().min(1)),
+  healthCheckCommand: z.string().min(1).nullable(),
+  timeoutMs: z.number().int().positive(),
+  stallTimeoutMs: z.number().int().positive(),
+  readTimeoutMs: z.number().int().positive(),
+  cwdBehavior: z.enum(["workspace"]),
+});
+export type ClaudeConfig = z.infer<typeof ClaudeConfigSchema>;
+
+export const CursorConfigSchema = z.object({
+  enabled: z.boolean(),
+  command: z.string().min(1),
+  model: z.string().min(1).nullable(),
+  outputFormat: CliOutputFormatSchema,
+  force: z.boolean(),
+  extraArgs: z.array(z.string().min(1)),
+  env: ProviderEnvSchema,
+  redactedEnvKeys: z.array(z.string().min(1)),
+  healthCheckCommand: z.string().min(1).nullable(),
+  timeoutMs: z.number().int().positive(),
+  stallTimeoutMs: z.number().int().positive(),
+  readTimeoutMs: z.number().int().positive(),
+  cwdBehavior: z.enum(["workspace"]),
+});
+export type CursorConfig = z.infer<typeof CursorConfigSchema>;
+
 export const GitHubWriteConfigSchema = z.object({
   enabled: z.boolean(),
   allowPush: z.boolean(),
@@ -264,6 +305,8 @@ export const WorkflowConfigSchema = z.object({
   hooks: HooksConfigSchema,
   agent: AgentConfigSchema,
   codex: CodexConfigSchema,
+  claude: ClaudeConfigSchema,
+  cursor: CursorConfigSchema,
   github: GitHubConfigSchema,
 });
 export type WorkflowConfig = z.infer<typeof WorkflowConfigSchema>;
@@ -299,6 +342,46 @@ export const WorkflowConfigSummarySchema = z.object({
   hookTimeoutMs: z.number().int().positive(),
   codexCommand: z.string().min(1),
   codexModel: z.string().min(1).nullable(),
+  providers: z.object({
+    mock: z.object({
+      enabled: z.boolean(),
+      displayName: z.string().min(1),
+    }),
+    codex: z.object({
+      enabled: z.boolean(),
+      command: z.string().min(1),
+      model: z.string().min(1).nullable(),
+    }),
+    claude: z.object({
+      enabled: z.boolean(),
+      command: z.string().min(1),
+      model: z.string().min(1).nullable(),
+      outputFormat: CliOutputFormatSchema,
+      permissionMode: z.string().min(1).nullable(),
+      allowedTools: z.array(z.string().min(1)),
+      disallowedTools: z.array(z.string().min(1)),
+      appendSystemPromptConfigured: z.boolean(),
+      extraArgs: z.array(z.string().min(1)),
+      envKeys: z.array(z.string().min(1)),
+      redactedEnvKeys: z.array(z.string().min(1)),
+      timeoutMs: z.number().int().positive(),
+      stallTimeoutMs: z.number().int().positive(),
+      readTimeoutMs: z.number().int().positive(),
+    }),
+    cursor: z.object({
+      enabled: z.boolean(),
+      command: z.string().min(1),
+      model: z.string().min(1).nullable(),
+      outputFormat: CliOutputFormatSchema,
+      force: z.boolean(),
+      extraArgs: z.array(z.string().min(1)),
+      envKeys: z.array(z.string().min(1)),
+      redactedEnvKeys: z.array(z.string().min(1)),
+      timeoutMs: z.number().int().positive(),
+      stallTimeoutMs: z.number().int().positive(),
+      readTimeoutMs: z.number().int().positive(),
+    }),
+  }),
   github: z.object({
     enabled: z.boolean(),
     endpoint: z.string().min(1),
@@ -683,6 +766,139 @@ export const CodexErrorEventSchema = BaseAgentEventSchema.extend({
   code: z.union([z.string(), z.number()]).nullable().optional(),
 });
 
+export const ClaudeSystemInitEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("claude.system.init"),
+  sessionId: z.string().min(1).nullable(),
+  model: z.string().min(1).nullable(),
+  cwd: z.string().min(1).nullable(),
+  permissionMode: z.string().min(1).nullable(),
+});
+
+export const ClaudeAssistantMessageEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("claude.assistant.message"),
+  sessionId: z.string().min(1).nullable(),
+  message: z.string(),
+});
+
+export const ClaudeUserMessageEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("claude.user.message"),
+  sessionId: z.string().min(1).nullable(),
+  message: z.string(),
+});
+
+export const ClaudeToolUseEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("claude.tool.use"),
+  sessionId: z.string().min(1).nullable(),
+  toolName: z.string().min(1),
+  toolUseId: z.string().min(1).nullable(),
+  input: z.string(),
+});
+
+export const ClaudeToolResultEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("claude.tool.result"),
+  sessionId: z.string().min(1).nullable(),
+  toolUseId: z.string().min(1).nullable(),
+  status: z.string().min(1).nullable(),
+  content: z.string(),
+});
+
+export const ClaudeResultEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("claude.result"),
+  sessionId: z.string().min(1).nullable(),
+  model: z.string().min(1).nullable(),
+  result: z.string(),
+  isError: z.boolean(),
+  numTurns: z.number().int().nonnegative().nullable(),
+  durationMs: z.number().int().nonnegative().nullable(),
+  totalCostUsd: z.number().nonnegative().nullable(),
+});
+
+export const ClaudeUsageEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("claude.usage"),
+  sessionId: z.string().min(1).nullable(),
+  inputTokens: z.number().int().nonnegative().nullable(),
+  outputTokens: z.number().int().nonnegative().nullable(),
+  totalTokens: z.number().int().nonnegative().nullable(),
+});
+
+export const ClaudeErrorEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("claude.error"),
+  sessionId: z.string().min(1).nullable(),
+  message: z.string().min(1),
+  code: z.union([z.string(), z.number()]).nullable().optional(),
+});
+
+export const CursorSystemInitEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("cursor.system.init"),
+  sessionId: z.string().min(1).nullable(),
+  requestId: z.string().min(1).nullable(),
+  model: z.string().min(1).nullable(),
+  cwd: z.string().min(1).nullable(),
+  permissionMode: z.string().min(1).nullable(),
+  apiKeySource: z.string().min(1).nullable(),
+});
+
+export const CursorAssistantDeltaEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("cursor.assistant.delta"),
+  sessionId: z.string().min(1).nullable(),
+  requestId: z.string().min(1).nullable(),
+  delta: z.string(),
+});
+
+export const CursorAssistantMessageEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("cursor.assistant.message"),
+  sessionId: z.string().min(1).nullable(),
+  requestId: z.string().min(1).nullable(),
+  message: z.string(),
+});
+
+export const CursorToolCallEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("cursor.tool.call"),
+  sessionId: z.string().min(1).nullable(),
+  requestId: z.string().min(1).nullable(),
+  callId: z.string().min(1).nullable(),
+  toolName: z.string().min(1),
+  status: z.enum(["started", "completed", "failed"]),
+  input: z.string(),
+});
+
+export const CursorToolResultEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("cursor.tool.result"),
+  sessionId: z.string().min(1).nullable(),
+  requestId: z.string().min(1).nullable(),
+  callId: z.string().min(1).nullable(),
+  status: z.string().min(1).nullable(),
+  content: z.string(),
+});
+
+export const CursorResultEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("cursor.result"),
+  sessionId: z.string().min(1).nullable(),
+  requestId: z.string().min(1).nullable(),
+  model: z.string().min(1).nullable(),
+  result: z.string(),
+  isError: z.boolean(),
+  durationMs: z.number().int().nonnegative().nullable(),
+  durationApiMs: z.number().int().nonnegative().nullable(),
+});
+
+export const CursorUsageEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("cursor.usage"),
+  sessionId: z.string().min(1).nullable(),
+  requestId: z.string().min(1).nullable(),
+  inputTokens: z.number().int().nonnegative().nullable(),
+  outputTokens: z.number().int().nonnegative().nullable(),
+  totalTokens: z.number().int().nonnegative().nullable(),
+});
+
+export const CursorErrorEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("cursor.error"),
+  sessionId: z.string().min(1).nullable(),
+  requestId: z.string().min(1).nullable(),
+  message: z.string().min(1),
+  code: z.union([z.string(), z.number()]).nullable().optional(),
+});
+
 export const AgentEventSchema = z.discriminatedUnion("type", [
   RunStatusEventSchema,
   AgentMessageEventSchema,
@@ -724,6 +940,22 @@ export const AgentEventSchema = z.discriminatedUnion("type", [
   CodexAssistantDeltaEventSchema,
   CodexUsageEventSchema,
   CodexErrorEventSchema,
+  ClaudeSystemInitEventSchema,
+  ClaudeAssistantMessageEventSchema,
+  ClaudeUserMessageEventSchema,
+  ClaudeToolUseEventSchema,
+  ClaudeToolResultEventSchema,
+  ClaudeResultEventSchema,
+  ClaudeUsageEventSchema,
+  ClaudeErrorEventSchema,
+  CursorSystemInitEventSchema,
+  CursorAssistantDeltaEventSchema,
+  CursorAssistantMessageEventSchema,
+  CursorToolCallEventSchema,
+  CursorToolResultEventSchema,
+  CursorResultEventSchema,
+  CursorUsageEventSchema,
+  CursorErrorEventSchema,
 ]);
 export type AgentEvent = z.infer<typeof AgentEventSchema>;
 
@@ -832,11 +1064,17 @@ export type EventsResponse = z.infer<typeof EventsResponseSchema>;
 export const ProviderHealthSchema = z.object({
   id: ProviderIdSchema,
   displayName: z.string().min(1),
+  enabled: z.boolean().optional(),
+  configured: z.boolean().optional(),
   available: z.boolean(),
   command: z.string().min(1).nullable(),
+  model: z.string().min(1).nullable().optional(),
+  status: z.enum(["enabled", "disabled", "available", "unavailable", "invalid_config", "unknown"]).optional(),
   version: z.string().nullable(),
   error: z.string().nullable(),
   hint: z.string().nullable(),
+  lastCheckedAt: isoDateTime.nullable().optional(),
+  config: z.record(z.string(), z.unknown()).optional(),
 });
 export type ProviderHealth = z.infer<typeof ProviderHealthSchema>;
 
