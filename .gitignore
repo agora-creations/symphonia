@@ -26,7 +26,7 @@ Screenshot *.png
 .wrangler/
 .dev.vars
 
-# Legacy root scaffold retained locally
+# Legacy root scaffold artifacts
 .prettierignore
 .prettierrc
 /bun.lock

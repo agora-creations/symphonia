@@ -8,8 +8,7 @@ export type ProjectStatus =
   | "planned"
   | "in-progress"
   | "paused"
-  | "completed"
-  | "cancelled";
+  | "completed";
 
 export interface User {
   id: string;
@@ -200,7 +199,7 @@ export const projects: Project[] = [
     id: "p11",
     key: "OPS-031",
     name: "Internal status page",
-    status: "cancelled",
+    status: "paused",
     priority: "no-priority",
     health: "no-update",
     progress: 18,
@@ -231,7 +230,6 @@ export const STATUS_ORDER: ProjectStatus[] = [
   "backlog",
   "paused",
   "completed",
-  "cancelled",
 ];
 
 export const STATUS_LABELS: Record<ProjectStatus, string> = {
@@ -240,7 +238,6 @@ export const STATUS_LABELS: Record<ProjectStatus, string> = {
   "in-progress": "In Progress",
   paused: "Paused",
   completed: "Completed",
-  cancelled: "Cancelled",
 };
 
 export const PRIORITY_LABELS: Record<Priority, string> = {
@@ -304,7 +301,7 @@ export const ISSUE_STATUS_LABELS: Record<IssueStatus, string> = {
   "in-progress": "In Progress",
   "in-review": "In Review",
   done: "Done",
-  cancelled: "Cancelled",
+  cancelled: "Canceled",
 };
 
 export const labels: Label[] = [

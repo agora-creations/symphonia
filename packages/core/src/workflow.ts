@@ -66,7 +66,7 @@ export type WorkflowRuntime = {
 
 const defaultLinearEndpoint = "https://api.linear.app/graphql";
 const defaultActiveStates = ["Todo", "In Progress"];
-const defaultTerminalStates = ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"];
+const defaultTerminalStates = ["Closed", "Canceled", "Duplicate", "Done"];
 const defaultTrackerPageSize = 50;
 const defaultTrackerMaxPages = 5;
 const maxTrackerPageSize = 100;

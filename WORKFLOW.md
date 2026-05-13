@@ -10,7 +10,6 @@ tracker:
   terminal_states:
     - "Done"
     - "Closed"
-    - "Cancelled"
     - "Canceled"
     - "Duplicate"
 
