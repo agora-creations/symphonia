@@ -12,7 +12,6 @@ import { UserAvatar } from "@/components/avatar-stack";
 import { cn } from "@/lib/utils";
 import { CheckCircle2, ExternalLink, FileDiff, Filter, GitBranch, GitPullRequest, LayoutGrid, List, Plus, RefreshCw, SlidersHorizontal, X } from "lucide-react";
 import {
-  DAEMON_URL,
   executeWorkspaceCleanup,
   getDaemonStatus,
   getGithubStatus,
@@ -20,6 +19,7 @@ import {
   getProviders,
   getReviewArtifacts,
   getRunApprovals,
+  getRunEventStreamUrl,
   getRunEvents,
   getRunPrompt,
   getRuns,
@@ -304,20 +304,27 @@ export function IssuesView() {
     (runId: string) => {
       if (sourcesRef.current.has(runId)) return;
 
-      const source = new EventSource(`${DAEMON_URL}/runs/${runId}/events/stream`);
-      source.addEventListener("agent-event", (message) => {
-        const event = AgentEventSchema.parse(JSON.parse((message as MessageEvent).data));
-        appendEvent(event);
-        if (event.type === "run.status" && isTerminalRunStatus(event.status)) {
-          source.close();
+      void getRunEventStreamUrl(runId)
+        .then((url) => {
+          if (sourcesRef.current.has(runId)) return;
+          const source = new EventSource(url);
+          source.addEventListener("agent-event", (message) => {
+            const event = AgentEventSchema.parse(JSON.parse((message as MessageEvent).data));
+            appendEvent(event);
+            if (event.type === "run.status" && isTerminalRunStatus(event.status)) {
+              source.close();
+              sourcesRef.current.delete(runId);
+            }
+          });
+          source.onerror = () => {
+            source.close();
+            sourcesRef.current.delete(runId);
+          };
+          sourcesRef.current.set(runId, source);
+        })
+        .catch(() => {
           sourcesRef.current.delete(runId);
-        }
-      });
-      source.onerror = () => {
-        source.close();
-        sourcesRef.current.delete(runId);
-      };
-      sourcesRef.current.set(runId, source);
+        });
     },
     [appendEvent],
   );

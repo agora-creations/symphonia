@@ -7,9 +7,13 @@
     "build:packages": "pnpm -r --filter './packages/**' build",
     "dev": "pnpm build:packages && pnpm --parallel --filter @symphonia/daemon --filter @symphonia/web dev",
     "build": "pnpm build:packages && pnpm --filter @symphonia/daemon build && pnpm --filter @symphonia/web build",
-    "test": "pnpm build:packages && pnpm -r --filter './packages/**' --filter @symphonia/daemon test",
+    "test": "pnpm build:packages && pnpm -r --filter './packages/**' --filter @symphonia/daemon --filter @symphonia/desktop test",
     "lint": "eslint apps packages --max-warnings=0",
-    "format": "prettier --write apps packages README.md GOAL_PROGRESS.md"
+    "format": "prettier --write apps packages README.md GOAL_PROGRESS.md",
+    "desktop:dev": "pnpm --filter @symphonia/desktop dev",
+    "desktop:build": "pnpm --filter @symphonia/desktop build",
+    "desktop:package": "pnpm --filter @symphonia/desktop package",
+    "desktop:smoke": "pnpm --filter @symphonia/desktop test"
   },
   "devDependencies": {
     "@eslint/js": "^9.32.0",
@@ -24,6 +28,6 @@
     "vitest": "^3.2.4"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["better-sqlite3", "esbuild", "sharp"]
+    "onlyBuiltDependencies": ["better-sqlite3", "electron", "esbuild", "sharp"]
   }
 }

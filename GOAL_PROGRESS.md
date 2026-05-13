@@ -1,5 +1,175 @@
 # Symphonia Goal Progress
 
+## Milestone 8 Objective
+
+Package Symphonia as a local desktop app with first-run setup and persistent settings while preserving Mock/Codex/Claude/Cursor providers, Mock/Linear trackers, GitHub review artifacts, `WORKFLOW.md` runtime, restart recovery, workspace cleanup, SQLite/SSE, and the browser web+daemon workflow.
+
+## Milestone 8 Starting Repo State
+
+- Branch at start: `milestone-8-desktop-app`, created from `origin/main`.
+- `origin/main` includes the Milestone 7 merge commit `859b75b` (`Merge pull request #5 from agora-creations/milestone-7-recovery-cleanup`).
+- Working tree was clean before Milestone 8 changes.
+- Root `WORKFLOW.md` remains mock tracker/provider mode by default with cleanup disabled/dry-run.
+- Existing browser workflow remains `pnpm dev`; desktop mode must be additive.
+
+## Milestone 8 Planned Checkpoints
+
+1. Add an Electron desktop workspace with TypeScript, Forge packaging, root desktop scripts, and a secure main/preload split.
+2. Decide and document the web serving strategy: desktop dev starts local web/daemon processes; packaging produces a reproducible Electron artifact while preserving the browser workflow.
+3. Add daemon/web lifecycle management in the Electron main process with auto port selection, health checks, bounded logs, restart, and quit cleanup.
+4. Add persistent desktop settings outside the repo with validation, redacted export, and no stored API keys.
+5. Add a first-run setup flow using mock tracker/mock provider by default.
+6. Add desktop settings and diagnostics UI for daemon, providers, trackers, GitHub, recovery, cleanup, logs, and redacted settings.
+7. Implement Electron security defaults: context isolation, no renderer Node integration, sandbox, allowlisted IPC, validated IPC inputs, restricted navigation, and safe external links.
+8. Add deterministic tests for settings, redaction, port/process lifecycle, IPC validation, and desktop diagnostics without real provider credentials or a display server.
+9. Update README with desktop dev/package instructions, settings locations, secret handling, security baseline, troubleshooting, and limitations.
+10. Run final validation: `pnpm test`, `pnpm lint`, `pnpm build`, `pnpm desktop:build`, `pnpm desktop:package`, `git diff --check`, web/daemon smoke, and desktop smoke where feasible.
+
+## Milestone 8 Packaging Strategy
+
+- Use Electron for this milestone because the stack is already Node, Next.js, and local daemon/provider subprocesses.
+- Keep Electron Forge config in `apps/desktop`, but use `@electron/packager` directly for the package command because Forge requires a hoisted pnpm linker and this repo keeps the existing pnpm layout.
+- Electron main owns desktop lifecycle and starts local daemon/web subprocesses.
+- Renderer remains the existing Next.js UI and continues to talk to the daemon over HTTP/SSE.
+- Electron IPC is limited to desktop-only operations: settings, path dialogs, daemon/web lifecycle, diagnostics, safe external links, and revealing configured paths.
+- Tauri remains deferred for future evaluation.
+
+## Milestone 8 Security Assumptions
+
+- `contextIsolation: true`.
+- `nodeIntegration: false`.
+- `sandbox: true` unless a compatibility issue is found and documented.
+- Renderer cannot spawn providers or read arbitrary files directly.
+- IPC channels are allowlisted and inputs are validated.
+- External navigation is blocked from the app window and opened through `shell.openExternal` only for validated HTTP(S) URLs.
+- Settings store env var names for secrets, not raw secret values.
+
+## Milestone 8 Validation Commands
+
+- `pnpm install` after Electron dependencies are added.
+- `pnpm --filter @symphonia/desktop build`
+- `pnpm --filter @symphonia/desktop test`
+- `pnpm test`
+- `pnpm lint`
+- `pnpm build`
+- `pnpm desktop:build`
+- `pnpm desktop:package`
+- `git diff --check`
+- `pnpm dev` smoke check
+- `pnpm desktop:dev` smoke check
+
+## Milestone 8 Checkpoint Progress
+
+### Desktop Scaffold, Settings, Lifecycle, And First-Run UI
+
+- Added `apps/desktop` workspace with Electron, Electron Forge, TypeScript, root desktop scripts, and package config.
+- Added settings schemas, persistent settings store, redacted export, validation, and OS-appropriate settings path handling.
+- Added managed process lifecycle utilities with localhost port selection, health polling, bounded logs, restart, and stop behavior.
+- Added Electron main process, preload bridge, and allowlisted IPC for desktop status, daemon/web lifecycle, settings, diagnostics, path dialogs, safe external links, and starter workflow creation.
+- Added web-side desktop bridge, dynamic daemon URL resolution for HTTP/SSE, first-run setup overlay, and a full Settings page for desktop status, persistent settings, providers, trackers, GitHub, recovery, cleanup, and diagnostics.
+- Added deterministic desktop tests for settings defaults/persistence/redaction, IPC validation, external URL restrictions, local renderer navigation rules, fake process lifecycle, log redaction, stop cleanup, and startup failure handling.
+- Added a staged desktop packaging script that packages compiled desktop code and runtime dependencies without bundling `.symphonia` workspaces, `.data` SQLite files, local output, or secrets.
+- Added SIGINT/SIGTERM cleanup so an interrupted desktop dev session stops managed daemon/web child processes.
+
+## Milestone 8 Final Status
+
+Milestone 8 is implemented and validated. Symphonia now has an Electron desktop workspace, first-run setup, persistent local settings outside the repo, desktop diagnostics, daemon/web lifecycle management, dynamic daemon URL wiring for the existing Next.js UI, a secure preload/IPC boundary, and a reproducible unpacked desktop package. The existing browser `pnpm dev` workflow remains unchanged.
+
+## Milestone 8 Implemented Files and Directories
+
+- `.gitignore`
+- `README.md`
+- `GOAL_PROGRESS.md`
+- `package.json`
+- `pnpm-lock.yaml`
+- `eslint.config.js`
+- `apps/desktop/`
+- `apps/web/app/settings/page.tsx`
+- `apps/web/components/desktop-setup.tsx`
+- `apps/web/components/issues-view.tsx`
+- `apps/web/components/main-layout.tsx`
+- `apps/web/lib/api.ts`
+- `apps/web/lib/desktop.ts`
+
+## Milestone 8 Final Command Results
+
+- `CI=true pnpm install --no-frozen-lockfile` - passed after adding Electron dependencies.
+- `node node_modules/.pnpm/electron@39.8.10/node_modules/electron/install.js` - passed; downloaded the Electron binary for local smoke/package validation.
+- `pnpm --filter @symphonia/desktop test` - passed; 12 tests.
+- `pnpm test` - passed; 158 tests across types, core, db, daemon, and desktop.
+- `pnpm lint` - passed.
+- `pnpm build` - passed. Next.js still prints the existing warning that the Next.js ESLint plugin was not detected.
+- `pnpm desktop:build` - passed.
+- `pnpm desktop:package` - passed.
+- `git diff --check` - passed.
+- `pnpm dev` web/daemon smoke - passed on `SYMPHONIA_DAEMON_PORT=4114`, `PORT=3006`, `NEXT_PUBLIC_DAEMON_URL=http://localhost:4114`.
+- `pnpm desktop:dev` smoke - passed with `SYMPHONIA_DESKTOP_SETTINGS_DIR=/private/tmp/symphonia-desktop-settings-smoke` and `SYMPHONIA_REPO_ROOT=/Users/diegomarono/symphonía`.
+
+## Milestone 8 Desktop Smoke Result
+
+- Electron desktop dev launched.
+- Desktop settings were persisted at `/private/tmp/symphonia-desktop-settings-smoke/settings.json`.
+- Desktop-managed daemon responded on `http://127.0.0.1:4100/healthz`.
+- Desktop-managed web UI responded on `http://127.0.0.1:3000/issues`.
+- Desktop-managed daemon started mock run `05c3e35f-13b8-4e58-b8e5-e98efd03be81`; it reached `succeeded`.
+- SIGINT shutdown stopped both desktop-managed localhost ports. A leftover daemon from the earlier pre-fix smoke was explicitly killed and the port was verified closed.
+
+## Milestone 8 Web/Daemon Smoke Result
+
+- `GET /healthz` returned OK.
+- `GET /providers` returned Mock, Codex, Claude, and Cursor provider entries.
+- `GET /issues` returned mock tracker issues.
+- Web `/settings` returned HTTP 200.
+- Mock run `ed3d3369-a462-4cbf-8f9c-d3da04f97d8d` reached `succeeded`.
+- `GET /runs/:runId/events` returned persisted timeline events.
+- `POST /runs/:runId/review-artifacts/refresh` returned local git review artifacts.
+- `GET /daemon/status` and `GET /workspaces/cleanup/plan` returned recovery/workspace cleanup state.
+
+## Milestone 8 Packaging Result
+
+- Package artifact: `apps/desktop/out/Symphonia-darwin-arm64/Symphonia.app`.
+- Packaging uses `apps/desktop/.desktop-package` as a temporary staged app directory.
+- The staged package includes compiled desktop code and runtime `zod`, and excludes local workspace data, SQLite data, package output, and secrets.
+
+## Milestone 8 Settings Location
+
+- Default macOS settings path: `~/Library/Application Support/Symphonia/settings.json`.
+- Test smoke path: `/private/tmp/symphonia-desktop-settings-smoke/settings.json`.
+- Settings store repository/workflow/workspace/database paths, provider/tracker defaults, cleanup defaults, and integration toggles.
+- Settings store env var names such as `LINEAR_API_KEY` and `GITHUB_TOKEN`, not raw API keys.
+
+## Milestone 8 Security Baseline Result
+
+- Electron renderer uses `contextIsolation: true`.
+- Renderer `nodeIntegration` is disabled.
+- Renderer sandboxing is enabled.
+- Preload exposes a narrow `window.symphoniaDesktop` API.
+- IPC channels are allowlisted and validated with zod.
+- External navigation/new windows are blocked from the app window and opened through `shell.openExternal` only for HTTP(S) URLs.
+- Renderer has no direct command execution or arbitrary filesystem read bridge.
+- File and directory selection happen through main-process OS dialogs.
+- Revealing paths is limited to configured Symphonia paths.
+
+## Milestone 8 Known Limitations
+
+- Code signing is not implemented.
+- Notarization is not implemented.
+- Auto-update is not implemented.
+- Platform installers are not implemented; Milestone 8 produces an unpacked desktop artifact.
+- Tauri packaging is deferred.
+- The packaged desktop shell uses a local Symphonia repository checkout to start the daemon and web server; fully bundled daemon/web runtime distribution is deferred.
+- The desktop app does not reattach to provider processes after daemon restart.
+- Real provider availability still depends on local CLI installation and authentication.
+- Linear/GitHub credentials still use environment variables by default.
+- GitHub PR creation remains deferred.
+- GitHub and Linear writes remain disabled by default.
+- Workspace cleanup remains manual and policy-gated.
+- Cloud accounts and multi-tenancy are not implemented.
+
+## Milestone 8 Recommended Next Milestone
+
+Milestone 9 - Add guided harness builder and agent-readiness scoring for repositories.
+
 ## Milestone 7 Objective
 
 Add daemon restart reconstruction, durable run recovery, and safe workspace cleanup policies while preserving Mock/Codex/Claude/Cursor providers, Mock/Linear trackers, GitHub review artifacts, `WORKFLOW.md` runtime, workspaces, hooks, SQLite/SSE, UI run controls, and all previous milestone behavior. The daemon should restart cleanly, reconstruct historical runs from SQLite, mark interrupted in-flight runs safely, rebuild issue/workspace status, expose recovery state in the UI, support cleanup previews, and keep destructive cleanup disabled unless explicitly configured and confirmed.

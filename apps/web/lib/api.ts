@@ -41,18 +41,29 @@ import {
   WorkspaceResponseSchema,
   WorkspacesResponseSchema,
 } from "@symphonia/types";
+import { getDesktopDaemonUrl } from "@/lib/desktop";
 
 export const DAEMON_URL = process.env.NEXT_PUBLIC_DAEMON_URL ?? "http://localhost:4100";
 
+async function daemonUrl(): Promise<string> {
+  return getDesktopDaemonUrl(DAEMON_URL);
+}
+
 export async function getHealth(): Promise<boolean> {
   try {
-    const response = await fetch(`${DAEMON_URL}/healthz`, { cache: "no-store" });
+    const baseUrl = await daemonUrl();
+    const response = await fetch(`${baseUrl}/healthz`, { cache: "no-store" });
     if (!response.ok) return false;
     HealthResponseSchema.parse(await response.json());
     return true;
   } catch {
     return false;
   }
+}
+
+export async function getRunEventStreamUrl(runId: string): Promise<string> {
+  const baseUrl = await daemonUrl();
+  return `${baseUrl}/runs/${runId}/events/stream`;
 }
 
 export async function getIssues() {
@@ -217,7 +228,8 @@ export async function retryRun(runId: string): Promise<Run> {
 }
 
 async function request(path: string, init?: RequestInit): Promise<unknown> {
-  const response = await fetch(`${DAEMON_URL}${path}`, {
+  const baseUrl = await daemonUrl();
+  const response = await fetch(`${baseUrl}${path}`, {
     ...init,
     cache: "no-store",
   });

@@ -1,15 +1,15 @@
 # Symphonia
 
-Symphonia is a local-first visual orchestration prototype for coding-agent work. It is a Linear-like control plane for fetching tracker issues, starting Mock, Codex, Claude Code, or Cursor Agent runs, watching timelines, stopping/retrying work, recovering safely after daemon restarts, managing local workspaces, reconciling active runs against repo-owned workflow configuration, and inspecting review artifacts from local git and GitHub.
+Symphonia is a local-first visual orchestration prototype for coding-agent work. It is a Linear-like control plane for fetching tracker issues, starting Mock, Codex, Claude Code, or Cursor Agent runs, watching timelines, stopping/retrying work, recovering safely after daemon restarts, managing local workspaces, reconciling active runs against repo-owned workflow configuration, inspecting review artifacts from local git and GitHub, and launching the local workbench through a desktop shell.
 
-Milestone 7 keeps Mock/Codex/Claude/Cursor providers, Mock/Linear trackers, GitHub review artifacts, `WORKFLOW.md` runtime, workspaces, hooks, SQLite/SSE event flow, approvals, stop/retry, and UI stable, then adds durable run recovery and safe workspace cleanup. Automated tests use fake CLIs and temporary databases/workspaces, so contributors do not need real Anthropic, Cursor, OpenAI, Linear, or GitHub credentials for validation.
+Milestone 8 keeps Mock/Codex/Claude/Cursor providers, Mock/Linear trackers, GitHub review artifacts, `WORKFLOW.md` runtime, restart recovery, workspace cleanup, SQLite/SSE event flow, approvals, stop/retry, and the browser web+daemon workflow stable, then adds an Electron desktop shell, first-run setup, persistent local settings, daemon/web lifecycle controls, diagnostics, and desktop packaging. Automated tests use fake CLIs and temporary databases/workspaces, so contributors do not need real Anthropic, Cursor, OpenAI, Linear, or GitHub credentials for validation.
 
-This prototype still does not integrate GitHub OAuth, GitHub App installation flow, GitHub webhooks, auto-push, auto-merge, Linear OAuth, Linear webhooks, auth, billing, cloud tenancy, Electron, or Tauri. GitHub writes and PR creation remain disabled by default; PR creation is still deferred.
+This prototype still does not integrate GitHub OAuth, GitHub App installation flow, GitHub webhooks, auto-push, auto-merge, Linear OAuth, Linear webhooks, auth, billing, cloud tenancy, code signing, notarization, auto-update, or Tauri. GitHub writes and PR creation remain disabled by default; PR creation is still deferred.
 
 Reference: the Codex app-server integration follows the official OpenAI developer docs at <https://developers.openai.com/codex/app-server/>.
 Claude Code CLI command-shape references: <https://docs.anthropic.com/en/docs/claude-code/cli-reference>. Cursor Agent CLI command-shape references: <https://docs.cursor.com/en/cli/reference/parameters> and <https://docs.cursor.com/en/cli/reference/output-format>.
 
-## What Milestone 7 Includes
+## What Milestone 8 Includes
 
 - The Milestone 1 mock tracker/provider loop remains available for tests and demos.
 - The Milestone 2 `WORKFLOW.md` parser, config resolver, prompt renderer, workspace manager, and hook runner remain in the run lifecycle.
@@ -50,6 +50,17 @@ Claude Code CLI command-shape references: <https://docs.anthropic.com/en/docs/cl
 - Cleanup policy under `workspace.cleanup` with disabled, dry-run, manual-confirmation, active-run, recent-run, and dirty-git protections by default.
 - Cleanup preview endpoint and UI. Planning never deletes files.
 - Manual cleanup execution endpoint and UI, guarded by `enabled: true`, `dry_run: false`, exact confirmation text, path containment, symlink protection, active-run recheck, dirty-git protection, and optional `before_remove` hook.
+- Electron desktop workspace under `apps/desktop`.
+- Desktop dev command that starts the daemon and web UI automatically from the desktop shell.
+- Electron main process lifecycle ownership for local daemon and web subprocesses, with localhost-only ports, health polling, bounded logs, restart actions, and quit cleanup for processes the shell started.
+- Persistent desktop settings outside the repo, including first-run completion, repository path, workflow path, workspace root, database path, daemon port preference, default provider/tracker, integration toggles, and safe cleanup defaults.
+- Settings store environment variable names for secrets such as `LINEAR_API_KEY` and `GITHUB_TOKEN`; raw API keys are not stored in desktop settings.
+- First-run setup flow for repository/workspace/database selection and safe mock tracker/mock provider defaults.
+- Optional safe starter `WORKFLOW.md` creation when a chosen repository is missing one.
+- Desktop settings and diagnostics UI for daemon/web status, providers, trackers, GitHub, recovery, cleanup, bounded logs, and redacted settings export.
+- Desktop bridge for dynamic daemon URL resolution, so the same Next.js UI talks to the daemon provided by Electron in desktop mode and `NEXT_PUBLIC_DAEMON_URL` in browser mode.
+- Electron security baseline: context isolation, renderer Node integration disabled, sandbox enabled, allowlisted IPC, zod-validated IPC inputs, restricted navigation, safe external link handling, and no renderer command spawning or arbitrary file reads.
+- Reproducible unpacked desktop packaging through `pnpm desktop:package`.
 
 ## Install
 
@@ -75,6 +86,66 @@ Default URLs:
 
 - Web app: `http://localhost:3000`
 - Daemon: `http://localhost:4100`
+
+## Desktop App
+
+Desktop mode is additive. The existing browser workflow still works, and contributors do not need desktop mode to run tests or develop the daemon/web app.
+
+Run the desktop shell in development:
+
+```bash
+pnpm desktop:dev
+```
+
+The Electron main process starts the local daemon and Next.js web server, passes the daemon URL to the renderer, loads the existing board UI, and stops only the child processes it started when the desktop app quits.
+
+Build and package the desktop app:
+
+```bash
+pnpm desktop:build
+pnpm desktop:package
+```
+
+The unpacked macOS artifact is written to:
+
+```text
+apps/desktop/out/Symphonia-darwin-arm64/Symphonia.app
+```
+
+Packaging uses a staged app directory with compiled desktop code and runtime dependencies only. It excludes `.symphonia` workspaces, `.data` SQLite files, local package output, and secrets. Code signing, notarization, platform installers, and auto-update are not implemented yet.
+
+The repo includes Electron Forge config, but the current package script uses `@electron/packager` directly because Forge requires a hoisted pnpm linker for packaging. That keeps the repository's existing pnpm layout intact while still producing a reproducible unpacked Electron artifact.
+
+Desktop settings are stored outside the repository:
+
+- macOS: `~/Library/Application Support/Symphonia/settings.json`
+- Linux: `${XDG_CONFIG_HOME:-~/.config}/symphonia/settings.json`
+- Windows: `%APPDATA%/Symphonia/settings.json`
+
+For tests or isolated local validation, set `SYMPHONIA_DESKTOP_SETTINGS_DIR` to a temporary directory.
+
+First-run setup:
+
+1. Launch `pnpm desktop:dev`.
+2. Choose the repository folder.
+3. Keep mock tracker and mock provider selected for the safe local path.
+4. Choose or accept the default workspace root and SQLite database path.
+5. Create a safe starter `WORKFLOW.md` only if the repository does not already have one.
+6. Finish setup. The daemon restarts with saved local settings and the board opens.
+
+Desktop diagnostics are available from the Settings page. The diagnostics bundle includes app, Node/Electron, daemon, web, provider, tracker, GitHub, recovery, workspace, and bounded log information. It redacts secret values and reports env var names rather than API keys.
+
+Desktop security baseline:
+
+- Electron loads local or localhost content only.
+- `contextIsolation` is enabled.
+- Renderer `nodeIntegration` is disabled.
+- Renderer sandboxing is enabled.
+- The preload script exposes a small typed bridge for settings, path dialogs, lifecycle controls, diagnostics, safe external links, and revealing configured paths.
+- IPC channels are allowlisted and inputs are validated.
+- External navigation and new windows are blocked in the app window and opened through `shell.openExternal` only for HTTP(S) URLs.
+- The renderer cannot spawn providers, execute commands, or read arbitrary files directly.
+- Desktop settings store env var names for secrets, not raw API keys.
 
 Useful daemon environment variables:
 
@@ -638,12 +709,41 @@ Restart and cleanup validation:
 10. In a safe temporary workflow override, enable cleanup with `dry_run: false`, preview again, type `delete workspaces`, and execute cleanup.
 11. Confirm only intended candidate workspaces are deleted and protected workspaces remain.
 
+Desktop validation:
+
+1. Run `pnpm desktop:dev`.
+2. Confirm the Electron window opens and starts daemon/web child processes.
+3. Complete first-run setup with mock tracker and mock provider.
+4. Confirm the board loads without running `pnpm dev`.
+5. Start a mock provider run and confirm SSE timeline events appear.
+6. Stop and retry a run from the desktop window.
+7. Open Settings and confirm daemon, providers, tracker, GitHub, recovery, workspace cleanup, and diagnostics are visible.
+8. Restart the daemon from Settings and confirm the board reconnects.
+9. Quit and relaunch the desktop app and confirm settings persist.
+10. Run `pnpm desktop:package` and confirm the unpacked artifact appears under `apps/desktop/out`.
+
+Desktop troubleshooting:
+
+- `daemon failed to start`: open Settings diagnostics, confirm repository path points at the Symphonia checkout, and check recent daemon logs.
+- `port occupied`: the desktop lifecycle manager auto-selects the next available localhost port; restart from Settings if the first attempt raced another process.
+- `web app failed to load`: confirm the selected repository has dependencies installed and that `pnpm --filter @symphonia/web dev` works from the repo root.
+- `settings invalid`: use first-run setup or Settings to choose repository, workflow, workspace, and database paths again.
+- `provider command not found`: keep Mock selected or install/configure the provider CLI locally.
+- `Linear/GitHub env var missing`: export `LINEAR_API_KEY`, `GITHUB_TOKEN`, or `GITHUB_PAT` in the environment that launches the desktop app.
+- `package build failed`: run `pnpm install`, ensure Electron was downloaded, then rerun `pnpm desktop:package`.
+
 ## SQLite Data
 
 Run events are append-only in SQLite. The daemon also stores durable run records, the latest issue cache, and latest review artifact snapshot per run. The default path is `./.data/agentboard.sqlite`, relative to the daemon process. Workspaces are real folders under the configured workflow workspace root.
 
 ## Known Limitations
 
+- Code signing is not implemented.
+- Notarization is not implemented.
+- Auto-update is not implemented.
+- Platform installers are not implemented; Milestone 8 produces an unpacked desktop artifact.
+- Tauri packaging is deferred.
+- The packaged desktop shell uses a local Symphonia repository checkout to start the daemon and web server; fully bundled daemon/web runtime distribution is deferred.
 - Claude/Cursor live approval protocols are not implemented like Codex app-server approvals.
 - Claude/Cursor continuation and resume are stored only as session/request metadata; automatic continuation is not implemented.
 - Real Claude validation depends on local Claude Code installation and authentication.
@@ -677,4 +777,4 @@ Run events are append-only in SQLite. The daemon also stores durable run records
 
 ## Next Milestone
 
-Milestone 8 - Package Symphonia as a local desktop app with first-run setup and settings.
+Milestone 9 - Add guided harness builder and agent-readiness scoring for repositories.
