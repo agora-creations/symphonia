@@ -48,6 +48,7 @@ export const RunStatusSchema = z.enum([
   "preparing_workspace",
   "building_prompt",
   "launching_agent",
+  "running",
   "streaming",
   "waiting_for_approval",
   "succeeded",
@@ -55,8 +56,23 @@ export const RunStatusSchema = z.enum([
   "timed_out",
   "stalled",
   "cancelled",
+  "interrupted",
+  "orphaned",
+  "recovered",
 ]);
 export type RunStatus = z.infer<typeof RunStatusSchema>;
+
+export const RecoveryStateSchema = z.enum([
+  "none",
+  "active",
+  "terminal",
+  "orphaned_on_startup",
+  "interrupted_by_restart",
+  "manually_retried",
+  "cleanup_candidate",
+  "cleanup_protected",
+]);
+export type RecoveryState = z.infer<typeof RecoveryStateSchema>;
 
 export const ProviderIdSchema = z.enum(["mock", "codex", "claude", "cursor"]);
 export type ProviderId = z.infer<typeof ProviderIdSchema>;
@@ -67,6 +83,9 @@ export const terminalRunStatuses: readonly RunStatus[] = [
   "timed_out",
   "stalled",
   "cancelled",
+  "interrupted",
+  "orphaned",
+  "recovered",
 ];
 
 export function isTerminalRunStatus(status: RunStatus): boolean {
@@ -77,11 +96,25 @@ export const RunSchema = z.object({
   id: z.string().min(1),
   issueId: z.string().min(1),
   issueIdentifier: z.string().min(1),
+  issueTitle: z.string().nullable().default(null),
+  trackerKind: TrackerKindSchema.default("mock"),
   status: RunStatusSchema,
   provider: ProviderIdSchema,
+  attempt: z.number().int().positive().default(1),
+  retryOfRunId: z.string().min(1).nullable().default(null),
+  workspacePath: z.string().min(1).nullable().default(null),
+  renderedPromptId: z.string().min(1).nullable().default(null),
+  providerMetadata: z.record(z.string(), z.unknown()).default({}),
   startedAt: isoDateTime.nullable(),
+  updatedAt: isoDateTime.nullable().default(null),
   endedAt: isoDateTime.nullable(),
+  lastEventAt: isoDateTime.nullable().default(null),
+  terminalReason: z.string().nullable().default(null),
   error: z.string().nullable(),
+  recoveryState: RecoveryStateSchema.default("none"),
+  recoveredAt: isoDateTime.nullable().default(null),
+  createdByDaemonInstanceId: z.string().min(1).nullable().default(null),
+  lastSeenDaemonInstanceId: z.string().min(1).nullable().default(null),
 });
 export type Run = z.infer<typeof RunSchema>;
 
@@ -139,6 +172,28 @@ export const ApprovalResolvedEventSchema = BaseAgentEventSchema.extend({
   resolution: ApprovalDecisionSchema,
 });
 
+export const RunRecoveredEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("run.recovered"),
+  previousStatus: RunStatusSchema,
+  newStatus: RunStatusSchema,
+  previousDaemonInstanceId: z.string().min(1).nullable(),
+  currentDaemonInstanceId: z.string().min(1),
+  recoveredAt: isoDateTime,
+  reason: z.literal("daemon_startup_recovery"),
+  retryAvailable: z.boolean(),
+});
+
+export const ApprovalRecoveredEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("approval.recovered"),
+  approvalId: z.string().min(1),
+  previousStatus: z.literal("pending"),
+  newStatus: z.literal("stale"),
+  previousDaemonInstanceId: z.string().min(1).nullable(),
+  currentDaemonInstanceId: z.string().min(1),
+  recoveredAt: isoDateTime,
+  reason: z.literal("daemon_startup_recovery"),
+});
+
 export const UsageEventSchema = BaseAgentEventSchema.extend({
   type: z.literal("usage"),
   inputTokens: z.number().int().nonnegative(),
@@ -188,8 +243,44 @@ export const PollingConfigSchema = z.object({
 });
 export type PollingConfig = z.infer<typeof PollingConfigSchema>;
 
+const defaultWorkspaceCleanupPolicy = {
+  enabled: false,
+  dryRun: true,
+  requireManualConfirmation: true,
+  deleteTerminalAfterMs: 604_800_000,
+  deleteOrphanedAfterMs: 1_209_600_000,
+  deleteInterruptedAfterMs: 1_209_600_000,
+  maxWorkspaceAgeMs: null,
+  maxTotalBytes: null,
+  protectActive: true,
+  protectRecentRunsMs: 86_400_000,
+  protectDirtyGit: true,
+  includeTerminalStates: ["Done", "Closed", "Cancelled", "Canceled", "Duplicate"],
+  excludeIdentifiers: [],
+  includeIdentifiers: [],
+};
+
+export const WorkspaceCleanupPolicySchema = z.object({
+  enabled: z.boolean(),
+  dryRun: z.boolean(),
+  requireManualConfirmation: z.boolean(),
+  deleteTerminalAfterMs: z.number().int().nonnegative().nullable(),
+  deleteOrphanedAfterMs: z.number().int().nonnegative().nullable(),
+  deleteInterruptedAfterMs: z.number().int().nonnegative().nullable(),
+  maxWorkspaceAgeMs: z.number().int().nonnegative().nullable(),
+  maxTotalBytes: z.number().int().nonnegative().nullable(),
+  protectActive: z.boolean(),
+  protectRecentRunsMs: z.number().int().nonnegative(),
+  protectDirtyGit: z.boolean(),
+  includeTerminalStates: z.array(z.string().min(1)),
+  excludeIdentifiers: z.array(z.string().min(1)),
+  includeIdentifiers: z.array(z.string().min(1)),
+});
+export type WorkspaceCleanupPolicy = z.infer<typeof WorkspaceCleanupPolicySchema>;
+
 export const WorkspaceConfigSchema = z.object({
   root: z.string().min(1),
+  cleanup: WorkspaceCleanupPolicySchema.default(defaultWorkspaceCleanupPolicy),
 });
 export type WorkspaceConfig = z.infer<typeof WorkspaceConfigSchema>;
 
@@ -337,6 +428,22 @@ export const WorkflowConfigSummarySchema = z.object({
   readOnly: z.boolean(),
   writeEnabled: z.boolean(),
   workspaceRoot: z.string().min(1),
+  workspaceCleanup: z.object({
+    enabled: z.boolean(),
+    dryRun: z.boolean(),
+    requireManualConfirmation: z.boolean(),
+    protectActive: z.boolean(),
+    protectRecentRunsMs: z.number().int().nonnegative(),
+    protectDirtyGit: z.boolean(),
+    deleteTerminalAfterMs: z.number().int().nonnegative().nullable(),
+    deleteOrphanedAfterMs: z.number().int().nonnegative().nullable(),
+    deleteInterruptedAfterMs: z.number().int().nonnegative().nullable(),
+    maxWorkspaceAgeMs: z.number().int().nonnegative().nullable(),
+    maxTotalBytes: z.number().int().nonnegative().nullable(),
+    includeTerminalStates: z.array(z.string().min(1)),
+    excludeIdentifiers: z.array(z.string().min(1)),
+    includeIdentifiers: z.array(z.string().min(1)),
+  }).default(defaultWorkspaceCleanupPolicy),
   maxConcurrentAgents: z.number().int().positive(),
   maxTurns: z.number().int().positive(),
   hookTimeoutMs: z.number().int().positive(),
@@ -417,6 +524,78 @@ export const WorkspaceInfoSchema = z.object({
 });
 export type WorkspaceInfo = z.infer<typeof WorkspaceInfoSchema>;
 
+export const WorkspaceInventoryItemSchema = z.object({
+  issueIdentifier: z.string().min(1),
+  workspaceKey: z.string().min(1),
+  path: z.string().min(1),
+  exists: z.boolean(),
+  lastModifiedAt: isoDateTime.nullable(),
+  sizeBytes: z.number().int().nonnegative().nullable(),
+  isGitRepo: z.boolean().nullable(),
+  isDirtyGit: z.boolean().nullable(),
+  latestRunId: z.string().min(1).nullable(),
+  latestRunStatus: RunStatusSchema.nullable(),
+  trackerState: z.string().min(1).nullable(),
+  active: z.boolean(),
+  recent: z.boolean(),
+  terminalIssue: z.boolean(),
+  noMatchingIssue: z.boolean(),
+  orphanedRun: z.boolean(),
+  protected: z.boolean(),
+  cleanupCandidate: z.boolean(),
+  reasons: z.array(z.string().min(1)),
+  lastCheckedAt: isoDateTime,
+});
+export type WorkspaceInventoryItem = z.infer<typeof WorkspaceInventoryItemSchema>;
+
+export const WorkspaceInventorySchema = z.object({
+  root: z.string().min(1),
+  generatedAt: isoDateTime,
+  workspaces: z.array(WorkspaceInventoryItemSchema),
+  counts: z.object({
+    total: z.number().int().nonnegative(),
+    active: z.number().int().nonnegative(),
+    protected: z.number().int().nonnegative(),
+    candidates: z.number().int().nonnegative(),
+  }),
+});
+export type WorkspaceInventory = z.infer<typeof WorkspaceInventorySchema>;
+
+export const CleanupPlanItemSchema = z.object({
+  issueIdentifier: z.string().min(1),
+  workspaceKey: z.string().min(1),
+  path: z.string().min(1),
+  sizeBytes: z.number().int().nonnegative().nullable(),
+  reasons: z.array(z.string().min(1)),
+  protectionReasons: z.array(z.string().min(1)),
+});
+export type CleanupPlanItem = z.infer<typeof CleanupPlanItemSchema>;
+
+export const WorkspaceCleanupPlanSchema = z.object({
+  id: z.string().min(1),
+  generatedAt: isoDateTime,
+  root: z.string().min(1),
+  enabled: z.boolean(),
+  dryRun: z.boolean(),
+  requireManualConfirmation: z.boolean(),
+  candidates: z.array(CleanupPlanItemSchema),
+  protected: z.array(CleanupPlanItemSchema),
+  estimatedBytesToDelete: z.number().int().nonnegative().nullable(),
+  warnings: z.array(z.string().min(1)),
+});
+export type WorkspaceCleanupPlan = z.infer<typeof WorkspaceCleanupPlanSchema>;
+
+export const WorkspaceCleanupResultSchema = z.object({
+  startedAt: isoDateTime,
+  completedAt: isoDateTime,
+  dryRun: z.boolean(),
+  deleted: z.array(CleanupPlanItemSchema),
+  skipped: z.array(CleanupPlanItemSchema.extend({ skippedReason: z.string().min(1) })),
+  errors: z.array(z.object({ workspaceKey: z.string().min(1), path: z.string().min(1), error: z.string().min(1) })),
+  bytesFreed: z.number().int().nonnegative().nullable(),
+});
+export type WorkspaceCleanupResult = z.infer<typeof WorkspaceCleanupResultSchema>;
+
 export const HookRunSchema = z.object({
   hookName: HookNameSchema,
   status: HookStatusSchema,
@@ -448,6 +627,43 @@ export const WorkflowInvalidEventSchema = BaseAgentEventSchema.extend({
 export const WorkspaceReadyEventSchema = BaseAgentEventSchema.extend({
   type: z.literal("workspace.ready"),
   workspace: WorkspaceInfoSchema,
+});
+
+export const WorkspaceCleanupPlannedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("workspace.cleanup.planned"),
+  plan: WorkspaceCleanupPlanSchema,
+});
+
+export const WorkspaceCleanupStartedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("workspace.cleanup.started"),
+  workspaceKey: z.string().min(1),
+  path: z.string().min(1),
+});
+
+export const WorkspaceCleanupSkippedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("workspace.cleanup.skipped"),
+  workspaceKey: z.string().min(1),
+  path: z.string().min(1),
+  reason: z.string().min(1),
+});
+
+export const WorkspaceCleanupDeletedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("workspace.cleanup.deleted"),
+  workspaceKey: z.string().min(1),
+  path: z.string().min(1),
+  bytesFreed: z.number().int().nonnegative().nullable(),
+});
+
+export const WorkspaceCleanupFailedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("workspace.cleanup.failed"),
+  workspaceKey: z.string().min(1),
+  path: z.string().min(1),
+  error: z.string().min(1),
+});
+
+export const WorkspaceCleanupCompletedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("workspace.cleanup.completed"),
+  result: WorkspaceCleanupResultSchema,
 });
 
 export const HookStartedEventSchema = BaseAgentEventSchema.extend({
@@ -901,15 +1117,23 @@ export const CursorErrorEventSchema = BaseAgentEventSchema.extend({
 
 export const AgentEventSchema = z.discriminatedUnion("type", [
   RunStatusEventSchema,
+  RunRecoveredEventSchema,
   AgentMessageEventSchema,
   ToolCallEventSchema,
   ApprovalRequestedEventSchema,
   ApprovalResolvedEventSchema,
+  ApprovalRecoveredEventSchema,
   UsageEventSchema,
   ArtifactEventSchema,
   WorkflowLoadedEventSchema,
   WorkflowInvalidEventSchema,
   WorkspaceReadyEventSchema,
+  WorkspaceCleanupPlannedEventSchema,
+  WorkspaceCleanupStartedEventSchema,
+  WorkspaceCleanupSkippedEventSchema,
+  WorkspaceCleanupDeletedEventSchema,
+  WorkspaceCleanupFailedEventSchema,
+  WorkspaceCleanupCompletedEventSchema,
   HookStartedEventSchema,
   HookSucceededEventSchema,
   HookFailedEventSchema,
@@ -1088,6 +1312,26 @@ export const ProviderHealthResponseSchema = z.object({
 });
 export type ProviderHealthResponse = z.infer<typeof ProviderHealthResponseSchema>;
 
+export const DaemonStatusSchema = z.object({
+  daemonInstanceId: z.string().min(1),
+  startedAt: isoDateTime,
+  recoveredAt: isoDateTime.nullable(),
+  recoveredRunsCount: z.number().int().nonnegative(),
+  orphanedRunsCount: z.number().int().nonnegative(),
+  activeRunsCount: z.number().int().nonnegative(),
+  dbPath: z.string().min(1),
+  workspaceRoot: z.string().min(1).nullable(),
+  workflowStatus: z.enum(["healthy", "missing", "invalid"]),
+  trackerStatus: z.enum(["mock", "healthy", "invalid_config", "unavailable", "stale", "unknown"]),
+  providerSummary: z.array(ProviderHealthSchema.pick({ id: true, enabled: true, available: true, status: true })),
+});
+export type DaemonStatus = z.infer<typeof DaemonStatusSchema>;
+
+export const DaemonStatusResponseSchema = z.object({
+  daemon: DaemonStatusSchema,
+});
+export type DaemonStatusResponse = z.infer<typeof DaemonStatusResponseSchema>;
+
 export const ApprovalStateSchema = z.object({
   approvalId: z.string().min(1),
   runId: z.string().min(1),
@@ -1125,14 +1369,37 @@ export const WorkflowConfigResponseSchema = z.object({
 export type WorkflowConfigResponse = z.infer<typeof WorkflowConfigResponseSchema>;
 
 export const WorkspacesResponseSchema = z.object({
-  workspaces: z.array(WorkspaceInfoSchema),
+  workspaces: z.array(WorkspaceInventoryItemSchema),
+  inventory: WorkspaceInventorySchema,
 });
 export type WorkspacesResponse = z.infer<typeof WorkspacesResponseSchema>;
 
 export const WorkspaceResponseSchema = z.object({
-  workspace: WorkspaceInfoSchema,
+  workspace: z.union([WorkspaceInfoSchema, WorkspaceInventoryItemSchema]),
 });
 export type WorkspaceResponse = z.infer<typeof WorkspaceResponseSchema>;
+
+export const WorkspaceInventoryResponseSchema = z.object({
+  inventory: WorkspaceInventorySchema,
+});
+export type WorkspaceInventoryResponse = z.infer<typeof WorkspaceInventoryResponseSchema>;
+
+export const WorkspaceCleanupPlanResponseSchema = z.object({
+  plan: WorkspaceCleanupPlanSchema,
+});
+export type WorkspaceCleanupPlanResponse = z.infer<typeof WorkspaceCleanupPlanResponseSchema>;
+
+export const WorkspaceCleanupExecuteRequestSchema = z.object({
+  planId: z.string().min(1).optional(),
+  identifiers: z.array(z.string().min(1)).optional(),
+  confirm: z.string().min(1).optional(),
+});
+export type WorkspaceCleanupExecuteRequest = z.infer<typeof WorkspaceCleanupExecuteRequestSchema>;
+
+export const WorkspaceCleanupExecuteResponseSchema = z.object({
+  result: WorkspaceCleanupResultSchema,
+});
+export type WorkspaceCleanupExecuteResponse = z.infer<typeof WorkspaceCleanupExecuteResponseSchema>;
 
 export const PromptResponseSchema = z.object({
   prompt: z.string().nullable(),

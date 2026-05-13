@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AgentEvent, Issue, ReviewArtifactSnapshot } from "@symphonia/types";
+import { AgentEvent, Issue, ReviewArtifactSnapshot, Run } from "@symphonia/types";
 import { EventStore } from "../src";
 
 let directory: string;
@@ -87,6 +87,33 @@ describe("EventStore", () => {
     store.saveReviewArtifactSnapshot({ ...first, error: "refresh failed", lastRefreshedAt: "2026-05-13T08:06:00.000Z" });
     expect(store.getReviewArtifactSnapshot("run-1")?.error).toBe("refresh failed");
   });
+
+  it("saves and fetches durable run records", () => {
+    const first = runRecord("run-1", "queued");
+    store.saveRun(first);
+
+    expect(store.getRun("run-1")).toMatchObject({
+      id: "run-1",
+      issueIdentifier: "ENG-1",
+      status: "queued",
+      recoveryState: "active",
+    });
+
+    store.saveRun({
+      ...first,
+      status: "succeeded",
+      endedAt: "2026-05-13T08:03:00.000Z",
+      updatedAt: "2026-05-13T08:03:00.000Z",
+      recoveryState: "terminal",
+    });
+
+    expect(store.listRuns().map((item) => item.id)).toEqual(["run-1"]);
+    expect(store.getRun("run-1")).toMatchObject({
+      status: "succeeded",
+      endedAt: "2026-05-13T08:03:00.000Z",
+      recoveryState: "terminal",
+    });
+  });
 });
 
 function issue(identifier: string, state: string): Issue {
@@ -159,5 +186,32 @@ function reviewArtifactSnapshot(runId: string, identifier: string, lastRefreshed
     workflowRuns: [],
     lastRefreshedAt,
     error: null,
+  };
+}
+
+function runRecord(id: string, status: Run["status"]): Run {
+  return {
+    id,
+    issueId: "issue-ENG-1",
+    issueIdentifier: "ENG-1",
+    issueTitle: "Durable run",
+    trackerKind: "linear",
+    status,
+    provider: "mock",
+    attempt: 1,
+    retryOfRunId: null,
+    workspacePath: "/tmp/ENG-1",
+    renderedPromptId: null,
+    providerMetadata: {},
+    startedAt: "2026-05-13T08:00:00.000Z",
+    updatedAt: "2026-05-13T08:01:00.000Z",
+    endedAt: null,
+    lastEventAt: "2026-05-13T08:01:00.000Z",
+    terminalReason: null,
+    error: null,
+    recoveryState: "active",
+    recoveredAt: null,
+    createdByDaemonInstanceId: "daemon-old",
+    lastSeenDaemonInstanceId: "daemon-old",
   };
 }

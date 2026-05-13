@@ -8,6 +8,8 @@ import {
   IssueSchema,
   ReviewArtifactSnapshot,
   ReviewArtifactSnapshotSchema,
+  Run,
+  RunSchema,
   TrackerKind,
 } from "@symphonia/types";
 
@@ -32,8 +34,10 @@ type ReviewArtifactRow = {
 
 export class EventStore {
   private readonly db: Database.Database;
+  private readonly databasePath: string;
 
   constructor(databasePath = resolve(process.env.SYMPHONIA_DB_PATH ?? DEFAULT_DATABASE_PATH)) {
+    this.databasePath = databasePath;
     mkdirSync(dirname(databasePath), { recursive: true });
     this.db = new Database(databasePath);
     this.db.pragma("journal_mode = WAL");
@@ -58,6 +62,97 @@ export class EventStore {
         payloadJson: JSON.stringify(parsed),
         createdAt: new Date().toISOString(),
       });
+  }
+
+  saveRun(run: Run): void {
+    const parsed = RunSchema.parse(run);
+    this.db
+      .prepare(
+        `
+          insert into run_records (
+            run_id,
+            issue_id,
+            issue_identifier,
+            tracker_kind,
+            provider,
+            status,
+            started_at,
+            updated_at,
+            ended_at,
+            last_event_at,
+            recovery_state,
+            payload_json
+          )
+          values (
+            @runId,
+            @issueId,
+            @issueIdentifier,
+            @trackerKind,
+            @provider,
+            @status,
+            @startedAt,
+            @updatedAt,
+            @endedAt,
+            @lastEventAt,
+            @recoveryState,
+            @payloadJson
+          )
+          on conflict(run_id) do update set
+            issue_id = excluded.issue_id,
+            issue_identifier = excluded.issue_identifier,
+            tracker_kind = excluded.tracker_kind,
+            provider = excluded.provider,
+            status = excluded.status,
+            started_at = excluded.started_at,
+            updated_at = excluded.updated_at,
+            ended_at = excluded.ended_at,
+            last_event_at = excluded.last_event_at,
+            recovery_state = excluded.recovery_state,
+            payload_json = excluded.payload_json
+        `,
+      )
+      .run({
+        runId: parsed.id,
+        issueId: parsed.issueId,
+        issueIdentifier: parsed.issueIdentifier,
+        trackerKind: parsed.trackerKind,
+        provider: parsed.provider,
+        status: parsed.status,
+        startedAt: parsed.startedAt,
+        updatedAt: parsed.updatedAt,
+        endedAt: parsed.endedAt,
+        lastEventAt: parsed.lastEventAt,
+        recoveryState: parsed.recoveryState,
+        payloadJson: JSON.stringify(parsed),
+      });
+  }
+
+  getRun(runId: string): Run | null {
+    const row = this.db
+      .prepare(
+        `
+          select payload_json
+          from run_records
+          where run_id = ?
+        `,
+      )
+      .get(runId) as StoredRow | undefined;
+
+    return row ? RunSchema.parse(JSON.parse(row.payload_json)) : null;
+  }
+
+  listRuns(): Run[] {
+    const rows = this.db
+      .prepare(
+        `
+          select payload_json
+          from run_records
+          order by coalesce(started_at, updated_at, last_event_at, '') desc, run_id asc
+        `,
+      )
+      .all() as StoredRow[];
+
+    return rows.map((row) => RunSchema.parse(JSON.parse(row.payload_json)));
   }
 
   getEventsForRun(runId: string): AgentEvent[] {
@@ -290,8 +385,33 @@ export class EventStore {
     this.db.close();
   }
 
+  getDatabasePath(): string {
+    return this.databasePath;
+  }
+
   private initialize(): void {
     this.db.exec(`
+      create table if not exists run_records (
+        run_id text primary key,
+        issue_id text not null,
+        issue_identifier text not null,
+        tracker_kind text not null,
+        provider text not null,
+        status text not null,
+        started_at text,
+        updated_at text,
+        ended_at text,
+        last_event_at text,
+        recovery_state text not null,
+        payload_json text not null
+      );
+
+      create index if not exists idx_run_records_issue_id
+      on run_records (issue_id, started_at);
+
+      create index if not exists idx_run_records_status
+      on run_records (status, updated_at);
+
       create table if not exists run_events (
         sequence integer primary key autoincrement,
         event_id text not null unique,

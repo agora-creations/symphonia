@@ -1,5 +1,195 @@
 # Symphonia Goal Progress
 
+## Milestone 7 Objective
+
+Add daemon restart reconstruction, durable run recovery, and safe workspace cleanup policies while preserving Mock/Codex/Claude/Cursor providers, Mock/Linear trackers, GitHub review artifacts, `WORKFLOW.md` runtime, workspaces, hooks, SQLite/SSE, UI run controls, and all previous milestone behavior. The daemon should restart cleanly, reconstruct historical runs from SQLite, mark interrupted in-flight runs safely, rebuild issue/workspace status, expose recovery state in the UI, support cleanup previews, and keep destructive cleanup disabled unless explicitly configured and confirmed.
+
+## Milestone 7 Starting Repo State
+
+- Branch at start: `milestone-6-cli-providers...origin/milestone-6-cli-providers`, clean working tree.
+- Current baseline commit at branch start: `df21109` (`Cleanup deletions in TanStack/Vite-looking app`), which sits on top of Milestone 6 commit `00b106e`.
+- Milestone 7 branch: `milestone-7-recovery-cleanup`.
+- Root `WORKFLOW.md` remains safe in mock tracker/provider mode by default and must stay that way.
+- Existing Milestone 6 behavior present: Mock/Codex/Claude/Cursor provider selection, Mock/Linear trackers, workflow parser/runtime, workspace manager, hooks, SQLite run events, SSE streams, approvals, stop/retry, GitHub review artifacts, provider health, tracker status, and UI provider/timeline/review panels.
+
+## Milestone 7 Planned Checkpoints
+
+1. Add a durable SQLite run registry with recovery fields while keeping append-only run events unchanged.
+2. Reconstruct persisted runs on daemon startup, mark prior non-terminal runs interrupted/orphaned, append recovery events, and preserve terminal runs.
+3. Recover stale pending approvals safely so old Codex approvals are not actionable after restart.
+4. Add workspace inventory rebuilt from disk with active/recent/orphan/protection status.
+5. Extend `WORKFLOW.md` workspace cleanup policy with disabled/dry-run/manual defaults.
+6. Add a pure cleanup planner that previews candidates and protections without deleting files.
+7. Add manual cleanup execution guarded by policy, explicit confirmation, path containment, symlink safety, and before_remove hooks.
+8. Expose daemon/recovery, workspace inventory, cleanup plan, and cleanup execution APIs.
+9. Update the UI with recovery status, recovered run badges, workspace inventory, cleanup preview, and gated cleanup execution.
+10. Add deterministic restart/recovery, registry, workspace, and cleanup tests using temporary DBs and workspace roots.
+11. Document recovery, cleanup policy, API changes, manual validation, and known limitations.
+12. Run final validation: `pnpm test`, `pnpm lint`, `pnpm build`, `git diff --check`, and `pnpm dev` smoke.
+
+## Milestone 7 Validation Commands
+
+- `pnpm --filter @symphonia/types test`
+- `pnpm --filter @symphonia/core test`
+- `pnpm --filter @symphonia/db test`
+- `pnpm --filter @symphonia/daemon test`
+- `pnpm test`
+- `pnpm lint`
+- `pnpm build`
+- `git diff --check`
+- `pnpm dev` smoke check
+
+## Milestone 7 Recovery Assumptions
+
+- Provider subprocesses from an old daemon instance are not safe to reattach.
+- Startup recovery should reconstruct history, mark prior non-terminal runs interrupted by restart, release active claims, preserve events, and allow manual retry.
+- Recovery must never turn an interrupted run into success and must never auto-retry by default.
+- Stale approvals from prior daemon instances should be visible in history but not actionable.
+
+## Milestone 7 Cleanup Safety Policy
+
+- Cleanup is disabled by default.
+- Cleanup planning is preview-only and deletes nothing.
+- Cleanup execution requires `workspace.cleanup.enabled: true`, `dry_run: false`, and explicit manual confirmation.
+- Active workspaces, recent runs, dirty git workspaces, path traversal targets, symlink escapes, and the workspace root itself are protected by default.
+- No automatic workspace deletion is allowed in this milestone.
+
+## Milestone 7 Checkpoint Progress
+
+### Durable Run Registry, Startup Recovery, and Cleanup Core
+
+- Added durable SQLite `run_records` persistence alongside append-only `run_events`.
+- Extended run records with tracker/provider metadata, attempts, retry linkage, workspace path, prompt event reference, provider metadata, terminal reason, recovery state, daemon instance ids, and recovery timestamps.
+- Daemon startup now generates a daemon instance id, reconstructs persisted run records, preserves terminal runs, marks previous non-terminal runs `interrupted` or `orphaned`, appends `run.recovered`, and keeps old timelines intact.
+- Stale pending approval events from recovered runs are marked with `approval.recovered` and `approval.resolved` cancellation events; the restarted daemon does not expose them as pending actions.
+- Retry works for recovered runs and marks the previous recovered run `manually_retried`.
+- Added workspace cleanup policy schema under `workspace.cleanup`, with disabled/dry-run/manual/protected defaults.
+- Added workspace inventory and cleanup planning core logic with active/recent/dirty/orphan/terminal protection and candidate reasons.
+- Added manual cleanup execution in the daemon, gated by policy, dry-run, confirmation text, active-run recheck, workspace-root containment, symlink protection, and before_remove hook success.
+
+Validation so far:
+
+- `pnpm --filter @symphonia/types build` - passed.
+- `pnpm --filter @symphonia/core build` - passed.
+- `pnpm --filter @symphonia/db build` - passed.
+- `pnpm --filter @symphonia/daemon build` - passed.
+- `pnpm --filter @symphonia/types test` - passed; 9 tests.
+- `pnpm --filter @symphonia/core test` - passed; 103 tests.
+- `pnpm --filter @symphonia/db test` - passed; 6 tests.
+- `pnpm --filter @symphonia/daemon test` - passed; 27 tests.
+
+## Milestone 7 Final Status
+
+Milestone 7 is implemented and validated. Symphonia now persists durable run records, reconstructs historical runs on daemon startup, marks old active runs interrupted/orphaned with recovery events, makes stale approvals non-actionable, supports manual retry of recovered runs, rebuilds workspace inventory from disk, previews cleanup plans, and executes cleanup only when explicitly enabled, non-dry-run, confirmed, and safe.
+
+Root `WORKFLOW.md` remains mock-safe by default. Workspace cleanup is present but disabled and dry-run by default.
+
+## Milestone 7 Implemented Files and Directories
+
+- `README.md`
+- `GOAL_PROGRESS.md`
+- `WORKFLOW.md`
+- `apps/daemon/src/daemon.ts`
+- `apps/daemon/test/http.test.ts`
+- `apps/web/components/issues-view.tsx`
+- `apps/web/lib/api.ts`
+- `packages/core/src/index.ts`
+- `packages/core/src/run-state.ts`
+- `packages/core/src/workflow.ts`
+- `packages/core/src/workspace-cleanup.ts`
+- `packages/core/test/workflow.test.ts`
+- `packages/core/test/workspace-cleanup.test.ts`
+- `packages/db/src/event-store.ts`
+- `packages/db/test/event-store.test.ts`
+- `packages/types/src/index.ts`
+
+## Milestone 7 Final Command Results
+
+- `pnpm --filter @symphonia/types build` - passed.
+- `pnpm --filter @symphonia/core build` - passed.
+- `pnpm --filter @symphonia/db build` - passed.
+- `pnpm --filter @symphonia/daemon build` - passed.
+- `pnpm --filter @symphonia/web build` - passed.
+- `pnpm --filter @symphonia/types test` - passed; 9 tests.
+- `pnpm --filter @symphonia/core test` - passed; 104 tests.
+- `pnpm --filter @symphonia/db test` - passed; 6 tests.
+- `pnpm --filter @symphonia/daemon test` - passed; 27 tests.
+- `pnpm test` - passed; 146 total tests across types/core/db/daemon.
+- `pnpm lint` - passed.
+- `pnpm build` - passed. Next.js still prints the existing warning that the Next.js ESLint plugin was not detected.
+- `git diff --check` - passed.
+- `pnpm dev` smoke - passed on `SYMPHONIA_DAEMON_PORT=4113`, `PORT=3005`, `NEXT_PUBLIC_DAEMON_URL=http://localhost:4113`. The first sandboxed attempt failed because `tsx watch` could not create its IPC pipe; rerunning outside the sandbox succeeded.
+
+## Milestone 7 Recovery Test Results
+
+- DB tests cover durable run save/fetch/update.
+- Daemon tests cover active persisted run reconstruction after simulated restart.
+- Startup recovery marks old active runs `interrupted` with `recoveryState: interrupted_by_restart`.
+- Terminal succeeded runs remain unchanged after restart.
+- Recovery appends `run.recovered`.
+- Retry of a recovered run succeeds and marks the old run `manually_retried`.
+- Pending Codex approvals from a prior daemon instance are recovered/cancelled and are not exposed as pending.
+
+## Milestone 7 Workspace Cleanup Validation Results
+
+- Core tests cover empty inventory, active/recent protection, old terminal candidates, cleanup-disabled protection, and dirty-git protection.
+- Daemon tests cover `/daemon/status`, inventory, dry-run cleanup no deletion, and confirmed cleanup deletion when policy allows it.
+- Dev smoke verified `GET /workspaces` and `GET /workspaces/cleanup/plan`; the committed root workflow reports cleanup disabled/dry-run/manual-confirmation required.
+
+## Milestone 7 Provider Regression Validation
+
+- Mock provider run succeeded in tests and dev smoke.
+- Codex fake app-server tests still pass, including approvals and interrupt behavior.
+- Claude fake CLI tests still pass.
+- Cursor fake CLI tests still pass.
+- Linear fake tests still pass.
+- GitHub review artifact fake/local tests still pass, and review artifacts refreshed after the dev smoke mock run.
+
+## Milestone 7 How To Inspect Recovery State
+
+- Use `GET /daemon/status` or `GET /recovery/status` for daemon instance id, startup time, recovered/orphaned/active run counts, safe DB path, workspace root, workflow status, tracker status, and provider summary.
+- Use `GET /runs` to list reconstructed run records.
+- Use `GET /runs/:runId/events` to inspect `run.recovered`, `approval.recovered`, and persisted historical events.
+- In the UI, open the Workflow panel for recovery counts and open a run detail to see recovery state and recovery timeline events.
+
+## Milestone 7 How To Retry Recovered Runs
+
+- Open a recovered/interrupted/orphaned run in the UI and click Retry run.
+- Or call `POST /runs/:runId/retry`.
+- Symphonia does not auto-retry after restart.
+
+## Milestone 7 How To Preview Workspace Cleanup
+
+- Use `GET /workspaces` or `POST /workspaces/refresh` to rebuild inventory.
+- Use `GET /workspaces/cleanup/plan` to preview candidates, protected workspaces, reasons, warnings, and estimated bytes.
+- In the UI, open the Workflow panel, click Refresh inventory, then Preview cleanup.
+
+## Milestone 7 How To Execute Cleanup Safely
+
+- Keep cleanup disabled/dry-run by default.
+- For a safe local test only, configure `workspace.cleanup.enabled: true` and `workspace.cleanup.dry_run: false`.
+- Preview first.
+- Execute with `POST /workspaces/cleanup/execute` and confirmation `delete workspaces`, or use the UI confirmation input.
+- Active workspaces, dirty git workspaces, recent runs, path escapes, symlink escapes, and the workspace root remain protected by default.
+
+## Milestone 7 Known Limitations
+
+- Real provider process reattachment after daemon restart is not implemented.
+- Codex/Claude/Cursor resume or continue after restart is not implemented.
+- Automatic retry after restart is disabled by default.
+- Automatic workspace deletion is disabled by default.
+- Cleanup execution is manual and policy-gated.
+- GitHub PR creation remains deferred.
+- GitHub writes remain disabled by default.
+- Linear writes remain disabled/deferred.
+- Electron/Tauri packaging is not implemented.
+- Multi-machine or distributed daemon recovery is not implemented.
+- Cloud multi-tenancy is not implemented.
+
+## Milestone 7 Recommended Next Milestone
+
+Milestone 8 - Package Symphonia as a local desktop app with first-run setup and settings.
+
 ## Milestone 6 Objective
 
 Add Claude Code and Cursor Agent provider adapters through the established provider interface while preserving Mock provider, Codex provider, Mock tracker, Linear tracker, GitHub review artifacts, `WORKFLOW.md` runtime, workspace lifecycle, hooks, SQLite/SSE, approvals, stop/retry, and UI behavior. Users should be able to select Mock, Codex, Claude, or Cursor from the UI, run Claude/Cursor against mock or Linear issues, stream provider events into the timeline, stop/retry runs, persist events, refresh review artifacts after completion, and validate without requiring real Claude or Cursor credentials.

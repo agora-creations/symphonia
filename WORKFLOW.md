@@ -18,6 +18,13 @@ polling:
 
 workspace:
   root: ".symphonia/workspaces"
+  cleanup:
+    enabled: false
+    dry_run: true
+    require_manual_confirmation: true
+    protect_active: true
+    protect_recent_runs_ms: 86400000
+    protect_dirty_git: true
 
 agent:
   max_concurrent_agents: 3
