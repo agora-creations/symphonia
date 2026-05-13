@@ -6,11 +6,13 @@ import {
   canStartRunForIssue,
   codexProvider,
   createQueuedRun,
+  createGitHubClient,
   createRetryRun,
   getMockIssue,
   mockProviderHealth,
   getWorkflowStatus,
   createLinearTrackerAdapter,
+  GitHubFetch,
   isIssueActive,
   isIssueTerminal,
   LinearFetch,
@@ -21,6 +23,7 @@ import {
   MockRunCancelledError,
   nowIso,
   PromptTemplateError,
+  refreshReviewArtifacts,
   renderPromptTemplate,
   runCodexAgentProvider,
   runMockAgentProvider,
@@ -42,6 +45,9 @@ import {
   isTerminalRunStatus,
   ProviderHealth,
   ProviderId,
+  GitHubHealth,
+  GitHubStatus,
+  ReviewArtifactSnapshot,
   Run,
   RunSchema,
   StartRunRequestSchema,
@@ -76,6 +82,7 @@ export type SymphoniaDaemonOptions = {
   workflowPath?: string;
   cwd?: string;
   linearFetch?: LinearFetch;
+  githubFetch?: GitHubFetch;
 };
 
 export class SymphoniaDaemon {
@@ -88,6 +95,11 @@ export class SymphoniaDaemon {
   private trackerLastError: string | null = null;
   private trackerPollingTimer: NodeJS.Timeout | null = null;
   private trackerPollingIntervalMs: number | null = null;
+  private githubLastCheckedAt: string | null = null;
+  private githubLastArtifactRefreshAt: string | null = null;
+  private githubLastError: string | null = null;
+  private githubLastHealth: GitHubHealth | null = null;
+  private readonly artifactRefreshes = new Set<string>();
 
   constructor(
     private readonly eventStore: EventStore,
@@ -158,6 +170,14 @@ export class SymphoniaDaemon {
         return sendJson(response, 200, { tracker: await this.getTrackerHealth() });
       }
 
+      if (request.method === "GET" && path === "/github/status") {
+        return sendJson(response, 200, { github: this.getGithubStatus() });
+      }
+
+      if (request.method === "GET" && path === "/github/health") {
+        return sendJson(response, 200, { github: await this.getGithubHealth() });
+      }
+
       const providerHealthMatch = path.match(/^\/providers\/(mock|codex)\/health$/);
       if (request.method === "GET" && providerHealthMatch) {
         return sendJson(response, 200, { provider: await this.getProviderHealth(providerHealthMatch[1]! as ProviderId) });
@@ -180,6 +200,14 @@ export class SymphoniaDaemon {
       if (request.method === "GET" && issueByIdentifierMatch) {
         const issue = await this.resolveIssue(decodeURIComponent(issueByIdentifierMatch[1]!));
         return sendJson(response, 200, { issue });
+      }
+
+      const issueReviewArtifactsMatch = path.match(/^\/issues\/([^/]+)\/review-artifacts$/);
+      if (request.method === "GET" && issueReviewArtifactsMatch) {
+        const issueKey = decodeURIComponent(issueReviewArtifactsMatch[1]!);
+        return sendJson(response, 200, {
+          reviewArtifacts: this.getLatestReviewArtifactsForIssue(issueKey),
+        });
       }
 
       const issueMatch = path.match(/^\/issues\/([^/]+)$/);
@@ -235,6 +263,20 @@ export class SymphoniaDaemon {
         const runId = runEventsMatch[1]!;
         this.requireRun(runId);
         return sendJson(response, 200, { events: this.eventStore.getEventsForRun(runId) });
+      }
+
+      const runReviewArtifactsRefreshMatch = path.match(/^\/runs\/([^/]+)\/review-artifacts\/refresh$/);
+      if (request.method === "POST" && runReviewArtifactsRefreshMatch) {
+        return sendJson(response, 200, {
+          reviewArtifacts: await this.refreshReviewArtifactsForRun(runReviewArtifactsRefreshMatch[1]!),
+        });
+      }
+
+      const runReviewArtifactsMatch = path.match(/^\/runs\/([^/]+)\/review-artifacts$/);
+      if (request.method === "GET" && runReviewArtifactsMatch) {
+        const runId = runReviewArtifactsMatch[1]!;
+        this.requireRun(runId);
+        return sendJson(response, 200, { reviewArtifacts: this.getReviewArtifacts(runId) });
       }
 
       const runPromptMatch = path.match(/^\/runs\/([^/]+)\/prompt$/);
@@ -430,6 +472,9 @@ export class SymphoniaDaemon {
         workspace,
       });
 
+      await this.refreshReviewArtifactsForRecord(record, runtime);
+      if (record.controller.signal.aborted) return;
+
       await this.emit(record, {
         id: randomUUID(),
         runId: record.run.id,
@@ -520,9 +565,10 @@ export class SymphoniaDaemon {
           const runtime = this.workflowRuntime;
           if (runtime) {
             await this.executeHook(record, "afterRun", runtime.config.hooks.afterRun, record.workspace, false, false);
+            await this.refreshReviewArtifactsForRecord(record, runtime);
           }
         } catch {
-          // after_run failures are emitted as hook events and must not replace the provider terminal state.
+          // after_run and review artifact failures are emitted as events and must not replace the provider terminal state.
         }
       }
     }
@@ -664,6 +710,119 @@ export class SymphoniaDaemon {
         error: error instanceof Error ? error.message : "Tracker configuration is invalid.",
       };
     }
+  }
+
+  getGithubStatus(): GitHubStatus {
+    try {
+      const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+      const summary = runtime.summary.github;
+
+      if (!runtime.config.github.enabled) {
+        return {
+          enabled: false,
+          status: "disabled",
+          config: summary,
+          lastCheckedAt: this.githubLastCheckedAt,
+          lastArtifactRefreshAt: this.githubLastArtifactRefreshAt,
+          error: null,
+        };
+      }
+
+      const missingToken = !runtime.config.github.token;
+      const error = this.githubLastError ?? (missingToken ? "GitHub token is not configured; local artifacts still work." : null);
+      const status = error
+        ? this.githubLastArtifactRefreshAt
+          ? "stale"
+          : "unavailable"
+        : this.githubLastHealth?.healthy
+          ? "healthy"
+          : "unknown";
+
+      return {
+        enabled: true,
+        status,
+        config: summary,
+        lastCheckedAt: this.githubLastCheckedAt,
+        lastArtifactRefreshAt: this.githubLastArtifactRefreshAt,
+        error,
+      };
+    } catch (error) {
+      return {
+        enabled: true,
+        status: "invalid_config",
+        config: null,
+        lastCheckedAt: this.githubLastCheckedAt,
+        lastArtifactRefreshAt: this.githubLastArtifactRefreshAt,
+        error: error instanceof Error ? error.message : "GitHub configuration is invalid.",
+      };
+    }
+  }
+
+  async getGithubHealth(): Promise<GitHubHealth> {
+    const checkedAt = nowIso();
+    try {
+      const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+      if (!runtime.config.github.enabled) {
+        const health: GitHubHealth = { enabled: false, healthy: true, checkedAt, error: null, rateLimit: null };
+        this.githubLastCheckedAt = checkedAt;
+        this.githubLastHealth = health;
+        this.githubLastError = null;
+        return health;
+      }
+
+      const client = createGitHubClient(runtime.config.github, this.options.githubFetch);
+      if (!client) {
+        const health: GitHubHealth = {
+          enabled: true,
+          healthy: false,
+          checkedAt,
+          error: runtime.config.github.token
+            ? "GitHub owner/repo is not configured."
+            : "GitHub token is not configured; local artifacts still work.",
+          rateLimit: null,
+        };
+        this.githubLastCheckedAt = checkedAt;
+        this.githubLastHealth = health;
+        this.githubLastError = health.error;
+        return health;
+      }
+
+      const health = await client.healthCheck();
+      this.githubLastCheckedAt = health.checkedAt;
+      this.githubLastHealth = health;
+      this.githubLastError = health.error;
+      return health;
+    } catch (error) {
+      const health: GitHubHealth = {
+        enabled: true,
+        healthy: false,
+        checkedAt,
+        error: error instanceof Error ? error.message : "GitHub health check failed.",
+        rateLimit: null,
+      };
+      this.githubLastCheckedAt = checkedAt;
+      this.githubLastHealth = health;
+      this.githubLastError = health.error;
+      return health;
+    }
+  }
+
+  getReviewArtifacts(runId: string): ReviewArtifactSnapshot | null {
+    this.requireRun(runId);
+    return this.eventStore.getReviewArtifactSnapshot(runId);
+  }
+
+  getLatestReviewArtifactsForIssue(issueIdOrIdentifier: string): ReviewArtifactSnapshot | null {
+    return (
+      this.eventStore.getLatestReviewArtifactSnapshotByIssue(issueIdOrIdentifier) ??
+      this.eventStore.getLatestReviewArtifactSnapshotByIdentifier(issueIdOrIdentifier)
+    );
+  }
+
+  async refreshReviewArtifactsForRun(runId: string): Promise<ReviewArtifactSnapshot | null> {
+    const record = this.requireRecord(runId);
+    const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+    return this.refreshReviewArtifactsForRecord(record, runtime);
   }
 
   listWorkspaces(): WorkspaceInfo[] {
@@ -889,6 +1048,55 @@ export class SymphoniaDaemon {
     }
 
     return true;
+  }
+
+  private async refreshReviewArtifactsForRecord(
+    record: RunRecord,
+    runtime: WorkflowRuntime,
+  ): Promise<ReviewArtifactSnapshot | null> {
+    if (this.artifactRefreshes.has(record.run.id)) {
+      return this.eventStore.getReviewArtifactSnapshot(record.run.id);
+    }
+
+    this.artifactRefreshes.add(record.run.id);
+    try {
+      const result = await refreshReviewArtifacts({
+        run: record.run,
+        issue: record.issue,
+        workspace: record.workspace,
+        workflowConfig: runtime.config,
+        githubFetch: this.options.githubFetch,
+        signal: record.controller.signal,
+      });
+
+      for (const event of result.events) {
+        await this.emit(record, event);
+      }
+
+      this.eventStore.saveReviewArtifactSnapshot(result.snapshot);
+      this.githubLastArtifactRefreshAt = result.snapshot.lastRefreshedAt;
+      this.githubLastError = result.snapshot.error;
+      if (result.health) {
+        this.githubLastHealth = result.health;
+        this.githubLastCheckedAt = result.health.checkedAt;
+      }
+      return result.snapshot;
+    } catch (error) {
+      const message = error instanceof Error ? error.message : "Review artifact refresh failed.";
+      this.githubLastError = message;
+      await this.emit(record, {
+        id: randomUUID(),
+        runId: record.run.id,
+        type: "github.error",
+        timestamp: nowIso(),
+        operation: "refresh",
+        message,
+        status: null,
+      });
+      return this.eventStore.getReviewArtifactSnapshot(record.run.id);
+    } finally {
+      this.artifactRefreshes.delete(record.run.id);
+    }
   }
 
   private async emit(record: RunRecord, event: AgentEvent): Promise<void> {

@@ -1,7 +1,15 @@
 import { mkdirSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import Database from "better-sqlite3";
-import { AgentEvent, AgentEventSchema, Issue, IssueSchema, TrackerKind } from "@symphonia/types";
+import {
+  AgentEvent,
+  AgentEventSchema,
+  Issue,
+  IssueSchema,
+  ReviewArtifactSnapshot,
+  ReviewArtifactSnapshotSchema,
+  TrackerKind,
+} from "@symphonia/types";
 
 export const DEFAULT_DATABASE_PATH = "./.data/agentboard.sqlite";
 
@@ -16,6 +24,10 @@ type IssueRow = {
 type IssueStatsRow = {
   issue_count: number;
   last_fetched_at: string | null;
+};
+
+type ReviewArtifactRow = {
+  payload_json: string;
 };
 
 export class EventStore {
@@ -189,6 +201,91 @@ export class EventStore {
     };
   }
 
+  saveReviewArtifactSnapshot(snapshot: ReviewArtifactSnapshot): void {
+    const parsed = ReviewArtifactSnapshotSchema.parse(snapshot);
+    this.db
+      .prepare(
+        `
+          insert into review_artifact_snapshots (
+            run_id,
+            issue_id,
+            issue_identifier,
+            last_refreshed_at,
+            payload_json,
+            updated_at
+          )
+          values (
+            @runId,
+            @issueId,
+            @issueIdentifier,
+            @lastRefreshedAt,
+            @payloadJson,
+            @updatedAt
+          )
+          on conflict(run_id) do update set
+            issue_id = excluded.issue_id,
+            issue_identifier = excluded.issue_identifier,
+            last_refreshed_at = excluded.last_refreshed_at,
+            payload_json = excluded.payload_json,
+            updated_at = excluded.updated_at
+        `,
+      )
+      .run({
+        runId: parsed.runId,
+        issueId: parsed.issueId,
+        issueIdentifier: parsed.issueIdentifier,
+        lastRefreshedAt: parsed.lastRefreshedAt,
+        payloadJson: JSON.stringify(parsed),
+        updatedAt: new Date().toISOString(),
+      });
+  }
+
+  getReviewArtifactSnapshot(runId: string): ReviewArtifactSnapshot | null {
+    const row = this.db
+      .prepare(
+        `
+          select payload_json
+          from review_artifact_snapshots
+          where run_id = ?
+        `,
+      )
+      .get(runId) as ReviewArtifactRow | undefined;
+
+    return row ? ReviewArtifactSnapshotSchema.parse(JSON.parse(row.payload_json)) : null;
+  }
+
+  getLatestReviewArtifactSnapshotByIssue(issueId: string): ReviewArtifactSnapshot | null {
+    const row = this.db
+      .prepare(
+        `
+          select payload_json
+          from review_artifact_snapshots
+          where issue_id = ?
+          order by last_refreshed_at desc
+          limit 1
+        `,
+      )
+      .get(issueId) as ReviewArtifactRow | undefined;
+
+    return row ? ReviewArtifactSnapshotSchema.parse(JSON.parse(row.payload_json)) : null;
+  }
+
+  getLatestReviewArtifactSnapshotByIdentifier(issueIdentifier: string): ReviewArtifactSnapshot | null {
+    const row = this.db
+      .prepare(
+        `
+          select payload_json
+          from review_artifact_snapshots
+          where issue_identifier = ?
+          order by last_refreshed_at desc
+          limit 1
+        `,
+      )
+      .get(issueIdentifier) as ReviewArtifactRow | undefined;
+
+    return row ? ReviewArtifactSnapshotSchema.parse(JSON.parse(row.payload_json)) : null;
+  }
+
   close(): void {
     this.db.close();
   }
@@ -223,6 +320,21 @@ export class EventStore {
 
       create index if not exists idx_issue_cache_updated_at
       on issue_cache (updated_at);
+
+      create table if not exists review_artifact_snapshots (
+        run_id text primary key,
+        issue_id text not null,
+        issue_identifier text not null,
+        last_refreshed_at text not null,
+        payload_json text not null,
+        updated_at text not null
+      );
+
+      create index if not exists idx_review_artifact_snapshots_issue_id
+      on review_artifact_snapshots (issue_id, last_refreshed_at);
+
+      create index if not exists idx_review_artifact_snapshots_issue_identifier
+      on review_artifact_snapshots (issue_identifier, last_refreshed_at);
     `);
   }
 }

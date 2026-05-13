@@ -4,12 +4,18 @@ import {
   ApprovalState,
   ApprovalsResponseSchema,
   EventsResponseSchema,
+  GitHubHealth,
+  GitHubHealthResponseSchema,
+  GitHubStatus,
+  GitHubStatusResponseSchema,
   HealthResponseSchema,
   IssuesResponseSchema,
   ProviderHealth,
   ProviderHealthResponseSchema,
   ProviderId,
   ProvidersResponseSchema,
+  ReviewArtifactResponseSchema,
+  ReviewArtifactSnapshot,
   Run,
   RunResponseSchema,
   RunsResponseSchema,
@@ -59,6 +65,16 @@ export async function getTrackerHealth(): Promise<TrackerHealth> {
   return TrackerHealthResponseSchema.parse(response).tracker;
 }
 
+export async function getGithubStatus(): Promise<GitHubStatus> {
+  const response = await request("/github/status");
+  return GitHubStatusResponseSchema.parse(response).github;
+}
+
+export async function getGithubHealth(): Promise<GitHubHealth> {
+  const response = await request("/github/health");
+  return GitHubHealthResponseSchema.parse(response).github;
+}
+
 export async function getRuns(): Promise<Run[]> {
   const response = await request("/runs");
   return RunsResponseSchema.parse(response).runs;
@@ -72,6 +88,16 @@ export async function getRunEvents(runId: string): Promise<AgentEvent[]> {
 export async function getRunPrompt(runId: string): Promise<string | null> {
   const response = await request(`/runs/${runId}/prompt`);
   return PromptResponseSchema.parse(response).prompt;
+}
+
+export async function getReviewArtifacts(runId: string): Promise<ReviewArtifactSnapshot | null> {
+  const response = await request(`/runs/${runId}/review-artifacts`);
+  return ReviewArtifactResponseSchema.parse(response).reviewArtifacts;
+}
+
+export async function refreshReviewArtifacts(runId: string): Promise<ReviewArtifactSnapshot | null> {
+  const response = await request(`/runs/${runId}/review-artifacts/refresh`, { method: "POST" });
+  return ReviewArtifactResponseSchema.parse(response).reviewArtifacts;
 }
 
 export async function getWorkflowStatus(): Promise<WorkflowStatus> {

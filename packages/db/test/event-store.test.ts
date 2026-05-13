@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AgentEvent, Issue } from "@symphonia/types";
+import { AgentEvent, Issue, ReviewArtifactSnapshot } from "@symphonia/types";
 import { EventStore } from "../src";
 
 let directory: string;
@@ -68,6 +68,25 @@ describe("EventStore", () => {
     store.upsertIssues([issue("ENG-1", "In Progress")], "2026-05-13T08:03:00.000Z");
     expect(store.getIssue("issue-ENG-1")?.state).toBe("In Progress");
   });
+
+  it("saves and fetches latest review artifact snapshots", () => {
+    const first = reviewArtifactSnapshot("run-1", "ENG-1", "2026-05-13T08:04:00.000Z");
+    const second = reviewArtifactSnapshot("run-2", "ENG-1", "2026-05-13T08:05:00.000Z");
+
+    store.saveReviewArtifactSnapshot(first);
+    store.saveReviewArtifactSnapshot(second);
+
+    expect(store.getReviewArtifactSnapshot("run-1")).toMatchObject({
+      runId: "run-1",
+      issueIdentifier: "ENG-1",
+      diff: { filesChanged: 1 },
+    });
+    expect(store.getLatestReviewArtifactSnapshotByIssue("issue-ENG-1")?.runId).toBe("run-2");
+    expect(store.getLatestReviewArtifactSnapshotByIdentifier("ENG-1")?.runId).toBe("run-2");
+
+    store.saveReviewArtifactSnapshot({ ...first, error: "refresh failed", lastRefreshedAt: "2026-05-13T08:06:00.000Z" });
+    expect(store.getReviewArtifactSnapshot("run-1")?.error).toBe("refresh failed");
+  });
 });
 
 function issue(identifier: string, state: string): Issue {
@@ -83,5 +102,62 @@ function issue(identifier: string, state: string): Issue {
     updatedAt: "2026-05-13T08:01:00.000Z",
     url: `https://linear.app/acme/issue/${identifier}`,
     tracker: { kind: "linear", sourceId: `issue-${identifier}`, teamKey: "ENG" },
+  };
+}
+
+function reviewArtifactSnapshot(runId: string, identifier: string, lastRefreshedAt: string): ReviewArtifactSnapshot {
+  return {
+    runId,
+    issueId: `issue-${identifier}`,
+    issueIdentifier: identifier,
+    provider: "mock",
+    trackerKind: "linear",
+    workspace: {
+      issueIdentifier: identifier,
+      workspaceKey: identifier,
+      path: `/tmp/${identifier}`,
+      createdNow: false,
+      exists: true,
+    },
+    git: {
+      workspacePath: `/tmp/${identifier}`,
+      isGitRepo: true,
+      remoteUrl: "https://github.com/agora-creations/symphonia.git",
+      remoteName: "origin",
+      currentBranch: `feature/${identifier}`,
+      baseBranch: "main",
+      headSha: "0123456789012345678901234567890123456789",
+      baseSha: "1123456789012345678901234567890123456789",
+      mergeBaseSha: "1123456789012345678901234567890123456789",
+      isDirty: true,
+      changedFileCount: 1,
+      untrackedFileCount: 0,
+      stagedFileCount: 0,
+      unstagedFileCount: 1,
+      lastCheckedAt: lastRefreshedAt,
+    },
+    pr: null,
+    diff: {
+      filesChanged: 1,
+      additions: 2,
+      deletions: 1,
+      files: [
+        {
+          path: "README.md",
+          status: "modified",
+          additions: 2,
+          deletions: 1,
+          isBinary: false,
+          oldPath: null,
+          patch: "@@",
+          source: "local",
+        },
+      ],
+    },
+    checks: [],
+    commitStatus: null,
+    workflowRuns: [],
+    lastRefreshedAt,
+    error: null,
   };
 }

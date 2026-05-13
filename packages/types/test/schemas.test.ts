@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   ApprovalStateSchema,
   AgentEventSchema,
+  ReviewArtifactSnapshotSchema,
   HookRunSchema,
   IssueSchema,
   RunSchema,
@@ -161,6 +162,29 @@ describe("shared schemas", () => {
         readTimeoutMs: 5000,
         stallTimeoutMs: 300000,
       },
+      github: {
+        enabled: false,
+        endpoint: "https://api.github.com",
+        token: null,
+        owner: null,
+        repo: null,
+        defaultBaseBranch: "main",
+        remoteName: "origin",
+        readOnly: true,
+        pageSize: 50,
+        maxPages: 3,
+        write: {
+          enabled: false,
+          allowPush: false,
+          allowCreatePr: false,
+          allowUpdatePr: false,
+          allowComment: false,
+          allowRequestReviewers: false,
+          draftPrByDefault: true,
+          prTitleTemplate: "{{ issue.identifier }}: {{ issue.title }}",
+          prBodyTemplate: "See Symphonia run timeline.",
+        },
+      },
     });
 
     expect(config.tracker.kind).toBe("mock");
@@ -201,6 +225,20 @@ describe("shared schemas", () => {
         hookTimeoutMs: 60000,
         codexCommand: "codex app-server",
         codexModel: null,
+        github: {
+          enabled: false,
+          endpoint: "https://api.github.com",
+          owner: null,
+          repo: null,
+          defaultBaseBranch: "main",
+          remoteName: "origin",
+          readOnly: true,
+          writeEnabled: false,
+          allowCreatePr: false,
+          tokenConfigured: false,
+          pageSize: 50,
+          maxPages: 3,
+        },
       },
     });
     expect(status.status).toBe("healthy");
@@ -261,6 +299,20 @@ describe("shared schemas", () => {
           hookTimeoutMs: 60000,
           codexCommand: "codex app-server",
           codexModel: null,
+          github: {
+            enabled: false,
+            endpoint: "https://api.github.com",
+            owner: null,
+            repo: null,
+            defaultBaseBranch: "main",
+            remoteName: "origin",
+            readOnly: true,
+            writeEnabled: false,
+            allowCreatePr: false,
+            tokenConfigured: false,
+            pageSize: 50,
+            maxPages: 3,
+          },
         },
       },
       {
@@ -356,6 +408,80 @@ describe("shared schemas", () => {
     ];
 
     expect(events.map((event) => AgentEventSchema.parse(event))).toHaveLength(9);
+  });
+
+  it("parses review artifact snapshots and github events", () => {
+    const snapshot = ReviewArtifactSnapshotSchema.parse({
+      runId: "run-1",
+      issueId: "issue-1",
+      issueIdentifier: "SYM-1",
+      provider: "mock",
+      trackerKind: "mock",
+      workspace: {
+        issueIdentifier: "SYM-1",
+        workspaceKey: "SYM-1",
+        path: "/tmp/symphonia_workspaces/SYM-1",
+        createdNow: false,
+        exists: true,
+      },
+      git: {
+        workspacePath: "/tmp/symphonia_workspaces/SYM-1",
+        isGitRepo: true,
+        remoteUrl: "https://github.com/agora-creations/symphonia.git",
+        remoteName: "origin",
+        currentBranch: "feature/sym-1",
+        baseBranch: "main",
+        headSha: "abc123",
+        baseSha: "def456",
+        mergeBaseSha: "def456",
+        isDirty: true,
+        changedFileCount: 1,
+        untrackedFileCount: 0,
+        stagedFileCount: 0,
+        unstagedFileCount: 1,
+        lastCheckedAt: timestamp,
+      },
+      pr: null,
+      diff: {
+        filesChanged: 1,
+        additions: 2,
+        deletions: 1,
+        files: [
+          {
+            path: "README.md",
+            status: "M",
+            additions: 2,
+            deletions: 1,
+            isBinary: false,
+            oldPath: null,
+            patch: "@@ -1 +1 @@",
+            source: "local",
+          },
+        ],
+      },
+      checks: [],
+      commitStatus: {
+        state: "success",
+        totalCount: 0,
+        statuses: [],
+        sha: "abc123",
+      },
+      workflowRuns: [],
+      lastRefreshedAt: timestamp,
+      error: null,
+    });
+
+    expect(snapshot.git.currentBranch).toBe("feature/sym-1");
+    expect(() => ReviewArtifactSnapshotSchema.parse({ ...snapshot, runId: "" })).toThrow();
+    expect(
+      AgentEventSchema.parse({
+        id: "event-github-refresh",
+        runId: "run-1",
+        type: "github.review_artifacts.refreshed",
+        timestamp,
+        snapshot,
+      }),
+    ).toMatchObject({ type: "github.review_artifacts.refreshed" });
   });
 
   it("parses approval state payloads", () => {
