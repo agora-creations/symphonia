@@ -109,6 +109,8 @@ describe("workflow config resolution", () => {
     expect(config.tracker.apiKey).toBeNull();
     expect(config.github.enabled).toBe(false);
     expect(config.github.token).toBeNull();
+    expect(config.claude.enabled).toBe(false);
+    expect(config.cursor.enabled).toBe(false);
     expect(config.polling.intervalMs).toBe(30000);
     expect(config.agent.maxConcurrentAgents).toBe(10);
     expect(config.codex.command).toBe("codex app-server");
@@ -135,6 +137,50 @@ describe("workflow config resolution", () => {
     expect(config.codex.turnSandboxPolicy).toBe("workspaceWrite");
   });
 
+  it("resolves Claude and Cursor provider settings with redacted env summaries", () => {
+    const config = resolveWorkflowConfig(
+      definition({
+        provider: "claude",
+        tracker: { kind: "mock" },
+        claude: {
+          enabled: true,
+          command: "claude",
+          model: "sonnet",
+          max_turns: 4,
+          output_format: "stream-json",
+          permission_mode: "default",
+          allowed_tools: ["Read", "Grep"],
+          disallowed_tools: ["Bash(rm:*)"],
+          append_system_prompt: "Use the repo workflow.",
+          extra_args: ["--verbose"],
+          env: { ANTHROPIC_API_KEY: "secret" },
+          redacted_env_keys: ["ANTHROPIC_API_KEY"],
+        },
+        cursor: {
+          enabled: true,
+          command: "cursor-agent",
+          model: "cursor-test",
+          output_format: "stream-json",
+          force: false,
+          env: { CURSOR_API_KEY: "cursor-secret" },
+          redacted_env_keys: ["CURSOR_API_KEY"],
+        },
+      }),
+    );
+
+    expect(config.provider).toBe("claude");
+    expect(config.claude.enabled).toBe(true);
+    expect(config.claude.maxTurns).toBe(4);
+    expect(config.claude.allowedTools).toEqual(["Read", "Grep"]);
+    expect(config.cursor.enabled).toBe(true);
+    expect(config.cursor.force).toBe(false);
+
+    const summary = summarizeWorkflowConfig(config);
+    expect(summary.providers.claude.envKeys).toEqual(["ANTHROPIC_API_KEY"]);
+    expect(summary.providers.cursor.envKeys).toEqual(["CURSOR_API_KEY"]);
+    expect(JSON.stringify(summary)).not.toContain("secret");
+  });
+
   it("supports provider and codex command environment overrides", () => {
     process.env.SYMPHONIA_PROVIDER = "codex";
     process.env.SYMPHONIA_CODEX_COMMAND = "node fake-app-server.mjs";
@@ -146,7 +192,7 @@ describe("workflow config resolution", () => {
   });
 
   it("rejects unsupported providers", () => {
-    expect(() => resolveWorkflowConfig(definition({ tracker: { kind: "mock" }, provider: "claude" }))).toThrow(
+    expect(() => resolveWorkflowConfig(definition({ tracker: { kind: "mock" }, provider: "banana" }))).toThrow(
       "Unsupported provider",
     );
   });
@@ -373,6 +419,39 @@ describe("prompt rendering", () => {
     hookTimeoutMs: 30000,
     codexCommand: "codex app-server",
     codexModel: null,
+    providers: {
+      mock: { enabled: true, displayName: "Mock provider" },
+      codex: { enabled: true, command: "codex app-server", model: null },
+      claude: {
+        enabled: false,
+        command: "claude",
+        model: "sonnet",
+        outputFormat: "stream-json" as const,
+        permissionMode: "default",
+        allowedTools: [],
+        disallowedTools: [],
+        appendSystemPromptConfigured: false,
+        extraArgs: [],
+        envKeys: [],
+        redactedEnvKeys: [],
+        timeoutMs: 3600000,
+        stallTimeoutMs: 300000,
+        readTimeoutMs: 5000,
+      },
+      cursor: {
+        enabled: false,
+        command: "cursor-agent",
+        model: null,
+        outputFormat: "stream-json" as const,
+        force: false,
+        extraArgs: [],
+        envKeys: [],
+        redactedEnvKeys: [],
+        timeoutMs: 3600000,
+        stallTimeoutMs: 300000,
+        readTimeoutMs: 5000,
+      },
+    },
     github: {
       enabled: false,
       endpoint: "https://api.github.com",

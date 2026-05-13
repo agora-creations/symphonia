@@ -1,5 +1,204 @@
 # Symphonia Goal Progress
 
+## Milestone 6 Objective
+
+Add Claude Code and Cursor Agent provider adapters through the established provider interface while preserving Mock provider, Codex provider, Mock tracker, Linear tracker, GitHub review artifacts, `WORKFLOW.md` runtime, workspace lifecycle, hooks, SQLite/SSE, approvals, stop/retry, and UI behavior. Users should be able to select Mock, Codex, Claude, or Cursor from the UI, run Claude/Cursor against mock or Linear issues, stream provider events into the timeline, stop/retry runs, persist events, refresh review artifacts after completion, and validate without requiring real Claude or Cursor credentials.
+
+## Milestone 6 Starting Repo State
+
+- Branch at start: `milestone-5-github-review-artifacts...origin/milestone-5-github-review-artifacts`, clean working tree.
+- Milestone 5 checkpoint commit: `bc4c152` (`Add GitHub review artifacts`).
+- Milestone 6 branch: `milestone-6-cli-providers`.
+- `main` is still behind the Milestone 4/5 branches in this checkout, so Milestone 6 is intentionally based on the committed Milestone 5 branch to preserve the GitHub review-artifact baseline.
+- Root `WORKFLOW.md` remains in safe mock tracker mode by default and should stay that way.
+- Existing Milestone 5 behavior present: mock tracker, Linear tracker, mock provider, Codex provider, workflow parsing, workspace manager, hooks, SQLite event/issue/review-artifact persistence, SSE event streams, provider health for mock/Codex, approvals, stop/retry, tracker status/health/refresh, polling/reconciliation, GitHub status/health, and review artifact UI.
+
+## Milestone 6 Planned Checkpoints
+
+1. Extend provider IDs, shared schemas, workflow config resolution, safe summaries, and docs progress for Claude and Cursor config.
+2. Add a shared CLI stream runner that spawns commands without a shell, parses NDJSON, captures stderr diagnostics, handles timeouts/abort, bounds payloads, and avoids secret exposure.
+3. Implement Claude Code provider command building, health, stream-json mapping, stop/retry behavior, and fake CLI tests.
+4. Implement Cursor Agent provider command building, health, stream-json mapping, stop/retry behavior, and fake CLI tests.
+5. Update provider health APIs and provider list to include mock, Codex, Claude, and Cursor with safe config summaries.
+6. Wire Claude/Cursor into daemon run lifecycle, SSE event persistence, retry/stop, Linear reconciliation cancellation, and review artifact refresh after completion.
+7. Represent Claude/Cursor pre-run permissions clearly while keeping Codex live approvals unchanged.
+8. Update the UI provider selector, provider status panel, run cards, run detail metadata, and timeline rendering for Claude/Cursor events.
+9. Keep root `WORKFLOW.md` safe and update README examples/troubleshooting for Claude/Cursor.
+10. Add deterministic tests using fake CLI scripts; no real Claude, Cursor, Anthropic, Cursor, Linear, GitHub, OpenAI, or network credentials required.
+11. Perform manual provider validation only if local `claude` and/or `cursor-agent` commands and auth are available.
+12. Run final validation: `pnpm test`, `pnpm lint`, `pnpm build`, `git diff --check`, and `pnpm dev` smoke.
+
+## Milestone 6 Validation Commands
+
+- `pnpm --filter @symphonia/types test`
+- `pnpm --filter @symphonia/core test`
+- `pnpm --filter @symphonia/daemon test`
+- `pnpm test`
+- `pnpm lint`
+- `pnpm build`
+- `git diff --check`
+- `pnpm dev` smoke check
+
+## Milestone 6 External Dependency Notes
+
+- Real Claude manual validation requires a local Claude Code CLI installation and local authentication.
+- Real Cursor manual validation requires a local Cursor Agent CLI installation and local authentication or `CURSOR_API_KEY`.
+- Automated tests must not require real Claude/Cursor credentials, real provider APIs, network access, Linear credentials, GitHub credentials, or OpenAI/Codex credentials.
+- Claude/Cursor must use safe permission defaults; do not enable dangerous Claude skip-permissions or Cursor force mode by default.
+- Claude/Cursor live approval protocols are out of scope; Codex app-server approvals remain the only live approval flow.
+- GitHub PR creation, auto-push, auto-merge, comments, and Linear writes remain out of scope.
+
+## Milestone 6 Checkpoint Progress
+
+### Starting State Recorded
+
+- Verified the Milestone 5 branch is clean and committed at `bc4c152`.
+- Created branch `milestone-6-cli-providers` from the Milestone 5 baseline.
+- Verified root `WORKFLOW.md` remains mock by default.
+- Checked current official CLI references for command-shape assumptions:
+  - Claude Code CLI supports `-p/--print`, `--output-format text|json|stream-json`, `--max-turns`, `--model`, `--permission-mode`, `--allowedTools`, `--disallowedTools`, `--append-system-prompt`, `--resume`, and `--continue`.
+  - Cursor Agent CLI supports `--print`, `--output-format text|json|stream-json`, `--api-key`, `CURSOR_API_KEY`, `--resume`, `--model`, and `--force`, with `stream-json` as the default print-mode output format.
+
+### Provider Config, CLI Runner, and Adapter Slice
+
+- Extended shared provider IDs to `mock | codex | claude | cursor`.
+- Added Claude and Cursor workflow config schemas with safe defaults, command/model settings, stream output format, timeouts, extra args, env maps, redacted env keys, and provider-specific permission flags.
+- Extended workflow config resolution and summaries for Claude/Cursor without exposing env values or secrets.
+- Added Claude/Cursor timeline event schemas for system init, assistant/user messages, tool events, results, usage, and provider errors.
+- Added a shared CLI stream runner that spawns commands without a shell, writes prompts through stdin, parses NDJSON, captures stderr diagnostics, enforces read/stall/total timeouts, supports abort cleanup, and bounds large line payloads.
+- Implemented Claude Code provider command building, health checks, stream mapping, stop/cancel handling, and fake CLI tests.
+- Implemented Cursor Agent provider command building, health checks, stream mapping, stop/cancel handling, and fake CLI tests.
+- Wired daemon provider health and run lifecycle to recognize Claude and Cursor.
+- Added daemon tests for Claude fake CLI runs, Cursor fake CLI runs, stop/cancel, retry with current workflow config, and review artifact refresh after provider completion.
+
+Validation so far:
+
+- `pnpm --filter @symphonia/types build` - passed.
+- `pnpm --filter @symphonia/core build` - passed.
+- `pnpm --filter @symphonia/daemon build` - passed.
+- `pnpm --filter @symphonia/types test` - passed; 9 tests.
+- `pnpm --filter @symphonia/core test` - passed; 98 tests.
+- `pnpm --filter @symphonia/daemon test` - passed; 22 tests.
+
+## Milestone 6 Final Status
+
+Milestone 6 is implemented and validated. Symphonia now supports four provider IDs: `mock`, `codex`, `claude`, and `cursor`. Mock and Codex behavior remain intact, Claude and Cursor are optional CLI-stream providers, root `WORKFLOW.md` remains safe in mock mode, and automated tests use fake CLI scripts rather than real Claude/Cursor credentials.
+
+Claude and Cursor live approvals are intentionally not modeled as Codex app-server approvals. Codex remains the live approval provider. Claude and Cursor expose pre-run permission/configuration status and surface permission failures as provider diagnostics or errors.
+
+## Milestone 6 Implemented Files and Directories
+
+- `README.md`
+- `GOAL_PROGRESS.md`
+- `apps/daemon/src/daemon.ts`
+- `apps/daemon/test/http.test.ts`
+- `apps/web/components/issues-view.tsx`
+- `packages/core/src/claude-provider.ts`
+- `packages/core/src/cli-stream-runner.ts`
+- `packages/core/src/command-utils.ts`
+- `packages/core/src/cursor-provider.ts`
+- `packages/core/src/index.ts`
+- `packages/core/src/provider.ts`
+- `packages/core/src/workflow.ts`
+- `packages/core/test/cli-providers.test.ts`
+- `packages/core/test/cli-stream-runner.test.ts`
+- `packages/core/test/workflow.test.ts`
+- `packages/types/src/index.ts`
+- `packages/types/test/schemas.test.ts`
+
+## Milestone 6 Final Command Results
+
+- `pnpm --filter @symphonia/types build` - passed.
+- `pnpm --filter @symphonia/core build` - passed.
+- `pnpm --filter @symphonia/daemon build` - passed.
+- `pnpm --filter @symphonia/types test` - passed; 9 tests.
+- `pnpm --filter @symphonia/core test` - passed; 98 tests.
+- `pnpm --filter @symphonia/daemon test` - passed; 22 tests.
+- `pnpm test` - passed; packages rebuilt and 134 total tests passed across types/core/db/daemon.
+- `pnpm lint` - passed.
+- `pnpm build` - passed. Next.js still prints the existing warning that the Next.js ESLint plugin was not detected.
+- `git diff --check` - passed.
+- `pnpm dev` smoke - passed on alternate ports with `SYMPHONIA_DAEMON_PORT=4112`, `PORT=3004`, and `NEXT_PUBLIC_DAEMON_URL=http://localhost:4112`. Verified daemon health, web `/issues` HTTP 200, provider list including mock/Codex/Claude/Cursor, mock issues, mock run success, persisted run events, review artifact fetch, and manual review artifact refresh.
+
+## Milestone 6 Fake Provider Validation Results
+
+- Fake Claude CLI tests cover command health available/unavailable, system init mapping, assistant message mapping, tool event mapping, result success, result error, nonzero exit, cancellation, and event persistence through daemon run lifecycle.
+- Fake Cursor CLI tests cover command health available/unavailable, system init mapping, assistant deltas/messages, tool call/result mapping, result success, result failure, nonzero exit, cancellation, and event persistence through daemon run lifecycle.
+- Shared CLI stream runner tests cover successful NDJSON streams, stderr diagnostics, malformed JSON diagnostics, nonzero exit, read timeout, abort cleanup, and large-line truncation.
+- Daemon tests cover provider health for all four providers, Claude/Cursor fake runs, stop/cancel, retry against the current workflow, and review artifact refresh after Claude/Cursor completion.
+- Existing mock provider, Codex fake app-server, Linear fake tracker, GitHub fake client, SQLite persistence, and SSE/event lifecycle tests remain green.
+
+## Milestone 6 Real Provider Validation Results
+
+Claude Code:
+
+- `claude` is installed at `/Users/diegomarono/.local/bin/claude`.
+- `claude --version` returned `2.1.126 (Claude Code)`.
+- Direct CLI smoke showed that installed Claude Code requires `--verbose` with `--output-format stream-json` in print mode; the Claude provider now adds `--verbose` automatically for stream-json unless already supplied.
+- A real Claude run was not completed because the CLI reported no active login: `Not logged in - Please run /login`. The sandbox also blocked a Claude hook directory write under `~/.claude`. Automated fake CLI validation remains complete.
+
+Cursor Agent:
+
+- `cursor-agent` was not found on `PATH`.
+- Real Cursor validation was not performed. Automated fake CLI validation remains complete.
+
+No provider credentials, tokens, API keys, or environment values were written to logs, docs, UI payloads, or persisted artifacts.
+
+## Milestone 6 How To Run Providers
+
+Mock provider:
+
+1. Keep root `WORKFLOW.md` as committed.
+2. Run `pnpm dev`.
+3. Open `http://localhost:3000/issues`.
+4. Select `Mock` and start a run from any mock issue.
+
+Codex provider:
+
+1. Ensure the Codex app-server command in `WORKFLOW.md` is available.
+2. Run `pnpm dev`.
+3. Select `Codex` from the provider selector.
+4. Start a run. Codex live approval requests continue to appear through the existing approval UI.
+
+Claude provider:
+
+1. Install and authenticate Claude Code locally.
+2. Add or use a local workflow override with `claude.enabled: true`.
+3. Keep `output_format: "stream-json"` and safe `permission_mode`/tool allowlists.
+4. Run `pnpm dev`, select `Claude Code`, and start a run.
+
+Cursor provider:
+
+1. Install and authenticate Cursor Agent locally, or set `CURSOR_API_KEY`.
+2. Add or use a local workflow override with `cursor.enabled: true`.
+3. Keep `force: false` unless intentionally testing force mode.
+4. Run `pnpm dev`, select `Cursor Agent`, and start a run.
+
+## Milestone 6 Provider Permission Behavior
+
+- Codex uses the existing app-server approval protocol and can surface live approval requests.
+- Claude uses pre-run CLI configuration: `permission_mode`, `allowed_tools`, `disallowed_tools`, and optional extra args.
+- Cursor uses pre-run CLI configuration and `force` remains disabled by default.
+- Claude/Cursor permission denials are surfaced as stderr/result diagnostics and provider errors; the UI does not imply live approval requests exist for those providers.
+
+## Milestone 6 Known Limitations
+
+- Claude/Cursor live approval protocols are not implemented like Codex app-server approvals.
+- Claude/Cursor continuation/resume is stored only as metadata when emitted; automatic resume/continue is not implemented.
+- Real Claude validation depends on local Claude Code installation and authentication.
+- Real Cursor validation depends on local Cursor Agent installation and authentication or `CURSOR_API_KEY`.
+- Provider stream event mapping covers the practical Milestone 6 subset and may need expansion as real CLI event shapes evolve.
+- GitHub PR creation remains deferred.
+- GitHub writes remain disabled by default.
+- Linear writes remain disabled/deferred.
+- Electron/Tauri packaging is not implemented.
+- Daemon restart reconstruction of active provider processes remains incomplete.
+- Workspace cleanup remains manual.
+
+## Milestone 6 Recommended Next Milestone
+
+Milestone 7 - Add daemon restart reconstruction, run recovery, and workspace cleanup policies.
+
 ## Milestone 5 Objective
 
 Add GitHub as the first review-artifact integration while preserving mock tracker, Linear tracker, mock provider, Codex provider, `WORKFLOW.md` runtime, workspace lifecycle, hooks, SQLite/SSE event flow, approvals, stop/retry, and UI behavior. The milestone is read-first: users should be able to inspect local git status, changed files, branch metadata, matching GitHub PRs, PR files, combined commit status, check runs, and workflow runs from the run detail view. GitHub writes must remain disabled by default, with PR creation either safely gated behind explicit config or explicitly deferred.

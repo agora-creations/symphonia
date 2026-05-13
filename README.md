@@ -1,18 +1,19 @@
 # Symphonia
 
-Symphonia is a local-first visual orchestration prototype for coding-agent work. It is a Linear-like control plane for fetching tracker issues, starting Mock or Codex runs, watching timelines, stopping/retrying work, reconciling active runs against repo-owned workflow configuration, and inspecting review artifacts from local git and GitHub.
+Symphonia is a local-first visual orchestration prototype for coding-agent work. It is a Linear-like control plane for fetching tracker issues, starting Mock, Codex, Claude Code, or Cursor Agent runs, watching timelines, stopping/retrying work, reconciling active runs against repo-owned workflow configuration, and inspecting review artifacts from local git and GitHub.
 
-Milestone 5 keeps the mock tracker, Linear tracker, mock provider, `WORKFLOW.md` runtime, workspaces, hooks, SQLite/SSE event flow, approvals, stop/retry, and Codex provider stable, then adds read-first GitHub PR/CI review artifacts. Users can keep running without GitHub credentials, or configure GitHub in `WORKFLOW.md` to inspect repository health, branch metadata, changed files, PR links, PR files, combined commit status, check runs, and workflow runs from the run detail view.
+Milestone 6 keeps the mock tracker, Linear tracker, mock provider, Codex provider, GitHub review artifacts, `WORKFLOW.md` runtime, workspaces, hooks, SQLite/SSE event flow, approvals, stop/retry, and UI stable, then adds Claude Code and Cursor Agent as CLI-stream providers. Automated tests use fake CLI scripts, so contributors do not need real Anthropic, Cursor, OpenAI, Linear, or GitHub credentials for validation.
 
-This prototype still does not integrate Claude Code, Cursor, GitHub OAuth, GitHub App installation flow, GitHub webhooks, auto-push, auto-merge, Linear OAuth, Linear webhooks, auth, billing, cloud tenancy, Electron, or Tauri. GitHub writes and PR creation are disabled by default; PR creation is deferred to keep Milestone 5 read-first and safe.
+This prototype still does not integrate GitHub OAuth, GitHub App installation flow, GitHub webhooks, auto-push, auto-merge, Linear OAuth, Linear webhooks, auth, billing, cloud tenancy, Electron, or Tauri. GitHub writes and PR creation remain disabled by default; PR creation is still deferred.
 
 Reference: the Codex app-server integration follows the official OpenAI developer docs at <https://developers.openai.com/codex/app-server/>.
+Claude Code CLI command-shape references: <https://docs.anthropic.com/en/docs/claude-code/cli-reference>. Cursor Agent CLI command-shape references: <https://docs.cursor.com/en/cli/reference/parameters> and <https://docs.cursor.com/en/cli/reference/output-format>.
 
-## What Milestone 5 Includes
+## What Milestone 6 Includes
 
 - The Milestone 1 mock tracker/provider loop remains available for tests and demos.
 - The Milestone 2 `WORKFLOW.md` parser, config resolver, prompt renderer, workspace manager, and hook runner remain in the run lifecycle.
-- Provider selection for `mock` or `codex` through the UI, run API, workflow config, or environment override.
+- Provider selection for `mock`, `codex`, `claude`, or `cursor` through the UI, run API, workflow config, or environment override.
 - Tracker selection for `mock` or `linear` through `WORKFLOW.md`.
 - Direct Linear GraphQL client with fake-fetch tests, viewer health check, issue pagination, single issue lookup, and defensive GraphQL/network error handling.
 - Linear issue normalization into Symphonia issue fields: identifier, title, description, priority, state, branch name, URL, labels, team/project metadata, created/updated timestamps, and source metadata.
@@ -24,7 +25,12 @@ Reference: the Codex app-server integration follows the official OpenAI develope
 - A stdio JSONL Codex app-server client using initialize, thread/start, turn/start, turn/interrupt, and server-request responses.
 - Codex event mapping into the Symphonia timeline for thread/turn metadata, assistant deltas, items, usage, stderr diagnostics, errors, and approvals.
 - Approval APIs and UI cards for accept, accept for session, decline, and cancel decisions.
+- Claude Code provider adapter using CLI print mode with `stream-json` output, safe permission defaults, health checks, stderr diagnostics, result/usage metadata, stop/cancel, retry, and fake CLI tests.
+- Cursor Agent provider adapter using CLI print mode with `stream-json` output, safe `force: false` default, health checks, stderr diagnostics, result/usage metadata, stop/cancel, retry, and fake CLI tests.
+- A shared CLI stream runner for subprocess spawning, stdin prompts, NDJSON parsing, bounded payloads, timeouts, and abort cleanup.
+- Provider health APIs and UI status for all four providers.
 - SQLite append-only persistence for workflow, workspace, prompt, hook, mock, and Codex events.
+- SQLite append-only persistence for Claude and Cursor stream events.
 - Fake app-server tests, so automated validation does not require real Codex, network access, or OpenAI credentials.
 - Fake Linear tests, so automated validation does not require Linear credentials, network access, or a real Linear workspace.
 - Optional GitHub workflow config with token environment indirection and redacted summaries.
@@ -32,8 +38,8 @@ Reference: the Codex app-server integration follows the official OpenAI develope
 - Small GitHub REST client with fake-fetch tests for repo health, PR lookup, PR files, compare summaries, combined commit status, check runs, workflow runs, pagination, rate-limit diagnostics, and guarded PR creation.
 - Review artifact snapshots persisted in SQLite and replayed through the existing run event timeline.
 - Daemon APIs for GitHub status/health and review artifact fetch/refresh.
-- UI GitHub status plus a run detail Review Artifacts section for local git state, changed files, PR metadata, commit status, check runs, workflow runs, and manual refresh.
-- GitHub writes remain disabled by default. Automatic PR creation, pushing, commenting, and merging are not part of the read-first Milestone 5 path.
+- UI provider controls, provider health, Claude/Cursor permission context, provider metadata, CLI event timelines, GitHub status, and a run detail Review Artifacts section for local git state, changed files, PR metadata, commit status, check runs, workflow runs, and manual refresh.
+- GitHub writes remain disabled by default. Automatic PR creation, pushing, commenting, and merging are not part of the Milestone 6 provider-plural path.
 
 ## Install
 
@@ -66,10 +72,13 @@ Useful daemon environment variables:
 - `SYMPHONIA_DB_PATH`: SQLite file path, defaults to `./.data/agentboard.sqlite`.
 - `SYMPHONIA_MOCK_DELAY_MS`: mock provider delay per event, defaults to `450`.
 - `SYMPHONIA_WORKFLOW_PATH`: explicit workflow file path; defaults to `WORKFLOW.md` in the current repo root.
-- `SYMPHONIA_PROVIDER`: `mock` or `codex`; overrides workflow default provider.
+- `SYMPHONIA_PROVIDER`: `mock`, `codex`, `claude`, or `cursor`; overrides workflow default provider.
 - `SYMPHONIA_CODEX_COMMAND`: Codex app-server command, defaults to `codex app-server`.
+- `SYMPHONIA_CLAUDE_COMMAND`: Claude Code command, defaults to `claude`.
+- `SYMPHONIA_CURSOR_COMMAND`: Cursor Agent command, defaults to `cursor-agent`.
 - `LINEAR_API_KEY`: Linear personal API key used when `tracker.kind: linear` and `tracker.api_key: "$LINEAR_API_KEY"` are configured.
 - `GITHUB_TOKEN` or `GITHUB_PAT`: GitHub token used when `github.enabled: true` and `github.token: "$GITHUB_TOKEN"` or `"$GITHUB_PAT"` are configured. Local git review artifacts work without a token.
+- `CURSOR_API_KEY`: optional Cursor Agent API key when local Cursor login is not used.
 
 ## Validate
 
@@ -102,20 +111,22 @@ codex:
 
 Supported config groups:
 
-- `provider`: `mock` or `codex`.
+- `provider`: `mock`, `codex`, `claude`, or `cursor`.
 - `tracker`: `kind`, `endpoint`, `api_key`, `team_key`, `team_id`, `project_slug`, `project_id`, `allow_workspace_wide`, `active_states`, `terminal_states`, `include_archived`, `page_size`, `max_pages`, `poll_interval_ms`, `read_only`, and `write`.
 - `polling`: `interval_ms`.
 - `workspace`: `root`.
 - `hooks`: `after_create`, `before_run`, `after_run`, `before_remove`, `timeout_ms`.
 - `agent`: `max_concurrent_agents`, `max_turns`, `max_retry_backoff_ms`, `max_concurrent_agents_by_state`.
 - `codex`: `command`, `model`, `approval_policy`, `thread_sandbox`, `turn_sandbox_policy`, `turn_timeout_ms`, `read_timeout_ms`, `stall_timeout_ms`.
+- `claude`: `enabled`, `command`, `model`, `max_turns`, `output_format`, `permission_mode`, `allowed_tools`, `disallowed_tools`, `append_system_prompt`, `extra_args`, `env`, `redacted_env_keys`, `health_check_command`, `timeout_ms`, `read_timeout_ms`, and `stall_timeout_ms`.
+- `cursor`: `enabled`, `command`, `model`, `output_format`, `force`, `extra_args`, `env`, `redacted_env_keys`, `health_check_command`, `timeout_ms`, `read_timeout_ms`, and `stall_timeout_ms`.
 - `github`: `enabled`, `endpoint`, `token`, `owner`, `repo`, `default_base_branch`, `remote_name`, `read_only`, `page_size`, `max_pages`, and `write`.
 
 `workspace.root` supports `~`, `$VAR` or `${VAR}`, and relative paths. Relative paths resolve from the `WORKFLOW.md` directory. The effective root is always absolute.
 
 `tracker.kind: mock` runs without credentials. `tracker.kind: linear` requires an API key after environment-variable resolution and at least one practical scope filter: `team_key`, `team_id`, `project_slug`, `project_id`, or `allow_workspace_wide: true`.
 
-Workflow config responses are summaries and never expose `api_key`, GitHub `token`, or resolved secrets.
+Workflow config responses are summaries and never expose `api_key`, GitHub `token`, provider env values, or resolved secrets.
 
 ## Linear Tracker
 
@@ -221,6 +232,85 @@ Linear troubleshooting:
 - Stale issue cache: click Refresh issues or inspect `GET /tracker/status` for `lastSyncAt` and `error`.
 - Codex provider with Linear issue: confirm local Codex health, then start the run from the Linear card with provider `Codex`.
 
+## Claude Code and Cursor Providers
+
+The root `WORKFLOW.md` keeps `provider: mock` and does not enable Claude or Cursor. Configure these providers in a local workflow override when the local CLIs are installed and authenticated.
+
+Claude Code example:
+
+```yaml
+provider: claude
+claude:
+  enabled: true
+  command: "claude"
+  model: "sonnet"
+  max_turns: 8
+  output_format: "stream-json"
+  permission_mode: "default"
+  allowed_tools:
+    - "Read"
+    - "Grep"
+    - "Bash(git status:*)"
+    - "Bash(git diff:*)"
+    - "Bash(pnpm test:*)"
+  disallowed_tools:
+    - "Bash(rm:*)"
+    - "Bash(git push:*)"
+  timeout_ms: 3600000
+  stall_timeout_ms: 300000
+  read_timeout_ms: 5000
+```
+
+Cursor Agent example:
+
+```yaml
+provider: cursor
+cursor:
+  enabled: true
+  command: "cursor-agent"
+  model: null
+  output_format: "stream-json"
+  force: false
+  timeout_ms: 3600000
+  stall_timeout_ms: 300000
+  read_timeout_ms: 5000
+```
+
+Provider behavior:
+
+- Claude and Cursor are CLI-stream providers. Symphonia spawns the configured command in the issue workspace, writes the rendered prompt through stdin, parses newline-delimited JSON, persists events, and streams them over SSE.
+- Claude uses `claude -p --output-format stream-json --verbose --max-turns <n>` plus configured model, permission mode, allowed tools, disallowed tools, append-system-prompt, and extra args. The local Claude CLI requires `--verbose` with `stream-json` print mode.
+- Cursor uses `cursor-agent --print --output-format stream-json` plus configured model, explicit `force: true` only when configured, and extra args.
+- Codex app-server supports live approval requests in this milestone. Claude/Cursor CLI permissions are configured before run start; Symphonia does not fake live approval prompts for them.
+- Stop cancels the underlying CLI subprocess and marks the run cancelled. Retry starts a fresh attempt and does not auto-resume Claude or Cursor sessions.
+- GitHub review artifacts refresh after Claude/Cursor completion, failure, or cancellation when a workspace exists.
+- Automated tests use fake CLI scripts and do not require real Claude or Cursor credentials.
+
+Manual Claude validation:
+
+1. Install and authenticate the local `claude` CLI.
+2. Use a local workflow override with `claude.enabled: true`.
+3. Run `SYMPHONIA_WORKFLOW_PATH=/absolute/path/to/claude.WORKFLOW.md pnpm dev`.
+4. Select Claude Code in the UI, start a mock or Linear issue run, and inspect timeline events, session metadata, stop/retry, and review artifacts.
+
+Manual Cursor validation:
+
+1. Install and authenticate `cursor-agent`, or export `CURSOR_API_KEY`.
+2. Use a local workflow override with `cursor.enabled: true` and `force: false`.
+3. Run `SYMPHONIA_WORKFLOW_PATH=/absolute/path/to/cursor.WORKFLOW.md pnpm dev`.
+4. Select Cursor Agent in the UI, start a mock or Linear issue run, and inspect timeline events, session/request metadata, stop/retry, and review artifacts.
+
+Provider troubleshooting:
+
+- `claude command not found`: install Claude Code or set `SYMPHONIA_CLAUDE_COMMAND`/`claude.command`.
+- `cursor-agent command not found`: install Cursor Agent or set `SYMPHONIA_CURSOR_COMMAND`/`cursor.command`.
+- Auth missing: complete local CLI login or provide supported provider environment variables in the daemon environment.
+- Permission denial: adjust Claude `permission_mode`, `allowed_tools`, and `disallowed_tools`, or Cursor CLI settings. Do not enable dangerous modes casually.
+- Malformed `stream-json`: Symphonia records a provider error and fails the run without crashing the daemon.
+- Nonzero CLI exit: stderr is captured as diagnostics and the run fails gracefully.
+- Long-running or stalled run: tune `timeout_ms`, `stall_timeout_ms`, and `read_timeout_ms`, or stop the run from the UI.
+- Provider unavailable in UI: open the Workflow panel, check provider health, command, and enabled/configured state, then reload workflow.
+
 ## GitHub Review Artifacts
 
 The root `WORKFLOW.md` keeps GitHub disabled for safe local development and CI. Local git artifact collection still runs without GitHub credentials. Configure GitHub only when you want repository health, existing PR metadata, PR files, combined commit status, check runs, and workflow runs.
@@ -316,7 +406,7 @@ Each run creates or reuses a real per-issue workspace:
 Hooks execute locally with `sh -lc` in the issue workspace directory. Symphonia captures stdout, stderr, exit code, start/end timestamps, and timeout status.
 
 - `after_create`: runs only when the workspace directory is created for the first time.
-- `before_run`: runs before every mock or Codex provider run.
+- `before_run`: runs before every Mock, Codex, Claude, or Cursor provider run.
 - `after_run`: runs after the provider finishes, fails, or is cancelled; failures are logged without replacing the provider terminal status.
 - `before_remove`: implemented for future cleanup paths, but normal successful runs do not delete workspaces.
 
@@ -373,7 +463,7 @@ Troubleshooting:
 - `GET /runs/:runId/prompt`
 - `GET /runs/:runId/review-artifacts`
 - `POST /runs/:runId/review-artifacts/refresh`
-- `POST /runs` with `{ "issueId": "...", "provider": "mock" | "codex" }`
+- `POST /runs` with `{ "issueId": "...", "provider": "mock" | "codex" | "claude" | "cursor" }`
 - `POST /runs/:runId/stop`
 - `POST /runs/:runId/retry`
 - `GET /workflow/status`
@@ -384,11 +474,13 @@ Troubleshooting:
 - `GET /providers`
 - `GET /providers/mock/health`
 - `GET /providers/codex/health`
+- `GET /providers/claude/health`
+- `GET /providers/cursor/health`
 - `GET /approvals`
 - `GET /runs/:runId/approvals`
 - `POST /approvals/:approvalId/respond`
 
-Workflow, tracker, and GitHub config responses are summaries and do not expose API keys, tokens, or secrets.
+Workflow, tracker, provider, and GitHub config responses are summaries and do not expose API keys, tokens, provider env values, or secrets.
 
 ## Manual Validation Flow
 
@@ -397,7 +489,7 @@ Mock mode:
 1. Run `pnpm dev`.
 2. Open the web app.
 3. Confirm daemon and workflow status are healthy.
-4. Confirm provider list shows mock and Codex.
+4. Confirm provider list shows Mock, Codex, Claude Code, and Cursor Agent.
 5. Start a mock run and confirm the timeline still streams workflow, workspace, prompt, hook, and mock provider events.
 6. Refresh and confirm persisted events remain visible.
 7. Select Codex provider.
@@ -407,6 +499,19 @@ Mock mode:
 11. Interrupt an active Codex turn.
 12. Retry a failed or cancelled Codex run.
 13. Edit `WORKFLOW.md`, click Reload, start another run, and confirm the rendered prompt reflects the edit.
+
+Claude/Cursor mode, when local CLIs are available:
+
+1. Configure a local workflow override with `claude.enabled: true` or `cursor.enabled: true`.
+2. Run `SYMPHONIA_WORKFLOW_PATH=/absolute/path/to/provider.WORKFLOW.md pnpm dev`.
+3. Confirm provider health shows the configured CLI available.
+4. Select Claude Code or Cursor Agent in the provider selector.
+5. Start a mock or Linear issue run.
+6. Confirm workflow, workspace, prompt, hook, provider stream, result, usage, and review artifact events appear in the timeline.
+7. Stop a long-running CLI run if safe.
+8. Retry a failed or cancelled run.
+9. Confirm GitHub review artifacts refresh after provider completion when a workspace exists.
+10. Confirm Codex approval UI remains unchanged and Claude/Cursor do not show fake live approval requests.
 
 Linear mode, when credentials are available:
 
@@ -449,8 +554,11 @@ Run events are append-only in SQLite. The daemon also stores the latest issue ca
 
 ## Known Limitations
 
-- Claude Code provider is still not implemented.
-- Cursor provider is still not implemented.
+- Claude/Cursor live approval protocols are not implemented like Codex app-server approvals.
+- Claude/Cursor continuation and resume are stored only as session/request metadata; automatic continuation is not implemented.
+- Real Claude validation depends on local Claude Code installation and authentication.
+- Real Cursor validation depends on local Cursor Agent installation and authentication or `CURSOR_API_KEY`.
+- Provider stream event mapping covers the practical Milestone 6 subset and ignores unknown future fields.
 - GitHub OAuth is not implemented.
 - GitHub App installation flow is not implemented.
 - GitHub webhooks are not implemented.
@@ -474,4 +582,4 @@ Run events are append-only in SQLite. The daemon also stores the latest issue ca
 
 ## Next Milestone
 
-Milestone 6 - Add Claude Code and Cursor provider adapters using the established provider interface.
+Milestone 7 - Add daemon restart reconstruction, run recovery, and workspace cleanup policies.

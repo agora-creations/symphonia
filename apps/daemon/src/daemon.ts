@@ -4,10 +4,12 @@ import { pathToFileURL } from "node:url";
 import {
   applyRunEvent,
   canStartRunForIssue,
+  claudeProvider,
   codexProvider,
   createQueuedRun,
   createGitHubClient,
   createRetryRun,
+  cursorProvider,
   getMockIssue,
   mockProviderHealth,
   getWorkflowStatus,
@@ -25,7 +27,9 @@ import {
   PromptTemplateError,
   refreshReviewArtifacts,
   renderPromptTemplate,
+  runClaudeAgentProvider,
   runCodexAgentProvider,
+  runCursorAgentProvider,
   runMockAgentProvider,
   runHook,
   WorkflowError,
@@ -178,7 +182,7 @@ export class SymphoniaDaemon {
         return sendJson(response, 200, { github: await this.getGithubHealth() });
       }
 
-      const providerHealthMatch = path.match(/^\/providers\/(mock|codex)\/health$/);
+      const providerHealthMatch = path.match(/^\/providers\/(mock|codex|claude|cursor)\/health$/);
       if (request.method === "GET" && providerHealthMatch) {
         return sendJson(response, 200, { provider: await this.getProviderHealth(providerHealthMatch[1]! as ProviderId) });
       }
@@ -519,9 +523,39 @@ export class SymphoniaDaemon {
           renderedPrompt: prompt,
           workflowConfig: runtime.config,
           codexConfig: runtime.config.codex,
+          claudeConfig: runtime.config.claude,
+          cursorConfig: runtime.config.cursor,
           signal: record.controller.signal,
           emit: (event) => this.emit(record, event),
           requestApproval: (request) => this.requestApproval(record, request),
+        });
+      } else if (record.run.provider === "claude") {
+        await runClaudeAgentProvider({
+          run: record.run,
+          issue,
+          attempt: record.attempt,
+          workspacePath: workspace.path,
+          renderedPrompt: prompt,
+          workflowConfig: runtime.config,
+          codexConfig: runtime.config.codex,
+          claudeConfig: runtime.config.claude,
+          cursorConfig: runtime.config.cursor,
+          signal: record.controller.signal,
+          emit: (event) => this.emit(record, event),
+        });
+      } else if (record.run.provider === "cursor") {
+        await runCursorAgentProvider({
+          run: record.run,
+          issue,
+          attempt: record.attempt,
+          workspacePath: workspace.path,
+          renderedPrompt: prompt,
+          workflowConfig: runtime.config,
+          codexConfig: runtime.config.codex,
+          claudeConfig: runtime.config.claude,
+          cursorConfig: runtime.config.cursor,
+          signal: record.controller.signal,
+          emit: (event) => this.emit(record, event),
         });
       } else {
         await runMockAgentProvider({
@@ -867,12 +901,19 @@ export class SymphoniaDaemon {
   }
 
   async listProviderHealth(): Promise<ProviderHealth[]> {
-    return [mockProviderHealth, await this.getProviderHealth("codex")];
+    return [
+      mockProviderHealth,
+      await this.getProviderHealth("codex"),
+      await this.getProviderHealth("claude"),
+      await this.getProviderHealth("cursor"),
+    ];
   }
 
   async getProviderHealth(providerId: ProviderId): Promise<ProviderHealth> {
     if (providerId === "mock") return mockProviderHealth;
-    return codexProvider.health(this.getCodexConfigForHealth());
+    if (providerId === "codex") return codexProvider.health(this.getCodexConfigForHealth());
+    if (providerId === "claude") return claudeProvider.health(this.getClaudeConfigForHealth());
+    return cursorProvider.health(this.getCursorConfigForHealth());
   }
 
   listApprovals(runId?: string): ApprovalState[] {
@@ -1164,7 +1205,9 @@ export class SymphoniaDaemon {
 
   private getDefaultProvider(): ProviderId {
     const envProvider = process.env.SYMPHONIA_PROVIDER;
-    if (envProvider === "mock" || envProvider === "codex") return envProvider;
+    if (envProvider === "mock" || envProvider === "codex" || envProvider === "claude" || envProvider === "cursor") {
+      return envProvider;
+    }
 
     try {
       const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
@@ -1272,6 +1315,56 @@ export class SymphoniaDaemon {
         turnTimeoutMs: 3600000,
         readTimeoutMs: 5000,
         stallTimeoutMs: 300000,
+      };
+    }
+  }
+
+  private getClaudeConfigForHealth() {
+    try {
+      const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+      return runtime.config.claude;
+    } catch {
+      return {
+        enabled: false,
+        command: process.env.SYMPHONIA_CLAUDE_COMMAND ?? "claude",
+        model: "sonnet",
+        maxTurns: 8,
+        outputFormat: "stream-json" as const,
+        permissionMode: "default",
+        allowedTools: [],
+        disallowedTools: [],
+        appendSystemPrompt: null,
+        extraArgs: [],
+        env: {},
+        redactedEnvKeys: [],
+        healthCheckCommand: null,
+        timeoutMs: 3600000,
+        stallTimeoutMs: 300000,
+        readTimeoutMs: 5000,
+        cwdBehavior: "workspace" as const,
+      };
+    }
+  }
+
+  private getCursorConfigForHealth() {
+    try {
+      const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+      return runtime.config.cursor;
+    } catch {
+      return {
+        enabled: false,
+        command: process.env.SYMPHONIA_CURSOR_COMMAND ?? "cursor-agent",
+        model: null,
+        outputFormat: "stream-json" as const,
+        force: false,
+        extraArgs: [],
+        env: {},
+        redactedEnvKeys: [],
+        healthCheckCommand: null,
+        timeoutMs: 3600000,
+        stallTimeoutMs: 300000,
+        readTimeoutMs: 5000,
+        cwdBehavior: "workspace" as const,
       };
     }
   }

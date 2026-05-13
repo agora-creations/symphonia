@@ -34,6 +34,10 @@ export type WorkflowErrorCode =
   | "workflow_agent_max_turns_invalid"
   | "workflow_agent_max_concurrent_invalid"
   | "workflow_codex_command_invalid"
+  | "workflow_claude_command_invalid"
+  | "workflow_cursor_command_invalid"
+  | "workflow_claude_timeout_invalid"
+  | "workflow_cursor_timeout_invalid"
   | "workflow_provider_unsupported"
   | "workflow_config_invalid";
 
@@ -72,6 +76,9 @@ const defaultGithubPageSize = 50;
 const defaultGithubMaxPages = 3;
 const maxGithubPageSize = 100;
 const maxGithubMaxPages = 20;
+const defaultCliTimeoutMs = 3600000;
+const defaultCliStallTimeoutMs = 300000;
+const defaultCliReadTimeoutMs = 5000;
 const defaultPrTitleTemplate = "{{ issue.identifier }}: {{ issue.title }}";
 const defaultPrBodyTemplate = `## Summary
 
@@ -235,6 +242,8 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
   const hooksRaw = readObject(raw, "hooks");
   const agentRaw = readObject(raw, "agent");
   const codexRaw = readObject(raw, "codex");
+  const claudeRaw = readObject(raw, "claude");
+  const cursorRaw = readObject(raw, "cursor");
   const githubRaw = readObject(raw, "github");
   const provider = resolveProvider(raw, agentRaw, definition.workflowPath);
   const githubEnabled = readBoolean(githubRaw, false, "enabled");
@@ -296,6 +305,14 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
   const maxTurns = readPositiveInteger(agentRaw, 20, "maxTurns", "max_turns");
   const maxConcurrentAgents = readPositiveInteger(agentRaw, 10, "maxConcurrentAgents", "max_concurrent_agents");
   const codexCommand = process.env.SYMPHONIA_CODEX_COMMAND ?? readString(codexRaw, "command") ?? "codex app-server";
+  const claudeCommand = process.env.SYMPHONIA_CLAUDE_COMMAND ?? readString(claudeRaw, "command") ?? "claude";
+  const cursorCommand = process.env.SYMPHONIA_CURSOR_COMMAND ?? readString(cursorRaw, "command") ?? "cursor-agent";
+  const claudeTimeoutMs = readPositiveInteger(claudeRaw, defaultCliTimeoutMs, "timeoutMs", "timeout_ms");
+  const claudeStallTimeoutMs = readPositiveInteger(claudeRaw, defaultCliStallTimeoutMs, "stallTimeoutMs", "stall_timeout_ms");
+  const claudeReadTimeoutMs = readPositiveInteger(claudeRaw, defaultCliReadTimeoutMs, "readTimeoutMs", "read_timeout_ms");
+  const cursorTimeoutMs = readPositiveInteger(cursorRaw, defaultCliTimeoutMs, "timeoutMs", "timeout_ms");
+  const cursorStallTimeoutMs = readPositiveInteger(cursorRaw, defaultCliStallTimeoutMs, "stallTimeoutMs", "stall_timeout_ms");
+  const cursorReadTimeoutMs = readPositiveInteger(cursorRaw, defaultCliReadTimeoutMs, "readTimeoutMs", "read_timeout_ms");
 
   if (hookTimeoutMs <= 0) {
     throw new WorkflowError("workflow_hook_timeout_invalid", "hooks.timeout_ms must be positive.", definition.workflowPath);
@@ -315,6 +332,22 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
 
   if (codexCommand.trim().length === 0) {
     throw new WorkflowError("workflow_codex_command_invalid", "codex.command must be non-empty.", definition.workflowPath);
+  }
+
+  if (claudeCommand.trim().length === 0) {
+    throw new WorkflowError("workflow_claude_command_invalid", "claude.command must be non-empty.", definition.workflowPath);
+  }
+
+  if (cursorCommand.trim().length === 0) {
+    throw new WorkflowError("workflow_cursor_command_invalid", "cursor.command must be non-empty.", definition.workflowPath);
+  }
+
+  if (claudeTimeoutMs <= 0 || claudeStallTimeoutMs <= 0 || claudeReadTimeoutMs <= 0) {
+    throw new WorkflowError("workflow_claude_timeout_invalid", "Claude timeout settings must be positive.", definition.workflowPath);
+  }
+
+  if (cursorTimeoutMs <= 0 || cursorStallTimeoutMs <= 0 || cursorReadTimeoutMs <= 0) {
+    throw new WorkflowError("workflow_cursor_timeout_invalid", "Cursor timeout settings must be positive.", definition.workflowPath);
   }
 
   const workspaceRoot = resolveWorkspaceRoot(
@@ -382,6 +415,40 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
       readTimeoutMs: readPositiveInteger(codexRaw, 5000, "readTimeoutMs", "read_timeout_ms"),
       stallTimeoutMs: readPositiveInteger(codexRaw, 300000, "stallTimeoutMs", "stall_timeout_ms"),
     },
+    claude: {
+      enabled: readBoolean(claudeRaw, false, "enabled"),
+      command: claudeCommand,
+      model: readString(claudeRaw, "model") ?? null,
+      maxTurns: readPositiveInteger(claudeRaw, maxTurns, "maxTurns", "max_turns"),
+      outputFormat: readCliOutputFormat(claudeRaw, "stream-json", "outputFormat", "output_format"),
+      permissionMode: readString(claudeRaw, "permissionMode", "permission_mode") ?? "default",
+      allowedTools: readStringArray(claudeRaw, [], "allowedTools", "allowed_tools"),
+      disallowedTools: readStringArray(claudeRaw, [], "disallowedTools", "disallowed_tools"),
+      appendSystemPrompt: readString(claudeRaw, "appendSystemPrompt", "append_system_prompt") ?? null,
+      extraArgs: readStringArray(claudeRaw, [], "extraArgs", "extra_args"),
+      env: readStringRecord(claudeRaw, "env"),
+      redactedEnvKeys: readStringArray(claudeRaw, [], "redactedEnvKeys", "redacted_env_keys"),
+      healthCheckCommand: readString(claudeRaw, "healthCheckCommand", "health_check_command") ?? null,
+      timeoutMs: claudeTimeoutMs,
+      stallTimeoutMs: claudeStallTimeoutMs,
+      readTimeoutMs: claudeReadTimeoutMs,
+      cwdBehavior: "workspace" as const,
+    },
+    cursor: {
+      enabled: readBoolean(cursorRaw, false, "enabled"),
+      command: cursorCommand,
+      model: readString(cursorRaw, "model") ?? null,
+      outputFormat: readCliOutputFormat(cursorRaw, "stream-json", "outputFormat", "output_format"),
+      force: readBoolean(cursorRaw, false, "force"),
+      extraArgs: readStringArray(cursorRaw, [], "extraArgs", "extra_args"),
+      env: readStringRecord(cursorRaw, "env"),
+      redactedEnvKeys: readStringArray(cursorRaw, [], "redactedEnvKeys", "redacted_env_keys"),
+      healthCheckCommand: readString(cursorRaw, "healthCheckCommand", "health_check_command") ?? null,
+      timeoutMs: cursorTimeoutMs,
+      stallTimeoutMs: cursorStallTimeoutMs,
+      readTimeoutMs: cursorReadTimeoutMs,
+      cwdBehavior: "workspace" as const,
+    },
     github: {
       enabled: githubEnabled,
       endpoint: readString(githubRaw, "endpoint") ?? defaultGithubEndpoint,
@@ -443,6 +510,46 @@ export function summarizeWorkflowConfig(config: WorkflowConfig): WorkflowConfigS
     hookTimeoutMs: config.hooks.timeoutMs,
     codexCommand: config.codex.command,
     codexModel: config.codex.model,
+    providers: {
+      mock: {
+        enabled: true,
+        displayName: "Mock provider",
+      },
+      codex: {
+        enabled: true,
+        command: config.codex.command,
+        model: config.codex.model,
+      },
+      claude: {
+        enabled: config.claude.enabled,
+        command: config.claude.command,
+        model: config.claude.model,
+        outputFormat: config.claude.outputFormat,
+        permissionMode: config.claude.permissionMode,
+        allowedTools: config.claude.allowedTools,
+        disallowedTools: config.claude.disallowedTools,
+        appendSystemPromptConfigured: Boolean(config.claude.appendSystemPrompt),
+        extraArgs: config.claude.extraArgs,
+        envKeys: Object.keys(config.claude.env).sort(),
+        redactedEnvKeys: config.claude.redactedEnvKeys,
+        timeoutMs: config.claude.timeoutMs,
+        stallTimeoutMs: config.claude.stallTimeoutMs,
+        readTimeoutMs: config.claude.readTimeoutMs,
+      },
+      cursor: {
+        enabled: config.cursor.enabled,
+        command: config.cursor.command,
+        model: config.cursor.model,
+        outputFormat: config.cursor.outputFormat,
+        force: config.cursor.force,
+        extraArgs: config.cursor.extraArgs,
+        envKeys: Object.keys(config.cursor.env).sort(),
+        redactedEnvKeys: config.cursor.redactedEnvKeys,
+        timeoutMs: config.cursor.timeoutMs,
+        stallTimeoutMs: config.cursor.stallTimeoutMs,
+        readTimeoutMs: config.cursor.readTimeoutMs,
+      },
+    },
     github: {
       enabled: config.github.enabled,
       endpoint: config.github.endpoint,
@@ -534,7 +641,7 @@ function resolveProvider(
   workflowPath: string,
 ): ProviderId {
   const value = process.env.SYMPHONIA_PROVIDER ?? readString(raw, "provider") ?? readString(agentRaw, "provider") ?? "mock";
-  if (value === "mock" || value === "codex") return value;
+  if (value === "mock" || value === "codex" || value === "claude" || value === "cursor") return value;
   throw new WorkflowError("workflow_provider_unsupported", `Unsupported provider: ${value}.`, workflowPath);
 }
 
@@ -558,6 +665,29 @@ function readStringArray(record: Record<string, unknown>, fallback: string[], ..
       return value.map((item) => item.trim());
     }
   }
+  return fallback;
+}
+
+function readStringRecord(record: Record<string, unknown>, ...keys: string[]): Record<string, string> {
+  for (const key of keys) {
+    const value = record[key];
+    if (!isRecord(value)) continue;
+
+    const entries = Object.entries(value).filter((entry): entry is [string, string] => {
+      return typeof entry[1] === "string";
+    });
+    return Object.fromEntries(entries);
+  }
+  return {};
+}
+
+function readCliOutputFormat(
+  record: Record<string, unknown>,
+  fallback: "text" | "json" | "stream-json",
+  ...keys: string[]
+): "text" | "json" | "stream-json" {
+  const value = readString(record, ...keys);
+  if (value === "text" || value === "json" || value === "stream-json") return value;
   return fallback;
 }
 
