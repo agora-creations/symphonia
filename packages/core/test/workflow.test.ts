@@ -11,6 +11,7 @@ import {
   resolveWorkflowConfig,
   runHook,
   sanitizeWorkspaceKey,
+  summarizeWorkflowConfig,
   WorkflowError,
   WorkspaceManager,
 } from "../src/index";
@@ -178,13 +179,80 @@ describe("workflow config resolution", () => {
     expect(() => resolveWorkflowConfig(definition({}))).toThrow("tracker.kind is required");
   });
 
-  it("requires linear api key and project slug", () => {
+  it("resolves valid linear config with env api key and safe summary", () => {
+    process.env.SYMPHONIA_TEST_LINEAR_KEY = "linear-secret";
+
+    const config = resolveWorkflowConfig(
+      definition({
+        tracker: {
+          kind: "linear",
+          api_key: "$SYMPHONIA_TEST_LINEAR_KEY",
+          team_key: "ENG",
+          project_slug: "demo-project",
+          active_states: ["Todo", "In Progress"],
+          terminal_states: ["Done", "Canceled"],
+          page_size: 25,
+          max_pages: 3,
+          read_only: true,
+          write: { enabled: false },
+        },
+      }),
+    );
+
+    expect(config.tracker.kind).toBe("linear");
+    expect(config.tracker.apiKey).toBe("linear-secret");
+    expect(config.tracker.teamKey).toBe("ENG");
+    expect(config.tracker.projectSlug).toBe("demo-project");
+    expect(config.tracker.pageSize).toBe(25);
+    expect(config.tracker.maxPages).toBe(3);
+    expect(config.tracker.readOnly).toBe(true);
+
+    const summary = summarizeWorkflowConfig(config);
+    expect(summary.trackerKind).toBe("linear");
+    expect(summary.teamKey).toBe("ENG");
+    expect(summary.projectSlug).toBe("demo-project");
+    expect(JSON.stringify(summary)).not.toContain("linear-secret");
+    expect(JSON.stringify(summary)).not.toContain("apiKey");
+  });
+
+  it("requires linear api key and a practical scope", () => {
     expect(() => resolveWorkflowConfig(definition({ tracker: { kind: "linear", project_slug: "demo" } }))).toThrow(
       "tracker.api_key is required",
     );
     expect(() => resolveWorkflowConfig(definition({ tracker: { kind: "linear", api_key: "key" } }))).toThrow(
-      "tracker.project_slug is required",
+      "requires team_key, team_id, project_slug, project_id, or allow_workspace_wide",
     );
+  });
+
+  it("allows explicitly configured workspace-wide linear polling", () => {
+    const config = resolveWorkflowConfig(
+      definition({
+        tracker: {
+          kind: "linear",
+          api_key: "key",
+          allow_workspace_wide: true,
+        },
+      }),
+    );
+
+    expect(config.tracker.allowWorkspaceWide).toBe(true);
+  });
+
+  it("rejects invalid linear pagination bounds", () => {
+    expect(() =>
+      resolveWorkflowConfig(
+        definition({
+          tracker: { kind: "linear", api_key: "key", team_key: "ENG", page_size: 0 },
+        }),
+      ),
+    ).toThrow("tracker.page_size must be between");
+    expect(() =>
+      resolveWorkflowConfig(
+        definition({
+          tracker: { kind: "linear", api_key: "key", team_key: "ENG", max_pages: 0 },
+        }),
+      ),
+    ).toThrow("tracker.max_pages must be between");
   });
 
   it("fails invalid positive numeric settings", () => {
@@ -204,8 +272,18 @@ describe("prompt rendering", () => {
     trackerKind: "mock" as const,
     endpoint: null,
     projectSlug: null,
+    teamKey: null,
+    teamId: null,
+    projectId: null,
+    allowWorkspaceWide: false,
     activeStates: ["Todo"],
     terminalStates: ["Done"],
+    includeArchived: false,
+    pageSize: 50,
+    maxPages: 5,
+    pollIntervalMs: null,
+    readOnly: true,
+    writeEnabled: false,
     workspaceRoot: "/tmp/symphonia_workspaces",
     maxConcurrentAgents: 3,
     maxTurns: 8,

@@ -9,10 +9,15 @@ import {
   createRetryRun,
   getMockIssue,
   mockProviderHealth,
-  getMockIssueByIdentifier,
   getWorkflowStatus,
+  createLinearTrackerAdapter,
+  isIssueActive,
+  isIssueTerminal,
+  LinearFetch,
+  linearTrackerAdapter,
   listMockIssues,
   loadWorkflowRuntime,
+  mockTrackerAdapter,
   MockRunCancelledError,
   nowIso,
   PromptTemplateError,
@@ -33,12 +38,16 @@ import {
   AgentEventSchema,
   HookName,
   HookRun,
+  Issue,
   isTerminalRunStatus,
   ProviderHealth,
   ProviderId,
   Run,
   RunSchema,
   StartRunRequestSchema,
+  TrackerHealth,
+  TrackerKind,
+  TrackerStatus,
   WorkflowConfigSummary,
   WorkflowStatus,
   WorkspaceInfo,
@@ -46,6 +55,7 @@ import {
 
 type RunRecord = {
   run: Run;
+  issue: Issue;
   controller: AbortController;
   attempt: number;
   prompt: string | null;
@@ -65,6 +75,7 @@ const defaultPort = 4100;
 export type SymphoniaDaemonOptions = {
   workflowPath?: string;
   cwd?: string;
+  linearFetch?: LinearFetch;
 };
 
 export class SymphoniaDaemon {
@@ -73,6 +84,10 @@ export class SymphoniaDaemon {
   private readonly workspaces = new Map<string, WorkspaceInfo>();
   private readonly approvals = new Map<string, ApprovalRecord>();
   private workflowRuntime: WorkflowRuntime | null = null;
+  private trackerLastSyncAt: string | null = null;
+  private trackerLastError: string | null = null;
+  private trackerPollingTimer: NodeJS.Timeout | null = null;
+  private trackerPollingIntervalMs: number | null = null;
 
   constructor(
     private readonly eventStore: EventStore,
@@ -86,6 +101,12 @@ export class SymphoniaDaemon {
   }
 
   close(): void {
+    if (this.trackerPollingTimer) {
+      clearInterval(this.trackerPollingTimer);
+      this.trackerPollingTimer = null;
+      this.trackerPollingIntervalMs = null;
+    }
+
     for (const record of this.runs.values()) {
       record.controller.abort();
     }
@@ -129,6 +150,14 @@ export class SymphoniaDaemon {
         return sendJson(response, 200, { providers: await this.listProviderHealth() });
       }
 
+      if (request.method === "GET" && path === "/tracker/status") {
+        return sendJson(response, 200, { tracker: this.getTrackerStatus() });
+      }
+
+      if (request.method === "GET" && path === "/tracker/health") {
+        return sendJson(response, 200, { tracker: await this.getTrackerHealth() });
+      }
+
       const providerHealthMatch = path.match(/^\/providers\/(mock|codex)\/health$/);
       if (request.method === "GET" && providerHealthMatch) {
         return sendJson(response, 200, { provider: await this.getProviderHealth(providerHealthMatch[1]! as ProviderId) });
@@ -140,7 +169,23 @@ export class SymphoniaDaemon {
       }
 
       if (request.method === "GET" && path === "/issues") {
-        return sendJson(response, 200, { issues: listMockIssues() });
+        return sendJson(response, 200, { issues: await this.listIssues() });
+      }
+
+      if (request.method === "POST" && path === "/issues/refresh") {
+        return sendJson(response, 200, { issues: await this.refreshIssueCache({ reconcile: true }) });
+      }
+
+      const issueByIdentifierMatch = path.match(/^\/issues\/by-identifier\/([^/]+)$/);
+      if (request.method === "GET" && issueByIdentifierMatch) {
+        const issue = await this.resolveIssue(decodeURIComponent(issueByIdentifierMatch[1]!));
+        return sendJson(response, 200, { issue });
+      }
+
+      const issueMatch = path.match(/^\/issues\/([^/]+)$/);
+      if (request.method === "GET" && issueMatch) {
+        const issue = await this.resolveIssue(decodeURIComponent(issueMatch[1]!));
+        return sendJson(response, 200, { issue });
       }
 
       if (request.method === "GET" && path === "/runs") {
@@ -224,17 +269,28 @@ export class SymphoniaDaemon {
   }
 
   async startRun(issueId: string, requestedProvider?: ProviderId): Promise<Run> {
-    const issue = getMockIssue(issueId);
+    let runtime: WorkflowRuntime | null = null;
+    try {
+      runtime = this.loadWorkflowRuntime();
+    } catch {
+      runtime = null;
+    }
+    const fallbackIssue = getMockIssue(issueId);
+    const issue = runtime ? await this.resolveIssue(issueId, runtime) : fallbackIssue;
     if (!issue) {
       throw new ApiError(404, `Unknown issue: ${issueId}`);
     }
 
-    if (!canStartRunForIssue(this.listRuns(), issueId)) {
+    if (!canStartRunForIssue(this.listRuns(), issue.id)) {
       throw new ApiError(409, "A run is already active for this issue.");
     }
 
+    if (runtime && isIssueTerminal(issue, runtime.config.tracker)) {
+      throw new ApiError(409, `Issue ${issue.identifier} is terminal in tracker state ${issue.state}.`);
+    }
+
     const timestamp = nowIso();
-    const provider = requestedProvider ?? this.getDefaultProvider();
+    const provider = requestedProvider ?? runtime?.config.provider ?? this.getDefaultProvider();
     const run = createQueuedRun({
       id: randomUUID(),
       issueId: issue.id,
@@ -245,6 +301,7 @@ export class SymphoniaDaemon {
     const attempt = this.countRunsForIssue(issue.id) + 1;
     const record: RunRecord = {
       run,
+      issue,
       controller: new AbortController(),
       attempt,
       prompt: null,
@@ -269,6 +326,7 @@ export class SymphoniaDaemon {
 
   async retryRun(runId: string): Promise<Run> {
     const previousRun = this.requireRun(runId);
+    const runtime = this.loadWorkflowRuntime();
 
     if (!isTerminalRunStatus(previousRun.status)) {
       throw new ApiError(409, "Only terminal runs can be retried.");
@@ -278,15 +336,16 @@ export class SymphoniaDaemon {
       throw new ApiError(409, "A run is already active for this issue.");
     }
 
-    const issue = getMockIssue(previousRun.issueId);
-    if (!issue) {
-      throw new ApiError(404, `Unknown issue: ${previousRun.issueId}`);
+    const issue = await this.resolveIssue(previousRun.issueId, runtime);
+    if (isIssueTerminal(issue, runtime.config.tracker)) {
+      throw new ApiError(409, `Issue ${issue.identifier} is terminal in tracker state ${issue.state}.`);
     }
 
     const timestamp = nowIso();
     const run = createRetryRun({ previousRun, id: randomUUID(), timestamp });
     const record: RunRecord = {
       run,
+      issue,
       controller: new AbortController(),
       attempt: this.countRunsForIssue(issue.id) + 1,
       prompt: null,
@@ -331,10 +390,7 @@ export class SymphoniaDaemon {
   }
 
   private async runLifecycle(record: RunRecord): Promise<void> {
-    const issue = getMockIssue(record.run.issueId);
-    if (!issue) {
-      return;
-    }
+    const issue = record.issue;
 
     try {
       if (record.controller.signal.aborted) return;
@@ -478,6 +534,7 @@ export class SymphoniaDaemon {
       cwd: this.options.cwd ?? process.cwd(),
     });
     this.workflowRuntime = runtime;
+    this.ensureTrackerPolling(runtime);
     return runtime;
   }
 
@@ -492,19 +549,131 @@ export class SymphoniaDaemon {
         workflowPath: this.options.workflowPath ?? process.env.SYMPHONIA_WORKFLOW_PATH,
         cwd: this.options.cwd ?? process.cwd(),
       });
+      this.ensureTrackerPolling(this.workflowRuntime);
     } else {
       this.workflowRuntime = null;
+      this.ensureTrackerPolling(null);
     }
 
     return status;
+  }
+
+  async listIssues(): Promise<Issue[]> {
+    const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+
+    if (runtime.config.tracker.kind === "mock") {
+      const fetched = await mockTrackerAdapter.fetchIssues(this.trackerContext(runtime));
+      this.eventStore.upsertIssues(fetched.issues, fetched.fetchedAt);
+      this.trackerLastSyncAt = fetched.fetchedAt;
+      this.trackerLastError = null;
+      return fetched.issues;
+    }
+
+    return this.eventStore.listIssues(runtime.config.tracker.kind);
+  }
+
+  async refreshIssueCache(options: { reconcile?: boolean } = {}): Promise<Issue[]> {
+    const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+    const adapter = this.trackerAdapter(runtime.config.tracker.kind);
+
+    try {
+      const fetched = await adapter.fetchIssues(this.trackerContext(runtime));
+      this.eventStore.upsertIssues(fetched.issues, fetched.fetchedAt);
+      this.trackerLastSyncAt = fetched.fetchedAt;
+      this.trackerLastError = fetched.diagnostics.join("\n") || null;
+      if (options.reconcile) {
+        await this.reconcileRunningIssues(runtime, fetched.issues);
+      }
+      return fetched.issues;
+    } catch (error) {
+      this.trackerLastError = error instanceof Error ? error.message : "Issue refresh failed.";
+      if (runtime.config.tracker.kind === "mock") return listMockIssues();
+      return this.eventStore.listIssues(runtime.config.tracker.kind);
+    }
+  }
+
+  async resolveIssue(issueIdOrIdentifier: string, runtime = this.workflowRuntime ?? this.loadWorkflowRuntime()): Promise<Issue> {
+    const cached =
+      this.eventStore.getIssue(issueIdOrIdentifier) ?? this.eventStore.getIssueByIdentifier(issueIdOrIdentifier);
+    if (cached?.tracker?.kind === runtime.config.tracker.kind) return cached;
+
+    try {
+      const issue = await this.trackerAdapter(runtime.config.tracker.kind).fetchIssue(
+        this.trackerContext(runtime),
+        issueIdOrIdentifier,
+      );
+      if (issue) {
+        this.eventStore.upsertIssues([issue], issue.lastFetchedAt ?? nowIso());
+        return issue;
+      }
+    } catch (error) {
+      if (cached) return cached;
+      this.trackerLastError = error instanceof Error ? error.message : "Issue lookup failed.";
+      throw error;
+    }
+
+    if (cached) return cached;
+    throw new ApiError(404, `Unknown issue: ${issueIdOrIdentifier}`);
+  }
+
+  getTrackerStatus(): TrackerStatus {
+    try {
+      const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+      const stats = this.eventStore.getIssueCacheStats(runtime.config.tracker.kind);
+      const hasError = Boolean(this.trackerLastError);
+      const status = hasError
+        ? stats.lastFetchedAt
+          ? "stale"
+          : "unavailable"
+        : runtime.config.tracker.kind === "linear" && !stats.lastFetchedAt
+          ? "unknown"
+          : "healthy";
+
+      return {
+        kind: runtime.config.tracker.kind,
+        displayName: this.trackerAdapter(runtime.config.tracker.kind).displayName,
+        status,
+        config: runtime.summary,
+        lastSyncAt: this.trackerLastSyncAt ?? stats.lastFetchedAt,
+        issueCount: stats.issueCount,
+        error: this.trackerLastError,
+      };
+    } catch (error) {
+      return {
+        kind: "linear",
+        displayName: "Linear",
+        status: "invalid_config",
+        config: null,
+        lastSyncAt: this.trackerLastSyncAt,
+        issueCount: 0,
+        error: error instanceof Error ? error.message : "Tracker configuration is invalid.",
+      };
+    }
+  }
+
+  async getTrackerHealth(): Promise<TrackerHealth> {
+    try {
+      const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+      return this.trackerAdapter(runtime.config.tracker.kind).health(this.trackerContext(runtime));
+    } catch (error) {
+      return {
+        kind: "linear",
+        displayName: "Linear",
+        healthy: false,
+        checkedAt: nowIso(),
+        error: error instanceof Error ? error.message : "Tracker configuration is invalid.",
+      };
+    }
   }
 
   listWorkspaces(): WorkspaceInfo[] {
     const known = [...this.workspaces.values()];
     try {
       const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+      const issues = this.eventStore.listIssues(runtime.config.tracker.kind);
+      const identifiers = issues.length > 0 ? issues.map((issue) => issue.identifier) : listMockIssues().map((issue) => issue.identifier);
       const listed = new WorkspaceManager(runtime.config.workspace.root).listExistingWorkspaces(
-        listMockIssues().map((issue) => issue.identifier),
+        identifiers,
       );
       const byKey = new Map<string, WorkspaceInfo>();
       for (const workspace of [...listed, ...known]) {
@@ -517,7 +686,7 @@ export class SymphoniaDaemon {
   }
 
   getWorkspaceInfo(issueIdentifier: string): WorkspaceInfo {
-    const issue = getMockIssueByIdentifier(issueIdentifier) ?? getMockIssue(issueIdentifier);
+    const issue = this.eventStore.getIssueByIdentifier(issueIdentifier) ?? this.eventStore.getIssue(issueIdentifier);
     const normalizedIdentifier = issue?.identifier ?? issueIdentifier;
     const cached = this.workspaces.get(normalizedIdentifier);
     if (cached) return cached;
@@ -794,6 +963,90 @@ export class SymphoniaDaemon {
       return runtime.config.provider;
     } catch {
       return "mock";
+    }
+  }
+
+  private trackerAdapter(kind: TrackerKind) {
+    if (kind !== "linear") return mockTrackerAdapter;
+    return this.options.linearFetch ? createLinearTrackerAdapter({ fetch: this.options.linearFetch }) : linearTrackerAdapter;
+  }
+
+  private trackerContext(runtime: WorkflowRuntime, signal?: AbortSignal) {
+    return {
+      workflowConfig: runtime.config,
+      trackerConfig: runtime.config.tracker,
+      signal,
+    };
+  }
+
+  private ensureTrackerPolling(runtime: WorkflowRuntime | null): void {
+    const nextInterval = runtime
+      ? runtime.config.tracker.pollIntervalMs ?? runtime.config.polling.intervalMs
+      : null;
+
+    if (this.trackerPollingIntervalMs === nextInterval) return;
+
+    if (this.trackerPollingTimer) {
+      clearInterval(this.trackerPollingTimer);
+      this.trackerPollingTimer = null;
+    }
+
+    this.trackerPollingIntervalMs = nextInterval;
+    if (!nextInterval) return;
+
+    this.trackerPollingTimer = setInterval(() => {
+      void this.refreshIssueCache({ reconcile: true });
+    }, nextInterval);
+  }
+
+  private async reconcileRunningIssues(runtime: WorkflowRuntime, fetchedIssues: Issue[]): Promise<void> {
+    const fetchedById = new Map(fetchedIssues.map((issue) => [issue.id, issue]));
+
+    for (const record of this.runs.values()) {
+      if (isTerminalRunStatus(record.run.status)) continue;
+
+      const currentIssue =
+        fetchedById.get(record.run.issueId) ??
+        this.eventStore.getIssue(record.run.issueId) ??
+        this.eventStore.getIssueByIdentifier(record.run.issueIdentifier);
+      if (!currentIssue) continue;
+
+      const terminal = isIssueTerminal(currentIssue, runtime.config.tracker);
+      const active = isIssueActive(currentIssue, runtime.config.tracker);
+      if (!terminal && active) {
+        record.issue = currentIssue;
+        continue;
+      }
+
+      const action = terminal ? "stopped_terminal" : "stopped_inactive";
+      const message = terminal
+        ? `Tracker state ${currentIssue.state} is terminal; run interrupted.`
+        : `Tracker state ${currentIssue.state} is no longer active; run interrupted.`;
+
+      this.cancelPendingApprovalsForRun(record.run.id);
+      record.controller.abort();
+      await this.emit(record, {
+        id: randomUUID(),
+        runId: record.run.id,
+        type: "tracker.reconciled",
+        timestamp: nowIso(),
+        tracker: runtime.config.tracker.kind,
+        issueId: currentIssue.id,
+        identifier: currentIssue.identifier,
+        previousState: record.issue.state,
+        currentState: currentIssue.state,
+        action,
+        message,
+      });
+      await this.emit(record, {
+        id: randomUUID(),
+        runId: record.run.id,
+        type: "run.status",
+        timestamp: nowIso(),
+        status: "cancelled",
+        message,
+      });
+      record.issue = currentIssue;
     }
   }
 

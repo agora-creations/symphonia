@@ -2,11 +2,27 @@ import { z } from "zod";
 
 const isoDateTime = z.string().datetime({ offset: true });
 
-export const IssueStateSchema = z.enum(["Todo", "In Progress", "Human Review", "Rework", "Done"]);
+export const TrackerKindSchema = z.enum(["mock", "linear"]);
+export type TrackerKind = z.infer<typeof TrackerKindSchema>;
+
+export const IssueStateSchema = z.string().min(1);
 export type IssueState = z.infer<typeof IssueStateSchema>;
 
 export const IssuePrioritySchema = z.enum(["No priority", "Low", "Medium", "High", "Urgent"]);
 export type IssuePriority = z.infer<typeof IssuePrioritySchema>;
+
+export const IssueTrackerMetadataSchema = z.object({
+  kind: TrackerKindSchema,
+  sourceId: z.string().min(1).nullable().optional(),
+  teamId: z.string().min(1).nullable().optional(),
+  teamKey: z.string().min(1).nullable().optional(),
+  teamName: z.string().min(1).nullable().optional(),
+  projectId: z.string().min(1).nullable().optional(),
+  projectName: z.string().min(1).nullable().optional(),
+  projectSlug: z.string().min(1).nullable().optional(),
+  stateId: z.string().min(1).nullable().optional(),
+});
+export type IssueTrackerMetadata = z.infer<typeof IssueTrackerMetadataSchema>;
 
 export const IssueSchema = z.object({
   id: z.string().min(1),
@@ -16,9 +32,13 @@ export const IssueSchema = z.object({
   state: IssueStateSchema,
   labels: z.array(z.string()),
   priority: IssuePrioritySchema,
+  branchName: z.string().min(1).nullable().optional(),
+  blockedBy: z.array(z.string().min(1)).optional(),
   createdAt: isoDateTime,
   updatedAt: isoDateTime,
   url: z.string().url(),
+  tracker: IssueTrackerMetadataSchema.optional(),
+  lastFetchedAt: isoDateTime.nullable().optional(),
 });
 export type Issue = z.infer<typeof IssueSchema>;
 
@@ -133,16 +153,33 @@ export const ArtifactEventSchema = BaseAgentEventSchema.extend({
   content: z.string(),
 });
 
-export const TrackerKindSchema = z.enum(["mock", "linear"]);
-export type TrackerKind = z.infer<typeof TrackerKindSchema>;
+export const TrackerWriteConfigSchema = z.object({
+  enabled: z.boolean(),
+  commentOnRunStart: z.boolean(),
+  commentOnRunComplete: z.boolean(),
+  moveToStateOnStart: z.string().min(1).nullable(),
+  moveToStateOnSuccess: z.string().min(1).nullable(),
+  moveToStateOnFailure: z.string().min(1).nullable(),
+});
+export type TrackerWriteConfig = z.infer<typeof TrackerWriteConfigSchema>;
 
 export const TrackerConfigSchema = z.object({
   kind: TrackerKindSchema,
   endpoint: z.string().min(1).nullable(),
   apiKey: z.string().min(1).nullable(),
+  teamKey: z.string().min(1).nullable(),
+  teamId: z.string().min(1).nullable(),
   projectSlug: z.string().min(1).nullable(),
+  projectId: z.string().min(1).nullable(),
+  allowWorkspaceWide: z.boolean(),
   activeStates: z.array(z.string().min(1)),
   terminalStates: z.array(z.string().min(1)),
+  includeArchived: z.boolean(),
+  pageSize: z.number().int().positive(),
+  maxPages: z.number().int().positive(),
+  pollIntervalMs: z.number().int().positive().nullable(),
+  readOnly: z.boolean(),
+  write: TrackerWriteConfigSchema,
 });
 export type TrackerConfig = z.infer<typeof TrackerConfigSchema>;
 
@@ -214,9 +251,19 @@ export const WorkflowConfigSummarySchema = z.object({
   defaultProvider: ProviderIdSchema,
   trackerKind: TrackerKindSchema,
   endpoint: z.string().min(1).nullable(),
+  teamKey: z.string().min(1).nullable(),
+  teamId: z.string().min(1).nullable(),
   projectSlug: z.string().min(1).nullable(),
+  projectId: z.string().min(1).nullable(),
+  allowWorkspaceWide: z.boolean(),
   activeStates: z.array(z.string().min(1)),
   terminalStates: z.array(z.string().min(1)),
+  includeArchived: z.boolean(),
+  pageSize: z.number().int().positive(),
+  maxPages: z.number().int().positive(),
+  pollIntervalMs: z.number().int().positive().nullable(),
+  readOnly: z.boolean(),
+  writeEnabled: z.boolean(),
   workspaceRoot: z.string().min(1),
   maxConcurrentAgents: z.number().int().positive(),
   maxTurns: z.number().int().positive(),
@@ -315,6 +362,26 @@ export const ProviderStderrEventSchema = BaseAgentEventSchema.extend({
   message: z.string().min(1),
 });
 
+export const TrackerSyncEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("tracker.sync"),
+  tracker: TrackerKindSchema,
+  status: z.enum(["started", "succeeded", "failed", "stale"]),
+  issueCount: z.number().int().nonnegative().optional(),
+  message: z.string().min(1).optional(),
+  error: z.string().min(1).optional(),
+});
+
+export const TrackerReconciledEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("tracker.reconciled"),
+  tracker: TrackerKindSchema,
+  issueId: z.string().min(1),
+  identifier: z.string().min(1),
+  previousState: z.string().min(1).nullable(),
+  currentState: z.string().min(1),
+  action: z.enum(["kept_running", "stopped_terminal", "stopped_inactive"]),
+  message: z.string().min(1),
+});
+
 export const CodexThreadStartedEventSchema = BaseAgentEventSchema.extend({
   type: z.literal("codex.thread.started"),
   threadId: z.string().min(1),
@@ -396,6 +463,8 @@ export const AgentEventSchema = z.discriminatedUnion("type", [
   PromptRenderedEventSchema,
   ProviderStartedEventSchema,
   ProviderStderrEventSchema,
+  TrackerSyncEventSchema,
+  TrackerReconciledEventSchema,
   CodexThreadStartedEventSchema,
   CodexTurnStartedEventSchema,
   CodexTurnCompletedEventSchema,
@@ -422,6 +491,36 @@ export const IssuesResponseSchema = z.object({
   issues: z.array(IssueSchema),
 });
 export type IssuesResponse = z.infer<typeof IssuesResponseSchema>;
+
+export const TrackerStatusSchema = z.object({
+  kind: TrackerKindSchema,
+  displayName: z.string().min(1),
+  status: z.enum(["healthy", "invalid_config", "unavailable", "stale", "unknown"]),
+  config: WorkflowConfigSummarySchema.nullable(),
+  lastSyncAt: isoDateTime.nullable(),
+  issueCount: z.number().int().nonnegative(),
+  error: z.string().nullable(),
+});
+export type TrackerStatus = z.infer<typeof TrackerStatusSchema>;
+
+export const TrackerHealthSchema = z.object({
+  kind: TrackerKindSchema,
+  displayName: z.string().min(1),
+  healthy: z.boolean(),
+  checkedAt: isoDateTime,
+  error: z.string().nullable(),
+});
+export type TrackerHealth = z.infer<typeof TrackerHealthSchema>;
+
+export const TrackerStatusResponseSchema = z.object({
+  tracker: TrackerStatusSchema,
+});
+export type TrackerStatusResponse = z.infer<typeof TrackerStatusResponseSchema>;
+
+export const TrackerHealthResponseSchema = z.object({
+  tracker: TrackerHealthSchema,
+});
+export type TrackerHealthResponse = z.infer<typeof TrackerHealthResponseSchema>;
 
 export const RunsResponseSchema = z.object({
   runs: z.array(RunSchema),

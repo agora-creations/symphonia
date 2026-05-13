@@ -22,7 +22,10 @@ export type WorkflowErrorCode =
   | "workflow_tracker_kind_missing"
   | "workflow_tracker_kind_unsupported"
   | "workflow_linear_api_key_missing"
-  | "workflow_linear_project_slug_missing"
+  | "workflow_linear_scope_missing"
+  | "workflow_tracker_states_invalid"
+  | "workflow_tracker_page_size_invalid"
+  | "workflow_tracker_max_pages_invalid"
   | "workflow_hook_timeout_invalid"
   | "workflow_agent_max_turns_invalid"
   | "workflow_agent_max_concurrent_invalid"
@@ -56,6 +59,10 @@ export type WorkflowRuntime = {
 const defaultLinearEndpoint = "https://api.linear.app/graphql";
 const defaultActiveStates = ["Todo", "In Progress"];
 const defaultTerminalStates = ["Closed", "Cancelled", "Canceled", "Duplicate", "Done"];
+const defaultTrackerPageSize = 50;
+const defaultTrackerMaxPages = 5;
+const maxTrackerPageSize = 100;
+const maxTrackerMaxPages = 20;
 
 export function discoverWorkflowPath(options: Pick<LoadWorkflowOptions, "workflowPath" | "cwd"> = {}): string {
   if (options.workflowPath) return resolve(options.workflowPath);
@@ -152,7 +159,17 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
 
   const endpoint = readString(trackerRaw, "endpoint") ?? (trackerKind === "linear" ? defaultLinearEndpoint : null);
   const apiKey = resolveEnvReference(readString(trackerRaw, "apiKey", "api_key"));
+  const teamKey = readString(trackerRaw, "teamKey", "team_key");
+  const teamId = readString(trackerRaw, "teamId", "team_id");
   const projectSlug = readString(trackerRaw, "projectSlug", "project_slug");
+  const projectId = readString(trackerRaw, "projectId", "project_id");
+  const allowWorkspaceWide = readBoolean(trackerRaw, false, "allowWorkspaceWide", "allow_workspace_wide");
+  const activeStates = readStringArray(trackerRaw, defaultActiveStates, "activeStates", "active_states");
+  const terminalStates = readStringArray(trackerRaw, defaultTerminalStates, "terminalStates", "terminal_states");
+  const pageSize = readPositiveInteger(trackerRaw, defaultTrackerPageSize, "pageSize", "page_size");
+  const maxPages = readPositiveInteger(trackerRaw, defaultTrackerMaxPages, "maxPages", "max_pages");
+  const pollIntervalMs = readOptionalPositiveInteger(trackerRaw, "pollIntervalMs", "poll_interval_ms");
+  const writeRaw = readObject(trackerRaw, "write");
 
   if (trackerKind === "linear" && !apiKey) {
     throw new WorkflowError(
@@ -162,10 +179,34 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
     );
   }
 
-  if (trackerKind === "linear" && !projectSlug) {
+  if (trackerKind === "linear" && !teamKey && !teamId && !projectSlug && !projectId && !allowWorkspaceWide) {
     throw new WorkflowError(
-      "workflow_linear_project_slug_missing",
-      "tracker.project_slug is required for linear tracker config.",
+      "workflow_linear_scope_missing",
+      "Linear tracker config requires team_key, team_id, project_slug, project_id, or allow_workspace_wide: true.",
+      definition.workflowPath,
+    );
+  }
+
+  if (activeStates.length === 0 || terminalStates.length === 0) {
+    throw new WorkflowError(
+      "workflow_tracker_states_invalid",
+      "tracker.active_states and tracker.terminal_states must both contain at least one state.",
+      definition.workflowPath,
+    );
+  }
+
+  if (pageSize < 1 || pageSize > maxTrackerPageSize) {
+    throw new WorkflowError(
+      "workflow_tracker_page_size_invalid",
+      `tracker.page_size must be between 1 and ${maxTrackerPageSize}.`,
+      definition.workflowPath,
+    );
+  }
+
+  if (maxPages < 1 || maxPages > maxTrackerMaxPages) {
+    throw new WorkflowError(
+      "workflow_tracker_max_pages_invalid",
+      `tracker.max_pages must be between 1 and ${maxTrackerMaxPages}.`,
       definition.workflowPath,
     );
   }
@@ -213,9 +254,26 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
       kind: trackerKind,
       endpoint,
       apiKey,
+      teamKey: teamKey ?? null,
+      teamId: teamId ?? null,
       projectSlug: projectSlug ?? null,
-      activeStates: readStringArray(trackerRaw, defaultActiveStates, "activeStates", "active_states"),
-      terminalStates: readStringArray(trackerRaw, defaultTerminalStates, "terminalStates", "terminal_states"),
+      projectId: projectId ?? null,
+      allowWorkspaceWide,
+      activeStates,
+      terminalStates,
+      includeArchived: readBoolean(trackerRaw, false, "includeArchived", "include_archived"),
+      pageSize,
+      maxPages,
+      pollIntervalMs,
+      readOnly: readBoolean(trackerRaw, true, "readOnly", "read_only"),
+      write: {
+        enabled: readBoolean(writeRaw, false, "enabled"),
+        commentOnRunStart: readBoolean(writeRaw, false, "commentOnRunStart", "comment_on_run_start"),
+        commentOnRunComplete: readBoolean(writeRaw, false, "commentOnRunComplete", "comment_on_run_complete"),
+        moveToStateOnStart: readString(writeRaw, "moveToStateOnStart", "move_to_state_on_start") ?? null,
+        moveToStateOnSuccess: readString(writeRaw, "moveToStateOnSuccess", "move_to_state_on_success") ?? null,
+        moveToStateOnFailure: readString(writeRaw, "moveToStateOnFailure", "move_to_state_on_failure") ?? null,
+      },
     },
     polling: {
       intervalMs: readPositiveInteger(pollingRaw, 30000, "intervalMs", "interval_ms"),
@@ -268,9 +326,19 @@ export function summarizeWorkflowConfig(config: WorkflowConfig): WorkflowConfigS
     defaultProvider: config.provider,
     trackerKind: config.tracker.kind,
     endpoint: config.tracker.endpoint,
+    teamKey: config.tracker.teamKey,
+    teamId: config.tracker.teamId,
     projectSlug: config.tracker.projectSlug,
+    projectId: config.tracker.projectId,
+    allowWorkspaceWide: config.tracker.allowWorkspaceWide,
     activeStates: config.tracker.activeStates,
     terminalStates: config.tracker.terminalStates,
+    includeArchived: config.tracker.includeArchived,
+    pageSize: config.tracker.pageSize,
+    maxPages: config.tracker.maxPages,
+    pollIntervalMs: config.tracker.pollIntervalMs,
+    readOnly: config.tracker.readOnly,
+    writeEnabled: config.tracker.write.enabled,
     workspaceRoot: config.workspace.root,
     maxConcurrentAgents: config.agent.maxConcurrentAgents,
     maxTurns: config.agent.maxTurns,
@@ -381,9 +449,22 @@ function readStringArray(record: Record<string, unknown>, fallback: string[], ..
   return fallback;
 }
 
+function readBoolean(record: Record<string, unknown>, fallback: boolean, ...keys: string[]): boolean {
+  for (const key of keys) {
+    const value = record[key];
+    if (typeof value === "boolean") return value;
+  }
+  return fallback;
+}
+
 function readPositiveInteger(record: Record<string, unknown>, fallback: number, ...keys: string[]): number {
   const value = readNumber(record, ...keys);
   return value === undefined ? fallback : value;
+}
+
+function readOptionalPositiveInteger(record: Record<string, unknown>, ...keys: string[]): number | null {
+  const value = readNumber(record, ...keys);
+  return value === undefined ? null : value;
 }
 
 function readNonnegativeInteger(record: Record<string, unknown>, fallback: number, ...keys: string[]): number {

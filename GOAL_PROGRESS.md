@@ -1,5 +1,190 @@
 # Symphonia Goal Progress
 
+## Milestone 4 Objective
+
+Add Linear as the first real tracker while preserving mock tracker support, the mock provider, Codex provider, `WORKFLOW.md` runtime, workspace lifecycle, hooks, SQLite/SSE event flow, and UI controls. A user should be able to configure `tracker.kind: linear` with `api_key: "$LINEAR_API_KEY"`, fetch real Linear issues into the board through the daemon, start Mock or Codex runs from those issue cards, reconcile issue state changes through polling, and keep local mock mode safe by default.
+
+## Milestone 4 Starting Repo State
+
+- Branch at start: `main...origin/main`, clean working tree.
+- Milestone 4 branch: `milestone-4-linear-tracker`.
+- Starting commit for Milestone 4: `8942859`.
+- Root `WORKFLOW.md` is in safe mock mode by default and should stay that way.
+- Existing Linear support is config-only: `tracker.kind: linear` is partially validated, but the daemon still serves mock issues and run lifecycle resolves issues through the mock tracker.
+- Existing Milestone 3 behavior present: mock provider, Codex provider, workflow parsing, workspace manager, hooks, SQLite event persistence, SSE run event streams, provider health, approvals, stop, and retry.
+
+## Milestone 4 Planned Checkpoints
+
+1. Refine the tracker abstraction so mock and Linear trackers share typed capabilities.
+2. Extend workflow config resolution for Linear fields, env indirection, validation bounds, read-only defaults, and safe summaries.
+3. Use direct GraphQL fetch for Linear behind a small client with fake-fetch tests.
+4. Implement Linear issue fetching, pagination, normalization, filtering, sorting, and health checks.
+5. Add daemon issue cache, tracker status/health, issue refresh, and safe secret redaction.
+6. Add polling and reconciliation so running issues are stopped when tracker state becomes terminal or no longer active.
+7. Keep Linear writes disabled by default; defer writes if the read path stability would suffer.
+8. Wire run start/retry to tracker-resolved issues for both mock and Linear.
+9. Update the UI with tracker status, refresh controls, Linear issue metadata, and tracker timeline details.
+10. Update README examples while keeping root `WORKFLOW.md` mock by default.
+11. Run automated tests plus lint/build and perform `pnpm dev` smoke validation.
+
+## Milestone 4 Validation Commands
+
+- `pnpm --filter @symphonia/types test`
+- `pnpm --filter @symphonia/core test`
+- `pnpm --filter @symphonia/daemon test`
+- `pnpm test`
+- `pnpm lint`
+- `pnpm build`
+- `pnpm dev` smoke check
+
+## Milestone 4 External Dependency Notes
+
+- Real Linear manual validation requires a valid `LINEAR_API_KEY` and an accessible workspace/team/project filter.
+- Automated tests must not require Linear credentials or network access; fake fetch/client coverage is required.
+- Linear webhooks are intentionally out of scope because the current app is local-first and webhooks require a publicly reachable HTTPS endpoint.
+- Linear writes must remain disabled unless explicitly configured and tested.
+
+## Milestone 4 Checkpoint Progress
+
+### Backend Tracker and Cache Slice
+
+- Added shared Linear-capable tracker config fields with env-resolved `api_key`, team/project scope fields, active/terminal states, pagination bounds, polling interval override, read-only default, and write flags.
+- Kept workflow config summaries redacted; summaries do not include `apiKey` or resolved secrets.
+- Chose direct GraphQL fetch for Linear. This keeps the adapter small, fakeable in tests, and avoids coupling Milestone 4 to the Linear SDK.
+- Added a `LinearGraphqlClient` with injectable `fetch`, viewer health check, issue pagination, single issue fetch, guarded write methods, GraphQL error handling, HTTP error handling, and network error handling.
+- Added tracker helpers and adapters for mock and Linear, including state normalization, active/terminal filtering, priority sorting, source metadata, and read-only write protection.
+- Added SQLite issue cache support with upsert/list/get-by-id/get-by-identifier/stats.
+- Added daemon `/tracker/status`, `/tracker/health`, `/issues`, `/issues/refresh`, `/issues/:issueId`, and `/issues/by-identifier/:identifier` behavior.
+- Wired run start/retry to tracker-resolved issues while preserving invalid-workflow behavior where a run is queued and then fails inside lifecycle.
+- Added polling timer setup and reconciliation that interrupts active runs when refreshed tracker state becomes terminal or no longer active.
+- Added fake Linear daemon tests for refresh, cache, mock run from Linear issue, Codex run from Linear issue, and terminal-state reconciliation.
+
+Validation so far:
+
+- `pnpm --filter @symphonia/types test` - passed; 8 tests.
+- `pnpm --filter @symphonia/types build` - passed.
+- `pnpm --filter @symphonia/core test` - passed; 60 tests.
+- `pnpm --filter @symphonia/db test` - passed; 4 tests.
+- `pnpm --filter @symphonia/core build` - passed.
+- `pnpm --filter @symphonia/db build` - passed.
+- `pnpm --filter @symphonia/daemon test` - passed; 15 tests.
+
+Notes:
+
+- Linear personal API keys are sent as the raw `Authorization` header value, matching Linear's public docs for personal API key auth. OAuth bearer tokens remain a later milestone.
+- Advanced Linear blocker/dependency handling is not implemented yet; issue selection handles active/terminal states and duplicate active runs.
+
+## Milestone 4 Final Status
+
+Milestone 4 is implemented and validated with fake Linear coverage. Mock tracker mode remains the safe default in root `WORKFLOW.md`; Linear mode is documented separately in `README.md`.
+
+## Milestone 4 Implemented Files and Directories
+
+- `README.md`
+- `GOAL_PROGRESS.md`
+- `apps/daemon/src/daemon.ts`
+- `apps/daemon/test/http.test.ts`
+- `apps/web/components/issues-view.tsx`
+- `apps/web/lib/api.ts`
+- `packages/core/src/tracker.ts`
+- `packages/core/src/linear-client.ts`
+- `packages/core/src/linear-tracker.ts`
+- `packages/core/src/workflow.ts`
+- `packages/core/src/index.ts`
+- `packages/core/test/linear-tracker.test.ts`
+- `packages/core/test/workflow.test.ts`
+- `packages/db/src/event-store.ts`
+- `packages/db/test/event-store.test.ts`
+- `packages/types/src/index.ts`
+- `packages/types/test/schemas.test.ts`
+
+## Milestone 4 Final Command Results
+
+- `pnpm --filter @symphonia/types test` - passed; 8 tests.
+- `pnpm --filter @symphonia/types build` - passed.
+- `pnpm --filter @symphonia/core test` - passed; 60 tests.
+- `pnpm --filter @symphonia/db test` - passed; 4 tests.
+- `pnpm --filter @symphonia/core build` - passed.
+- `pnpm --filter @symphonia/db build` - passed.
+- `pnpm --filter @symphonia/daemon test` - passed; 15 tests.
+- `pnpm --filter @symphonia/web lint` - passed.
+- `pnpm test` - passed; packages rebuilt, 87 total tests passed across types/core/db/daemon.
+- `pnpm lint` - passed.
+- `pnpm build` - passed. Next.js still prints the existing warning that the Next.js ESLint plugin was not detected.
+- `git diff --check` - passed.
+
+## Milestone 4 Smoke Validation Results
+
+- `pnpm dev` started the daemon on `http://localhost:4100` and web on `http://localhost:3000`.
+- `GET /healthz` returned `ok`.
+- `GET /workflow/status` returned healthy root `WORKFLOW.md` with `trackerKind: mock`.
+- `GET /tracker/status` returned mock tracker healthy and a redacted safe config summary.
+- `GET /issues` returned mock issues with tracker metadata and `lastFetchedAt`.
+- `GET /tracker/status` after issue load returned `issueCount: 8`.
+- Web route `http://localhost:3000/issues` returned HTTP 200.
+- Started a mock run for `issue-daemon-api`; it reached `succeeded`.
+- Fetched the run events and confirmed workflow, workspace, prompt, hook, mock provider, usage, artifact, and persisted timeline events.
+- The dev server was stopped after smoke validation; the final dev command session ended with expected process termination after the smoke checks.
+
+## Milestone 4 Fake Linear Validation Results
+
+- Fake fetch tests cover Linear viewer health success.
+- Fake fetch tests cover invalid credential-like GraphQL errors.
+- Fake fetch tests cover network failure handling.
+- Fake fetch tests cover paginated issue fetching and max-page truncation.
+- Fake fetch tests cover issue normalization, priority mapping, label lowercasing, team/project metadata, and source metadata.
+- Fake fetch tests cover active-state filtering, terminal-state exclusion, sorting, and duplicate active-run prevention.
+- Fake daemon tests cover tracker status, Linear setup errors without secret exposure, issue refresh/cache, Mock run start from a Linear issue, Codex run start from a Linear issue using fake app-server, and terminal-state reconciliation.
+- Read-only mode is covered: Linear write attempts are rejected unless write mode is explicitly enabled. Automatic Linear comments/state transitions are deferred.
+
+## Milestone 4 Real Linear Validation Result
+
+Real Linear manual validation was not performed because `LINEAR_API_KEY` is not present in the environment. This does not block the milestone because automated fake Linear tests cover the adapter, daemon, cache, run-start, Codex fake app-server, and reconciliation flows without credentials or network access.
+
+## How To Run Mock Tracker Mode
+
+```bash
+pnpm dev
+```
+
+Open the web URL printed by Next.js. Root `WORKFLOW.md` uses:
+
+```yaml
+tracker:
+  kind: mock
+provider: mock
+```
+
+Use the provider selector to start Mock or Codex runs from mock issue cards.
+
+## How To Run Linear Tracker Mode
+
+1. Export `LINEAR_API_KEY`.
+2. Copy the Linear example from `README.md` into a local workflow override or temporarily edit `WORKFLOW.md`.
+3. Keep `api_key: "$LINEAR_API_KEY"` and `read_only: true`.
+4. Configure `team_key`, `team_id`, `project_slug`, `project_id`, or `allow_workspace_wide: true`.
+5. Run `pnpm dev`.
+6. Open the issues page and click Refresh issues.
+
+Start Mock or Codex provider runs from Linear cards using the same provider selector. Workspace paths use Linear issue identifiers, and rendered prompts include Linear issue fields when the workflow prompt references them.
+
+## Milestone 4 Known Limitations
+
+- GitHub PR/CI is still not implemented.
+- Claude Code provider is still not implemented.
+- Cursor provider is still not implemented.
+- Linear OAuth is not implemented.
+- Linear webhooks are not implemented because Symphonia is local-first for now.
+- Linear writes are disabled by default. Config flags and guarded client methods exist, but automatic comment/state-transition hooks are deferred.
+- Real Linear validation depends on `LINEAR_API_KEY` and accessible Linear workspace/team/project data.
+- Daemon restart reconstruction of active runs and approvals is still incomplete.
+- Workspace cleanup remains manual.
+- Advanced Linear blocker/dependency handling is partial.
+
+## Recommended Next Milestone
+
+Milestone 5 - Add GitHub PR/CI integration and review artifacts for Linear-backed Codex runs.
+
 ## Milestone 3 Objective
 
 Implement a real Codex app-server provider while preserving the mock tracker and `WORKFLOW.md` runtime. A user can choose mock or Codex from the UI, start a Codex-backed run, see streamed and persisted Codex events, respond to approvals from the UI, interrupt active turns, retry terminal Codex runs, and keep validation passing without requiring real Codex for automated tests.
