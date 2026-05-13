@@ -16,6 +16,8 @@ dist-ssr
 .next
 .output
 .vinxi
+apps/desktop/out
+apps/desktop/.desktop-package
 .tanstack/**
 .nitro
 *.local
