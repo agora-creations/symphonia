@@ -109,6 +109,10 @@ export function getMockIssue(issueId: string): Issue | undefined {
   return listMockIssues().find((issue) => issue.id === issueId);
 }
 
+export function getMockIssueByIdentifier(issueIdentifier: string): Issue | undefined {
+  return listMockIssues().find((issue) => issue.identifier === issueIdentifier);
+}
+
 export function isDesignatedFailureIssue(issueId: string): boolean {
   return issueId === "issue-rework-failing-run";
 }

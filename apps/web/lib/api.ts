@@ -6,6 +6,13 @@ import {
   Run,
   RunResponseSchema,
   RunsResponseSchema,
+  PromptResponseSchema,
+  WorkflowConfigResponseSchema,
+  WorkflowStatus,
+  WorkflowStatusResponseSchema,
+  WorkspaceInfo,
+  WorkspaceResponseSchema,
+  WorkspacesResponseSchema,
 } from "@symphonia/types";
 
 export const DAEMON_URL = process.env.NEXT_PUBLIC_DAEMON_URL ?? "http://localhost:4100";
@@ -34,6 +41,36 @@ export async function getRuns(): Promise<Run[]> {
 export async function getRunEvents(runId: string): Promise<AgentEvent[]> {
   const response = await request(`/runs/${runId}/events`);
   return EventsResponseSchema.parse(response).events;
+}
+
+export async function getRunPrompt(runId: string): Promise<string | null> {
+  const response = await request(`/runs/${runId}/prompt`);
+  return PromptResponseSchema.parse(response).prompt;
+}
+
+export async function getWorkflowStatus(): Promise<WorkflowStatus> {
+  const response = await request("/workflow/status");
+  return WorkflowStatusResponseSchema.parse(response).workflow;
+}
+
+export async function reloadWorkflow(): Promise<WorkflowStatus> {
+  const response = await request("/workflow/reload", { method: "POST" });
+  return WorkflowStatusResponseSchema.parse(response).workflow;
+}
+
+export async function getWorkflowConfig() {
+  const response = await request("/workflow/config");
+  return WorkflowConfigResponseSchema.parse(response).config;
+}
+
+export async function getWorkspaces(): Promise<WorkspaceInfo[]> {
+  const response = await request("/workspaces");
+  return WorkspacesResponseSchema.parse(response).workspaces;
+}
+
+export async function getWorkspace(issueIdentifier: string): Promise<WorkspaceInfo> {
+  const response = await request(`/workspaces/${encodeURIComponent(issueIdentifier)}`);
+  return WorkspaceResponseSchema.parse(response).workspace;
 }
 
 export async function startRun(issueId: string): Promise<Run> {

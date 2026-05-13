@@ -1,85 +1,91 @@
-# Symphonia Milestone 1 Progress
+# Symphonia Goal Progress
+
+## Milestone 2 Objective
+
+Implement the repo-owned `WORKFLOW.md` system and real local workspace lifecycle while preserving the Milestone 1 mock tracker/provider loop.
 
 ## Current Checkpoint
 
-Checkpoint 9 - README and final validation complete.
+Checkpoint 12 - documentation and final validation complete.
 
 ## Completed Work
 
-- Inspected the existing project: it was a root-level TanStack/Vite-style app, not a git repository and not a pnpm monorepo.
-- Preserved the existing scaffold files in place.
-- Started converting the root into a pnpm TypeScript monorepo that targets `apps/` and `packages/`.
-- Created the root `pnpm-workspace.yaml`.
-- Created workspace packages under `apps/web`, `apps/daemon`, `packages/types`, `packages/core`, and `packages/db`.
-- Added root commands: `pnpm dev`, `pnpm build`, `pnpm test`, and `pnpm lint`.
-- Implemented initial Next.js web app shell, daemon shell, shared type package, core package, and database package.
-- Ran `pnpm install` successfully.
-- Ran `pnpm build` successfully.
-- Implemented shared zod schemas and exported TypeScript types in `packages/types`.
-- Added schema tests for valid issues, valid runs, valid event variants, and invalid event rejection.
-- Implemented append-only SQLite event store in `packages/db` using `better-sqlite3`.
-- Added database tests for append/fetch, chronological ordering, and run isolation with temporary databases.
-- Implemented stable mock tracker issues across Todo, In Progress, Human Review, Rework, and Done.
-- Implemented deterministic mock agent provider event timelines, including first-attempt failure for `SYM-6` and success on retry.
-- Implemented core run state helpers for start, stop/cancel, success, failure, and retry.
-- Implemented daemon endpoints for health, issues, runs, run events, SSE streams, start, stop, and retry.
-- Implemented initial Next.js board UI with daemon status, grouped issue columns, run controls, status badges, and live event detail panel.
-- Ran `pnpm test` successfully after native SQLite binding remediation.
-- Ran `pnpm lint` successfully.
-- Fixed compiled Node ESM runtime imports so `node apps/daemon/dist/index.js` starts correctly.
-- Validated daemon HTTP endpoints with local `curl` smoke checks.
-- Validated SSE output with `GET /runs/:runId/events/stream`.
-- Validated stop and retry behavior against the compiled daemon with a slower mock delay.
-- Validated `pnpm dev` starts both the daemon and Next frontend.
-- Added README with install, run, validation, storage, mock behavior, accessibility baseline, known limitations, and next milestones.
-
-## Validation Commands Run
-
-- `pwd` - succeeded.
-- `ls -la` - succeeded.
-- `command -v pnpm` - succeeded.
-- `pnpm install` - succeeded.
-- `pnpm build` - succeeded.
-- `pnpm test` - initially failed because `better-sqlite3` native bindings were not built.
-- `CI=true pnpm install --force` with network escalation - succeeded and built `better-sqlite3`.
-- `pnpm test` - succeeded after native binding build.
-- `pnpm lint` - initially failed because ESLint traversed generated `dist` and `.next` output.
-- `pnpm lint` - succeeded after generated-output ignores were fixed.
-- `pnpm build` - succeeded after final ESM import fix. Next.js emitted a non-blocking warning that the Next ESLint plugin is not configured in the root flat ESLint config.
-- `curl http://localhost:4100/healthz` - succeeded during daemon smoke check.
-- `curl http://localhost:4100/issues` - succeeded and returned 8 zod-valid mock issues.
-- `POST /runs` for `SYM-1` - succeeded and produced persisted successful timeline events.
-- `GET /runs/:runId/events/stream` - returned SSE `agent-event` records; the `curl --max-time` command exited with timeout code 28 after receiving expected stream output.
-- `POST /runs/:runId/stop` - succeeded against a slower compiled-daemon smoke run and marked the run `cancelled`.
-- `POST /runs/:runId/retry` - succeeded and created a new queued run for the same issue.
-- `pnpm dev` - succeeded; daemon reported `http://localhost:4100`, Next reported `http://localhost:3000`, and both responded to local HTTP checks.
-
-## Failures Encountered
-
-- `git status --short` failed because this directory is not a git repository.
-- Initial scaffold patch failed on `.gitignore` context and was reapplied in smaller patches.
-- `pnpm install` warned that native build scripts for `better-sqlite3`, `esbuild`, and `sharp` were ignored. Build still succeeded; SQLite runtime tests will confirm whether this needs remediation.
-- First `pnpm build` surfaced a React hooks cleanup warning from Next.js linting; fixed by copying the ref map inside the effect before cleanup.
-- `better-sqlite3` tests failed until pnpm approved native build dependencies were configured with `pnpm.onlyBuiltDependencies` and dependencies were force-refreshed.
-- `CI=true pnpm install --force` required escalated network because the sandbox could not resolve `registry.npmjs.org`.
-- Root lint initially scanned generated build outputs; fixed by ignoring `**/dist/**`, `**/.next/**`, and generated Next env files.
-- Compiled daemon initially failed at runtime because TypeScript emitted extensionless relative ESM imports; fixed source imports to use `.js` relative specifiers.
-- `tsx watch` needed escalated execution in this sandbox because its IPC pipe listen failed with `EPERM`; local user shells should be able to run `pnpm dev` normally.
-- `curl --max-time` SSE check exits non-zero by design after the timeout, even though it received expected SSE records.
-
-## Remaining Work
-
-- None for Milestone 1.
+- Inspected the Milestone 1 baseline: `README.md`, `GOAL_PROGRESS.md`, root scripts, workspace config, daemon, web app, shared types, core package, and SQLite package.
+- Added shared zod schemas and exported TypeScript types for workflow definitions, workflow config, workflow status, workspace info, hook runs, prompt responses, workspace responses, and workflow event variants.
+- Extended persisted/SSE agent events with `workflow.loaded`, `workflow.invalid`, `workspace.ready`, `hook.started`, `hook.succeeded`, `hook.failed`, `hook.timed_out`, and `prompt.rendered`.
+- Added `yaml` to `@symphonia/core`.
+- Implemented `WORKFLOW.md` discovery, including upward repo-root discovery when the daemon is launched from `apps/daemon`.
+- Implemented YAML front matter parsing, prompt-only files, typed workflow errors, empty prompt bodies, and unknown-key tolerance.
+- Implemented workflow config resolution with defaults, mock/linear validation, env var expansion, `~` expansion, relative workspace root resolution, and secret-safe summaries.
+- Implemented strict `{{ path.to.value }}` prompt rendering with unknown variable/helper failures and a fallback prompt.
+- Implemented per-issue workspace manager with deterministic key sanitization, root containment checks, creation, reuse, listing, and future before-remove target support.
+- Implemented POSIX hook runner with `sh -lc`, timeout handling, abort handling, stdout/stderr capture, exit code capture, and structured hook results.
+- Wired workflow, workspace, prompt, hooks, and existing mock provider into the daemon run lifecycle.
+- Added daemon APIs: `GET /workflow/status`, `GET /workflow/config`, `POST /workflow/reload`, `GET /workspaces`, `GET /workspaces/:issueIdentifier`, and `GET /runs/:runId/prompt`.
+- Preserved run concurrency protection, stop, retry, SSE streaming, and append-only SQLite event persistence.
+- Updated the Next.js UI with workflow health, a workflow panel, reload button, workspace path, rendered prompt preview, hook log details, and new timeline event labels.
+- Added root `WORKFLOW.md` configured for the mock tracker with harmless local hooks.
+- Updated README with Milestone 2 behavior, config format, hook safety, prompt variables, endpoints, validation, and limitations.
+- Added `.symphonia` and a local legacy scaffold copy to `.gitignore`.
 
 ## Implemented Files and Directories
 
-- `apps/web`: Next.js app router UI, Tailwind global styles, daemon API client.
-- `apps/daemon`: Node daemon server with HTTP routes, SSE streaming, run registry, and compiled entrypoint.
-- `packages/types`: zod schemas, shared domain types, API response schemas, schema tests.
-- `packages/core`: mock tracker, mock provider, run state helpers, provider/state tests.
-- `packages/db`: SQLite event store and temporary-database tests.
-- `pnpm-workspace.yaml`, root `package.json`, root `tsconfig.json`, root `eslint.config.js`.
-- `README.md`.
+- `WORKFLOW.md`
+- `packages/types/src/index.ts`
+- `packages/types/test/schemas.test.ts`
+- `packages/core/src/workflow.ts`
+- `packages/core/src/prompt-template.ts`
+- `packages/core/src/workspace-manager.ts`
+- `packages/core/src/hook-runner.ts`
+- `packages/core/test/workflow.test.ts`
+- `apps/daemon/src/daemon.ts`
+- `apps/daemon/test/http.test.ts`
+- `apps/web/app/page.tsx`
+- `apps/web/lib/api.ts`
+- `README.md`
+- `GOAL_PROGRESS.md`
+
+## Validation Commands Run
+
+- `pnpm --filter @symphonia/types test` - succeeded; 7 tests passed.
+- `pnpm --filter @symphonia/types build` - succeeded.
+- `pnpm --filter @symphonia/core test` - succeeded; 33 tests passed.
+- `pnpm --filter @symphonia/core build` - succeeded.
+- `pnpm --filter @symphonia/daemon test` - succeeded; 5 tests passed.
+- `pnpm --filter @symphonia/daemon build` - succeeded.
+- `pnpm --filter @symphonia/web build` - succeeded.
+- `pnpm --filter @symphonia/db test` - succeeded; 3 tests passed.
+- `pnpm test` - succeeded; all package and daemon tests passed.
+- `pnpm lint` - succeeded.
+- `pnpm build` - succeeded. Next.js still emits the existing non-blocking warning that the Next ESLint plugin is not detected in the root flat ESLint config.
+- `pnpm dev` - succeeded; daemon started on `http://localhost:4100`, web started on `http://localhost:3001` because port `3000` was already occupied by another process.
+
+## Manual Validation Results
+
+- `GET /healthz` returned healthy daemon status.
+- `GET /workflow/status` returned `healthy` with root `WORKFLOW.md` and workspace root `.symphonia/workspaces`.
+- Web app responded with HTTP 200 on the available Next.js dev port.
+- Starting `SYM-1` created `.symphonia/workspaces/SYM-1`.
+- `GET /runs/:runId/events` showed `workflow.loaded`, `workspace.ready`, `prompt.rendered`, hook events, mock provider events, `succeeded`, and `afterRun` hook logs.
+- `GET /runs/:runId/prompt` returned the rendered prompt with issue data.
+- SSE endpoint replayed and streamed `agent-event` records for an active run; the `curl --max-time` command exited with code 28 after receiving expected events.
+- Refresh-style validation via repeated `GET /runs/:runId/events` confirmed persisted timeline events remained available.
+- `SYM-6` failed deterministically on first attempt and succeeded after `POST /runs/:runId/retry`.
+- A slower mock run returned `cancelled` from `POST /runs/:runId/stop`; retry of that cancelled run queued a new attempt.
+- Temporary prompt edit plus `POST /workflow/reload` produced a rendered prompt containing the edit.
+- Temporary invalid YAML plus `POST /workflow/reload` returned `invalid` workflow status without daemon crash.
+- Restoring `WORKFLOW.md` plus `POST /workflow/reload` returned `healthy`.
+
+## Failures Encountered
+
+- The goal tracker still contains the completed Milestone 1 objective and did not allow creating a second thread goal in this conversation. This file acted as the Milestone 2 checkpoint ledger.
+- `pnpm --filter @symphonia/core add yaml` first hit pnpm store mismatch. Retrying against the existing store completed, though sandbox DNS prevented registry metadata refreshes.
+- First core test run consumed stale built exports from `@symphonia/types`; rebuilding the types package fixed it.
+- SQLite native bindings were compiled for a different Node ABI after dependency work; `pnpm --filter @symphonia/db rebuild better-sqlite3` fixed tests.
+- Automated HTTP tests could not bind a local port in the sandbox, so daemon tests exercise the same daemon methods directly; manual smoke validation covered real HTTP/SSE with `curl`.
+- Initial dev smoke found workflow discovery looking in `apps/daemon/WORKFLOW.md`; fixed by walking upward to the repo root.
+- `tsx watch` hit a sandbox IPC `EPERM` on one dev run; rerunning dev with escalation started successfully.
+- Node `fetch` to localhost was blocked by sandbox networking during smoke scripting; `curl` validation worked.
 
 ## How To Run The App
 
@@ -88,31 +94,38 @@ pnpm install
 pnpm dev
 ```
 
-Open `http://localhost:3000`. The daemon defaults to `http://localhost:4100` and SQLite defaults to `./.data/agentboard.sqlite`.
+Open the Next.js URL printed by the dev server. The daemon defaults to `http://localhost:4100`. If SQLite native bindings are stale after changing Node versions, run:
 
-## Manual Verification Summary
+```bash
+pnpm --filter @symphonia/db rebuild better-sqlite3
+```
 
-1. `pnpm dev` starts package builds, daemon, and web.
-2. The web app responds on `localhost:3000`.
-3. The daemon health endpoint responds on `localhost:4100/healthz`.
-4. Mock issues are available from `GET /issues`.
-5. `POST /runs` starts a mock run.
-6. Events are persisted and returned by `GET /runs/:runId/events`.
-7. SSE streams event records from `GET /runs/:runId/events/stream`.
-8. Stop marks active runs `cancelled`.
-9. Retry creates a new queued run attempt for the same issue.
+## How To Inspect Workflow And Workspace Behavior
+
+- `GET http://localhost:4100/workflow/status`
+- `GET http://localhost:4100/workflow/config`
+- `POST http://localhost:4100/workflow/reload`
+- `GET http://localhost:4100/workspaces`
+- `GET http://localhost:4100/workspaces/SYM-1`
+- `GET http://localhost:4100/runs/<runId>/prompt`
+- Workspace folders are under `.symphonia/workspaces` by default.
+- Run events are persisted in SQLite at `./.data/agentboard.sqlite` by default.
 
 ## Known Limitations
 
-- Runs are kept in daemon memory; persisted events survive page refreshes while the daemon is running, but run metadata is not reconstructed after daemon restart yet.
-- The mock provider is deterministic and local only.
-- The UI is keyboard usable and labeled, but deeper accessibility testing is deferred.
-- Next.js build emits a non-blocking warning about the root flat ESLint config not including the Next plugin.
+- Real Codex provider is still not implemented.
+- Linear adapter is still not implemented.
+- GitHub PR/CI adapter is still not implemented.
+- Workflow hot reload is manual through the reload endpoint/button.
+- Workspace cleanup is not automatic.
+- Run metadata is still in daemon memory and is not reconstructed after daemon restart, though events persist in SQLite.
+- Hooks execute trusted local shell commands from repo configuration.
+- Next.js build emits the existing non-blocking root ESLint plugin warning.
 
 ## Recommended Next /goal Prompt Title
 
-`/goal Implement Symphonia Milestone 2: WORKFLOW.md parser and local workspace manager`
+Milestone 3 — Implement real Codex app-server provider while keeping mock tracker and `WORKFLOW.md` runtime.
 
 ## Final Acceptance Status
 
-Complete for Milestone 1.
+Complete for Milestone 2.

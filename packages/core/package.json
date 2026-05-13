@@ -17,6 +17,7 @@
     "lint": "tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@symphonia/types": "workspace:*"
+    "@symphonia/types": "workspace:*",
+    "yaml": "^2.9.0"
   }
 }

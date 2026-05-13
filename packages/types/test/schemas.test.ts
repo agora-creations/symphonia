@@ -1,5 +1,14 @@
 import { describe, expect, it } from "vitest";
-import { AgentEventSchema, IssueSchema, RunSchema } from "../src/index";
+import {
+  AgentEventSchema,
+  HookRunSchema,
+  IssueSchema,
+  RunSchema,
+  WorkflowConfigSchema,
+  WorkflowDefinitionSchema,
+  WorkflowStatusSchema,
+  WorkspaceInfoSchema,
+} from "../src/index";
 
 const timestamp = "2026-05-13T08:00:00.000Z";
 
@@ -94,6 +103,216 @@ describe("shared schemas", () => {
         timestamp,
         toolName: "shell",
         status: "not-a-status",
+      }),
+    ).toThrow();
+  });
+
+  it("parses valid workflow config, definition, status, workspace, and hook payloads", () => {
+    const config = WorkflowConfigSchema.parse({
+      tracker: {
+        kind: "mock",
+        endpoint: null,
+        apiKey: null,
+        projectSlug: null,
+        activeStates: ["Todo", "In Progress"],
+        terminalStates: ["Done"],
+      },
+      polling: { intervalMs: 30000 },
+      workspace: { root: "/tmp/symphonia_workspaces" },
+      hooks: {
+        afterCreate: "printf created",
+        beforeRun: null,
+        afterRun: null,
+        beforeRemove: null,
+        timeoutMs: 60000,
+      },
+      agent: {
+        maxConcurrentAgents: 3,
+        maxTurns: 8,
+        maxRetryBackoffMs: 300000,
+        maxConcurrentAgentsByState: { todo: 2 },
+      },
+      codex: {
+        command: "codex app-server",
+        approvalPolicy: null,
+        threadSandbox: null,
+        turnSandboxPolicy: null,
+        turnTimeoutMs: 3600000,
+        readTimeoutMs: 5000,
+        stallTimeoutMs: 300000,
+      },
+    });
+
+    expect(config.tracker.kind).toBe("mock");
+
+    const definition = WorkflowDefinitionSchema.parse({
+      config: { tracker: { kind: "mock" } },
+      promptTemplate: "Work on {{ issue.identifier }}.",
+      workflowPath: "/repo/WORKFLOW.md",
+      loadedAt: timestamp,
+    });
+    expect(definition.promptTemplate).toContain("issue.identifier");
+
+    const status = WorkflowStatusSchema.parse({
+      status: "healthy",
+      workflowPath: "/repo/WORKFLOW.md",
+      loadedAt: timestamp,
+      error: null,
+      effectiveConfigSummary: {
+        trackerKind: "mock",
+        endpoint: null,
+        projectSlug: null,
+        activeStates: ["Todo"],
+        terminalStates: ["Done"],
+        workspaceRoot: "/tmp/symphonia_workspaces",
+        maxConcurrentAgents: 3,
+        maxTurns: 8,
+        hookTimeoutMs: 60000,
+        codexCommand: "codex app-server",
+      },
+    });
+    expect(status.status).toBe("healthy");
+
+    const workspace = WorkspaceInfoSchema.parse({
+      issueIdentifier: "SYM-1",
+      workspaceKey: "SYM-1",
+      path: "/tmp/symphonia_workspaces/SYM-1",
+      createdNow: true,
+      exists: true,
+    });
+    expect(workspace.createdNow).toBe(true);
+
+    const hook = HookRunSchema.parse({
+      hookName: "beforeRun",
+      status: "succeeded",
+      command: "printf ok",
+      cwd: "/tmp/symphonia_workspaces/SYM-1",
+      startedAt: timestamp,
+      endedAt: timestamp,
+      exitCode: 0,
+      stdout: "ok",
+      stderr: "",
+      error: null,
+    });
+    expect(hook.exitCode).toBe(0);
+  });
+
+  it("parses workflow, workspace, hook, and prompt events", () => {
+    const events = [
+      {
+        id: "event-workflow",
+        runId: "run-1",
+        type: "workflow.loaded",
+        timestamp,
+        workflowPath: "/repo/WORKFLOW.md",
+        loadedAt: timestamp,
+        configSummary: {
+          trackerKind: "mock",
+          endpoint: null,
+          projectSlug: null,
+          activeStates: ["Todo"],
+          terminalStates: ["Done"],
+          workspaceRoot: "/tmp/symphonia_workspaces",
+          maxConcurrentAgents: 3,
+          maxTurns: 8,
+          hookTimeoutMs: 60000,
+          codexCommand: "codex app-server",
+        },
+      },
+      {
+        id: "event-workspace",
+        runId: "run-1",
+        type: "workspace.ready",
+        timestamp,
+        workspace: {
+          issueIdentifier: "SYM-1",
+          workspaceKey: "SYM-1",
+          path: "/tmp/symphonia_workspaces/SYM-1",
+          createdNow: true,
+          exists: true,
+        },
+      },
+      {
+        id: "event-hook",
+        runId: "run-1",
+        type: "hook.succeeded",
+        timestamp,
+        hook: {
+          hookName: "afterCreate",
+          status: "succeeded",
+          command: "printf ok",
+          cwd: "/tmp/symphonia_workspaces/SYM-1",
+          startedAt: timestamp,
+          endedAt: timestamp,
+          exitCode: 0,
+          stdout: "ok",
+          stderr: "",
+          error: null,
+        },
+      },
+      {
+        id: "event-prompt",
+        runId: "run-1",
+        type: "prompt.rendered",
+        timestamp,
+        prompt: "You are working on SYM-1.",
+      },
+    ];
+
+    expect(events.map((event) => AgentEventSchema.parse(event))).toHaveLength(4);
+  });
+
+  it("rejects invalid workflow-related payloads", () => {
+    expect(() =>
+      WorkflowConfigSchema.parse({
+        tracker: {
+          kind: "mock",
+          endpoint: null,
+          apiKey: null,
+          projectSlug: null,
+          activeStates: ["Todo"],
+          terminalStates: ["Done"],
+        },
+        polling: { intervalMs: 0 },
+        workspace: { root: "/tmp/symphonia_workspaces" },
+        hooks: {
+          afterCreate: null,
+          beforeRun: null,
+          afterRun: null,
+          beforeRemove: null,
+          timeoutMs: 60000,
+        },
+        agent: {
+          maxConcurrentAgents: 1,
+          maxTurns: 1,
+          maxRetryBackoffMs: 0,
+          maxConcurrentAgentsByState: {},
+        },
+        codex: {
+          command: "codex app-server",
+          approvalPolicy: null,
+          threadSandbox: null,
+          turnSandboxPolicy: null,
+          turnTimeoutMs: 1,
+          readTimeoutMs: 1,
+          stallTimeoutMs: 1,
+        },
+      }),
+    ).toThrow();
+
+    expect(() =>
+      AgentEventSchema.parse({
+        id: "event-bad-workspace",
+        runId: "run-1",
+        type: "workspace.ready",
+        timestamp,
+        workspace: {
+          issueIdentifier: "SYM-1",
+          workspaceKey: "",
+          path: "/tmp/symphonia_workspaces/SYM-1",
+          createdNow: true,
+          exists: true,
+        },
       }),
     ).toThrow();
   });

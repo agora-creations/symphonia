@@ -7,36 +7,65 @@ import {
   createQueuedRun,
   createRetryRun,
   getMockIssue,
+  getMockIssueByIdentifier,
+  getWorkflowStatus,
   listMockIssues,
+  loadWorkflowRuntime,
   MockRunCancelledError,
   nowIso,
+  PromptTemplateError,
+  renderPromptTemplate,
   runMockAgentProvider,
+  runHook,
+  WorkflowError,
+  WorkflowRuntime,
+  WorkspaceError,
+  WorkspaceManager,
 } from "@symphonia/core";
 import { EventStore } from "@symphonia/db";
 import {
   AgentEvent,
   AgentEventSchema,
+  HookName,
+  HookRun,
   isTerminalRunStatus,
   Run,
   RunSchema,
   StartRunRequestSchema,
+  WorkflowConfigSummary,
+  WorkflowStatus,
+  WorkspaceInfo,
 } from "@symphonia/types";
 
 type RunRecord = {
   run: Run;
   controller: AbortController;
   attempt: number;
+  prompt: string | null;
+  workspace: WorkspaceInfo | null;
+  workflowSummary: WorkflowConfigSummary | null;
+  providerStarted: boolean;
 };
 
 type JsonValue = Record<string, unknown> | unknown[] | string | number | boolean | null;
 
 const defaultPort = 4100;
 
+export type SymphoniaDaemonOptions = {
+  workflowPath?: string;
+  cwd?: string;
+};
+
 export class SymphoniaDaemon {
   private readonly runs = new Map<string, RunRecord>();
   private readonly subscribers = new Map<string, Set<ServerResponse>>();
+  private readonly workspaces = new Map<string, WorkspaceInfo>();
+  private workflowRuntime: WorkflowRuntime | null = null;
 
-  constructor(private readonly eventStore: EventStore) {}
+  constructor(
+    private readonly eventStore: EventStore,
+    private readonly options: SymphoniaDaemonOptions = {},
+  ) {}
 
   createHttpServer(): Server {
     return createServer((request, response) => {
@@ -75,12 +104,35 @@ export class SymphoniaDaemon {
         return sendJson(response, 200, { ok: true, service: "symphonia-daemon", timestamp: nowIso() });
       }
 
+      if (request.method === "GET" && path === "/workflow/status") {
+        return sendJson(response, 200, { workflow: this.refreshWorkflowStatus() });
+      }
+
+      if (request.method === "GET" && path === "/workflow/config") {
+        const status = this.refreshWorkflowStatus();
+        return sendJson(response, 200, { config: status.effectiveConfigSummary });
+      }
+
+      if (request.method === "POST" && path === "/workflow/reload") {
+        this.workflowRuntime = null;
+        return sendJson(response, 200, { workflow: this.refreshWorkflowStatus() });
+      }
+
       if (request.method === "GET" && path === "/issues") {
         return sendJson(response, 200, { issues: listMockIssues() });
       }
 
       if (request.method === "GET" && path === "/runs") {
         return sendJson(response, 200, { runs: this.listRuns() });
+      }
+
+      if (request.method === "GET" && path === "/workspaces") {
+        return sendJson(response, 200, { workspaces: this.listWorkspaces() });
+      }
+
+      const workspaceMatch = path.match(/^\/workspaces\/([^/]+)$/);
+      if (request.method === "GET" && workspaceMatch) {
+        return sendJson(response, 200, { workspace: this.getWorkspaceInfo(decodeURIComponent(workspaceMatch[1]!)) });
       }
 
       if (request.method === "POST" && path === "/runs") {
@@ -99,6 +151,13 @@ export class SymphoniaDaemon {
         const runId = runEventsMatch[1]!;
         this.requireRun(runId);
         return sendJson(response, 200, { events: this.eventStore.getEventsForRun(runId) });
+      }
+
+      const runPromptMatch = path.match(/^\/runs\/([^/]+)\/prompt$/);
+      if (request.method === "GET" && runPromptMatch) {
+        const runId = runPromptMatch[1]!;
+        this.requireRun(runId);
+        return sendJson(response, 200, { prompt: this.getRunPrompt(runId) });
       }
 
       const stopMatch = path.match(/^\/runs\/([^/]+)\/stop$/);
@@ -125,7 +184,7 @@ export class SymphoniaDaemon {
     }
   }
 
-  private async startRun(issueId: string): Promise<Run> {
+  async startRun(issueId: string): Promise<Run> {
     const issue = getMockIssue(issueId);
     if (!issue) {
       throw new ApiError(404, `Unknown issue: ${issueId}`);
@@ -143,7 +202,15 @@ export class SymphoniaDaemon {
       timestamp,
     });
     const attempt = this.countRunsForIssue(issue.id) + 1;
-    const record: RunRecord = { run, controller: new AbortController(), attempt };
+    const record: RunRecord = {
+      run,
+      controller: new AbortController(),
+      attempt,
+      prompt: null,
+      workspace: null,
+      workflowSummary: null,
+      providerStarted: false,
+    };
     this.runs.set(run.id, record);
 
     await this.emit(record, {
@@ -155,11 +222,11 @@ export class SymphoniaDaemon {
       message: "Run queued.",
     });
 
-    void this.runProvider(record);
+    void this.runLifecycle(record);
     return record.run;
   }
 
-  private async retryRun(runId: string): Promise<Run> {
+  async retryRun(runId: string): Promise<Run> {
     const previousRun = this.requireRun(runId);
 
     if (!isTerminalRunStatus(previousRun.status)) {
@@ -181,6 +248,10 @@ export class SymphoniaDaemon {
       run,
       controller: new AbortController(),
       attempt: this.countRunsForIssue(issue.id) + 1,
+      prompt: null,
+      workspace: null,
+      workflowSummary: null,
+      providerStarted: false,
     };
     this.runs.set(run.id, record);
 
@@ -193,11 +264,11 @@ export class SymphoniaDaemon {
       message: `Retry queued from ${previousRun.id}.`,
     });
 
-    void this.runProvider(record);
+    void this.runLifecycle(record);
     return record.run;
   }
 
-  private async stopRun(runId: string): Promise<Run> {
+  async stopRun(runId: string): Promise<Run> {
     const record = this.requireRecord(runId);
 
     if (isTerminalRunStatus(record.run.status)) {
@@ -217,13 +288,85 @@ export class SymphoniaDaemon {
     return record.run;
   }
 
-  private async runProvider(record: RunRecord): Promise<void> {
+  private async runLifecycle(record: RunRecord): Promise<void> {
     const issue = getMockIssue(record.run.issueId);
     if (!issue) {
       return;
     }
 
     try {
+      if (record.controller.signal.aborted) return;
+      const runtime = this.loadWorkflowRuntime();
+      record.workflowSummary = runtime.summary;
+
+      await this.emit(record, {
+        id: randomUUID(),
+        runId: record.run.id,
+        type: "workflow.loaded",
+        timestamp: nowIso(),
+        workflowPath: runtime.definition.workflowPath,
+        loadedAt: runtime.definition.loadedAt,
+        configSummary: runtime.summary,
+      });
+
+      await this.emit(record, {
+        id: randomUUID(),
+        runId: record.run.id,
+        type: "run.status",
+        timestamp: nowIso(),
+        status: "preparing_workspace",
+        message: "Preparing workflow workspace.",
+      });
+
+      const workspaceManager = new WorkspaceManager(runtime.config.workspace.root);
+      const workspace = workspaceManager.prepareIssueWorkspace(issue);
+      record.workspace = workspace;
+      this.workspaces.set(issue.identifier, workspace);
+      if (record.controller.signal.aborted) return;
+
+      await this.emit(record, {
+        id: randomUUID(),
+        runId: record.run.id,
+        type: "workspace.ready",
+        timestamp: nowIso(),
+        workspace,
+      });
+
+      await this.emit(record, {
+        id: randomUUID(),
+        runId: record.run.id,
+        type: "run.status",
+        timestamp: nowIso(),
+        status: "building_prompt",
+        message: "Rendering prompt from WORKFLOW.md.",
+      });
+
+      const prompt = renderPromptTemplate(runtime.definition.promptTemplate, {
+        issue,
+        attempt: record.attempt > 1 ? record.attempt : null,
+        workflow: runtime.summary,
+      });
+      record.prompt = prompt;
+      if (record.controller.signal.aborted) return;
+
+      await this.emit(record, {
+        id: randomUUID(),
+        runId: record.run.id,
+        type: "prompt.rendered",
+        timestamp: nowIso(),
+        prompt,
+      });
+
+      if (workspace.createdNow) {
+        const afterCreateOk = await this.executeHook(record, "afterCreate", runtime.config.hooks.afterCreate, workspace, true);
+        if (!afterCreateOk) return;
+      }
+
+      const beforeRunOk = await this.executeHook(record, "beforeRun", runtime.config.hooks.beforeRun, workspace, true);
+      if (!beforeRunOk) return;
+      if (record.controller.signal.aborted) return;
+
+      record.providerStarted = true;
       await runMockAgentProvider({
         run: record.run,
         issue,
@@ -237,16 +380,163 @@ export class SymphoniaDaemon {
         return;
       }
 
+      if (error instanceof WorkflowError) {
+        await this.emit(record, {
+          id: randomUUID(),
+          runId: record.run.id,
+          type: "workflow.invalid",
+          timestamp: nowIso(),
+          workflowPath: error.workflowPath ?? null,
+          code: error.code,
+          error: error.message,
+        });
+      }
+
       await this.emit(record, {
         id: randomUUID(),
         runId: record.run.id,
         type: "run.status",
         timestamp: nowIso(),
         status: "failed",
-        message: "Mock provider crashed.",
-        error: error instanceof Error ? error.message : "Unknown provider failure.",
+        message: lifecycleFailureMessage(error),
+        error: error instanceof Error ? error.message : "Unknown run failure.",
       });
+    } finally {
+      if (record.providerStarted && record.workspace) {
+        try {
+          const runtime = this.workflowRuntime;
+          if (runtime) {
+            await this.executeHook(record, "afterRun", runtime.config.hooks.afterRun, record.workspace, false, false);
+          }
+        } catch {
+          // after_run failures are emitted as hook events and must not replace the provider terminal state.
+        }
+      }
     }
+  }
+
+  private loadWorkflowRuntime(): WorkflowRuntime {
+    const runtime = loadWorkflowRuntime({
+      workflowPath: this.options.workflowPath ?? process.env.SYMPHONIA_WORKFLOW_PATH,
+      cwd: this.options.cwd ?? process.cwd(),
+    });
+    this.workflowRuntime = runtime;
+    return runtime;
+  }
+
+  refreshWorkflowStatus(): WorkflowStatus {
+    const status = getWorkflowStatus({
+      workflowPath: this.options.workflowPath ?? process.env.SYMPHONIA_WORKFLOW_PATH,
+      cwd: this.options.cwd ?? process.cwd(),
+    });
+
+    if (status.status === "healthy") {
+      this.workflowRuntime = loadWorkflowRuntime({
+        workflowPath: this.options.workflowPath ?? process.env.SYMPHONIA_WORKFLOW_PATH,
+        cwd: this.options.cwd ?? process.cwd(),
+      });
+    } else {
+      this.workflowRuntime = null;
+    }
+
+    return status;
+  }
+
+  listWorkspaces(): WorkspaceInfo[] {
+    const known = [...this.workspaces.values()];
+    try {
+      const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+      const listed = new WorkspaceManager(runtime.config.workspace.root).listExistingWorkspaces(
+        listMockIssues().map((issue) => issue.identifier),
+      );
+      const byKey = new Map<string, WorkspaceInfo>();
+      for (const workspace of [...listed, ...known]) {
+        byKey.set(workspace.workspaceKey, workspace);
+      }
+      return [...byKey.values()].sort((a, b) => a.issueIdentifier.localeCompare(b.issueIdentifier));
+    } catch {
+      return known.sort((a, b) => a.issueIdentifier.localeCompare(b.issueIdentifier));
+    }
+  }
+
+  getWorkspaceInfo(issueIdentifier: string): WorkspaceInfo {
+    const issue = getMockIssueByIdentifier(issueIdentifier) ?? getMockIssue(issueIdentifier);
+    const normalizedIdentifier = issue?.identifier ?? issueIdentifier;
+    const cached = this.workspaces.get(normalizedIdentifier);
+    if (cached) return cached;
+
+    const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+    return new WorkspaceManager(runtime.config.workspace.root).getIssueWorkspace(normalizedIdentifier);
+  }
+
+  getRunPrompt(runId: string): string | null {
+    const record = this.requireRecord(runId);
+    if (record.prompt) return record.prompt;
+
+    const promptEvent = this.eventStore
+      .getEventsForRun(runId)
+      .filter((event) => event.type === "prompt.rendered")
+      .at(-1);
+
+    return promptEvent?.type === "prompt.rendered" ? promptEvent.prompt : null;
+  }
+
+  private async executeHook(
+    record: RunRecord,
+    hookName: HookName,
+    command: string | null,
+    workspace: WorkspaceInfo,
+    abortOnFailure: boolean,
+    respectAbort = true,
+  ): Promise<boolean> {
+    if (!command) return true;
+    if (respectAbort && record.controller.signal.aborted) return false;
+
+    await this.emit(record, {
+      id: randomUUID(),
+      runId: record.run.id,
+      type: "hook.started",
+      timestamp: nowIso(),
+      hook: makeHookRun(hookName, "running", command, workspace.path),
+    });
+
+    const hook = await runHook({
+      hookName,
+      command,
+      cwd: workspace.path,
+      timeoutMs: this.workflowRuntime?.config.hooks.timeoutMs ?? 60000,
+      signal: respectAbort ? record.controller.signal : undefined,
+    });
+
+    const eventType: "hook.succeeded" | "hook.timed_out" | "hook.failed" =
+      hook.status === "succeeded" ? "hook.succeeded" : hook.status === "timed_out" ? "hook.timed_out" : "hook.failed";
+
+    await this.emit(record, {
+      id: randomUUID(),
+      runId: record.run.id,
+      type: eventType,
+      timestamp: nowIso(),
+      hook,
+    });
+
+    if (record.controller.signal.aborted) {
+      return false;
+    }
+
+    if (abortOnFailure && hook.status !== "succeeded") {
+      await this.emit(record, {
+        id: randomUUID(),
+        runId: record.run.id,
+        type: "run.status",
+        timestamp: nowIso(),
+        status: hook.status === "timed_out" ? "timed_out" : "failed",
+        message: `${hookName} hook failed before mock provider start.`,
+        error: hook.error ?? `${hookName} hook did not succeed.`,
+      });
+      return false;
+    }
+
+    return true;
   }
 
   private async emit(record: RunRecord, event: AgentEvent): Promise<void> {
@@ -302,7 +592,7 @@ export class SymphoniaDaemon {
     }
   }
 
-  private listRuns(): Run[] {
+  listRuns(): Run[] {
     return [...this.runs.values()]
       .map((record) => record.run)
       .sort((a, b) => (b.startedAt ?? "").localeCompare(a.startedAt ?? ""));
@@ -320,13 +610,16 @@ export class SymphoniaDaemon {
     return record;
   }
 
-  private requireRun(runId: string): Run {
+  requireRun(runId: string): Run {
     return this.requireRecord(runId).run;
   }
 }
 
-export function createDaemonServer(eventStore = new EventStore()): { daemon: SymphoniaDaemon; server: Server } {
-  const daemon = new SymphoniaDaemon(eventStore);
+export function createDaemonServer(
+  eventStore = new EventStore(),
+  options: SymphoniaDaemonOptions = {},
+): { daemon: SymphoniaDaemon; server: Server } {
+  const daemon = new SymphoniaDaemon(eventStore, options);
   return { daemon, server: daemon.createHttpServer() };
 }
 
@@ -358,6 +651,34 @@ class ApiError extends Error {
     super(message);
     this.name = "ApiError";
   }
+}
+
+function lifecycleFailureMessage(error: unknown): string {
+  if (error instanceof WorkflowError) return "Workflow configuration is invalid.";
+  if (error instanceof WorkspaceError) return "Workspace preparation failed.";
+  if (error instanceof PromptTemplateError) return "Prompt rendering failed.";
+  return "Run lifecycle failed.";
+}
+
+function makeHookRun(
+  hookName: HookName,
+  status: HookRun["status"],
+  command: string,
+  cwd: string,
+): HookRun {
+  const timestamp = nowIso();
+  return {
+    hookName,
+    status,
+    command,
+    cwd,
+    startedAt: timestamp,
+    endedAt: null,
+    exitCode: null,
+    stdout: "",
+    stderr: "",
+    error: null,
+  };
 }
 
 function normalizeError(error: unknown): ApiError {
