@@ -1,15 +1,15 @@
 # Symphonia
 
-Symphonia is a local-first visual orchestration prototype for coding-agent work. It is a Linear-like control plane for fetching tracker issues, starting Mock, Codex, Claude Code, or Cursor Agent runs, watching timelines, stopping/retrying work, reconciling active runs against repo-owned workflow configuration, and inspecting review artifacts from local git and GitHub.
+Symphonia is a local-first visual orchestration prototype for coding-agent work. It is a Linear-like control plane for fetching tracker issues, starting Mock, Codex, Claude Code, or Cursor Agent runs, watching timelines, stopping/retrying work, recovering safely after daemon restarts, managing local workspaces, reconciling active runs against repo-owned workflow configuration, and inspecting review artifacts from local git and GitHub.
 
-Milestone 6 keeps the mock tracker, Linear tracker, mock provider, Codex provider, GitHub review artifacts, `WORKFLOW.md` runtime, workspaces, hooks, SQLite/SSE event flow, approvals, stop/retry, and UI stable, then adds Claude Code and Cursor Agent as CLI-stream providers. Automated tests use fake CLI scripts, so contributors do not need real Anthropic, Cursor, OpenAI, Linear, or GitHub credentials for validation.
+Milestone 7 keeps Mock/Codex/Claude/Cursor providers, Mock/Linear trackers, GitHub review artifacts, `WORKFLOW.md` runtime, workspaces, hooks, SQLite/SSE event flow, approvals, stop/retry, and UI stable, then adds durable run recovery and safe workspace cleanup. Automated tests use fake CLIs and temporary databases/workspaces, so contributors do not need real Anthropic, Cursor, OpenAI, Linear, or GitHub credentials for validation.
 
 This prototype still does not integrate GitHub OAuth, GitHub App installation flow, GitHub webhooks, auto-push, auto-merge, Linear OAuth, Linear webhooks, auth, billing, cloud tenancy, Electron, or Tauri. GitHub writes and PR creation remain disabled by default; PR creation is still deferred.
 
 Reference: the Codex app-server integration follows the official OpenAI developer docs at <https://developers.openai.com/codex/app-server/>.
 Claude Code CLI command-shape references: <https://docs.anthropic.com/en/docs/claude-code/cli-reference>. Cursor Agent CLI command-shape references: <https://docs.cursor.com/en/cli/reference/parameters> and <https://docs.cursor.com/en/cli/reference/output-format>.
 
-## What Milestone 6 Includes
+## What Milestone 7 Includes
 
 - The Milestone 1 mock tracker/provider loop remains available for tests and demos.
 - The Milestone 2 `WORKFLOW.md` parser, config resolver, prompt renderer, workspace manager, and hook runner remain in the run lifecycle.
@@ -39,7 +39,17 @@ Claude Code CLI command-shape references: <https://docs.anthropic.com/en/docs/cl
 - Review artifact snapshots persisted in SQLite and replayed through the existing run event timeline.
 - Daemon APIs for GitHub status/health and review artifact fetch/refresh.
 - UI provider controls, provider health, Claude/Cursor permission context, provider metadata, CLI event timelines, GitHub status, and a run detail Review Artifacts section for local git state, changed files, PR metadata, commit status, check runs, workflow runs, and manual refresh.
-- GitHub writes remain disabled by default. Automatic PR creation, pushing, commenting, and merging are not part of the Milestone 6 provider-plural path.
+- GitHub writes remain disabled by default. Automatic PR creation, pushing, commenting, and merging are not part of the current read-first review path.
+- Durable SQLite run records in addition to append-only run events.
+- Daemon startup reconstruction of historical runs from SQLite.
+- Prior non-terminal runs from old daemon instances are marked interrupted or orphaned with `run.recovered` events.
+- Stale pending approval requests from old Codex/provider processes are marked recovered/cancelled and are not actionable after restart.
+- Manual retry is available for recovered/interrupted/orphaned runs; automatic retry is disabled.
+- Daemon/recovery status API and UI indicator with daemon instance id, recovered run count, orphaned run count, and active run count.
+- Workspace inventory rebuilt from disk with latest run, tracker state, git dirtiness, size estimate, active/recent/protected/candidate status, and cleanup reasons.
+- Cleanup policy under `workspace.cleanup` with disabled, dry-run, manual-confirmation, active-run, recent-run, and dirty-git protections by default.
+- Cleanup preview endpoint and UI. Planning never deletes files.
+- Manual cleanup execution endpoint and UI, guarded by `enabled: true`, `dry_run: false`, exact confirmation text, path containment, symlink protection, active-run recheck, dirty-git protection, and optional `before_remove` hook.
 
 ## Install
 
@@ -114,7 +124,7 @@ Supported config groups:
 - `provider`: `mock`, `codex`, `claude`, or `cursor`.
 - `tracker`: `kind`, `endpoint`, `api_key`, `team_key`, `team_id`, `project_slug`, `project_id`, `allow_workspace_wide`, `active_states`, `terminal_states`, `include_archived`, `page_size`, `max_pages`, `poll_interval_ms`, `read_only`, and `write`.
 - `polling`: `interval_ms`.
-- `workspace`: `root`.
+- `workspace`: `root` and `cleanup`.
 - `hooks`: `after_create`, `before_run`, `after_run`, `before_remove`, `timeout_ms`.
 - `agent`: `max_concurrent_agents`, `max_turns`, `max_retry_backoff_ms`, `max_concurrent_agents_by_state`.
 - `codex`: `command`, `model`, `approval_policy`, `thread_sandbox`, `turn_sandbox_policy`, `turn_timeout_ms`, `read_timeout_ms`, `stall_timeout_ms`.
@@ -127,6 +137,73 @@ Supported config groups:
 `tracker.kind: mock` runs without credentials. `tracker.kind: linear` requires an API key after environment-variable resolution and at least one practical scope filter: `team_key`, `team_id`, `project_slug`, `project_id`, or `allow_workspace_wide: true`.
 
 Workflow config responses are summaries and never expose `api_key`, GitHub `token`, provider env values, or resolved secrets.
+
+Safe workspace cleanup defaults:
+
+```yaml
+workspace:
+  root: ".symphonia/workspaces"
+  cleanup:
+    enabled: false
+    dry_run: true
+    require_manual_confirmation: true
+    delete_terminal_after_ms: 604800000
+    delete_orphaned_after_ms: 1209600000
+    delete_interrupted_after_ms: 1209600000
+    max_workspace_age_ms: null
+    max_total_bytes: null
+    protect_active: true
+    protect_recent_runs_ms: 86400000
+    protect_dirty_git: true
+    include_terminal_states:
+      - "Done"
+      - "Closed"
+      - "Cancelled"
+      - "Canceled"
+      - "Duplicate"
+    exclude_identifiers: []
+    include_identifiers: []
+```
+
+Cleanup stays preview-only unless `enabled: true`, `dry_run: false`, and the UI/API request supplies the exact confirmation text `delete workspaces`.
+
+## Restart Recovery
+
+On daemon startup, Symphonia generates a new daemon instance id and reconstructs persisted run records from SQLite. Terminal historical runs stay unchanged. Runs that were non-terminal under a previous daemon instance are marked `interrupted` or `orphaned`, receive a `run.recovered` event, release active claims, and can be retried manually.
+
+Symphonia does not reattach to old Codex, Claude, Cursor, or mock provider subprocesses after restart. It also does not auto-retry recovered runs. This keeps recovery honest: an interrupted run is never treated as success.
+
+Recovery APIs:
+
+- `GET /runs`: lists reconstructed run records.
+- `GET /runs/:runId`: fetches one run record, including `recoveryState`, daemon ids, workspace path, provider metadata, and terminal reason.
+- `GET /runs/:runId/events`: replays the persisted timeline, including recovery events.
+- `POST /runs/:runId/retry`: manually starts a new attempt from a terminal/recovered run.
+- `GET /daemon/status` or `GET /recovery/status`: returns daemon instance id, startup time, recovered/orphaned/active run counts, safe DB path, workspace root, workflow/tracker status, and provider summary.
+
+## Workspace Inventory And Cleanup
+
+Workspace APIs:
+
+- `GET /workspaces`: rebuilds inventory from disk and returns workspace items plus counts.
+- `POST /workspaces/refresh`: refreshes workspace inventory.
+- `GET /workspaces/:issueIdentifier`: returns one workspace.
+- `GET /workspaces/cleanup/plan`: returns a cleanup preview. It never deletes files.
+- `POST /workspaces/cleanup/execute`: executes only when policy enables cleanup, dry-run is false, and confirmation is present.
+
+Inventory marks workspaces as active, recent, terminal issue, no matching issue, orphaned run, protected, or cleanup candidate. Cleanup refuses active workspaces, recent runs, dirty git workspaces by default, the workspace root itself, paths outside `workspace.root`, and symlink escapes. The optional `before_remove` hook must succeed before deletion.
+
+Manual cleanup flow:
+
+1. Keep the root workflow safe by default.
+2. Open the Workflow panel.
+3. Click Refresh inventory.
+4. Click Preview cleanup.
+5. Review candidate and protected reasons.
+6. For a safe local test only, set `workspace.cleanup.enabled: true` and `dry_run: false`.
+7. Type `delete workspaces`.
+8. Click Execute cleanup.
+9. Restore safe cleanup defaults when finished.
 
 ## Linear Tracker
 
@@ -547,9 +624,23 @@ GitHub review artifacts, when credentials are available:
 12. Start a Codex provider run if safe and confirm artifacts refresh after the run.
 13. Keep GitHub writes disabled and confirm no PR is created automatically.
 
+Restart and cleanup validation:
+
+1. Run `pnpm dev`.
+2. Start a slow mock run, then stop the daemon while it is active.
+3. Restart `pnpm dev`.
+4. Confirm `/daemon/status` reports recovered runs and the UI shows a recovery badge.
+5. Open the old run and confirm the timeline includes `run.recovered` and the run is interrupted or orphaned.
+6. Retry the recovered run and confirm the new attempt succeeds while the old run remains in history.
+7. Create a test orphan folder under `.symphonia/workspaces`.
+8. Open the Workflow panel, refresh inventory, and preview cleanup.
+9. Confirm cleanup is disabled/dry-run by default and no files are deleted.
+10. In a safe temporary workflow override, enable cleanup with `dry_run: false`, preview again, type `delete workspaces`, and execute cleanup.
+11. Confirm only intended candidate workspaces are deleted and protected workspaces remain.
+
 ## SQLite Data
 
-Run events are append-only in SQLite. The daemon also stores the latest issue cache and latest review artifact snapshot per run. The default path is `./.data/agentboard.sqlite`, relative to the daemon process. Workspaces are real folders under the configured workflow workspace root.
+Run events are append-only in SQLite. The daemon also stores durable run records, the latest issue cache, and latest review artifact snapshot per run. The default path is `./.data/agentboard.sqlite`, relative to the daemon process. Workspaces are real folders under the configured workflow workspace root.
 
 ## Known Limitations
 
@@ -558,6 +649,11 @@ Run events are append-only in SQLite. The daemon also stores the latest issue ca
 - Real Claude validation depends on local Claude Code installation and authentication.
 - Real Cursor validation depends on local Cursor Agent installation and authentication or `CURSOR_API_KEY`.
 - Provider stream event mapping covers the practical Milestone 6 subset and ignores unknown future fields.
+- Real provider process reattachment after daemon restart is not implemented.
+- Codex/Claude/Cursor resume or continue after restart is not implemented.
+- Automatic retry after restart is disabled by default.
+- Automatic workspace deletion is disabled by default.
+- Cleanup execution is manual and policy-gated.
 - GitHub OAuth is not implemented.
 - GitHub App installation flow is not implemented.
 - GitHub webhooks are not implemented.
@@ -574,11 +670,11 @@ Run events are append-only in SQLite. The daemon also stores the latest issue ca
 - Real Codex validation depends on local Codex CLI installation and authentication.
 - App-server event mapping covers the practical subset needed for Milestone 3, not every possible app-server event.
 - WebSocket app-server transport is intentionally not implemented.
-- Daemon restart reconstruction of active runs and approvals is not implemented yet.
-- Workspace cleanup is not automatic.
+- Multi-machine or distributed daemon recovery is not implemented.
+- Workspace cleanup remains local-only and does not coordinate with remote branches or PR state.
 - Assistant deltas are displayed compactly as timeline events rather than fully aggregated chat bubbles.
 - Hooks execute trusted local shell commands.
 
 ## Next Milestone
 
-Milestone 7 - Add daemon restart reconstruction, run recovery, and workspace cleanup policies.
+Milestone 8 - Package Symphonia as a local desktop app with first-run setup and settings.

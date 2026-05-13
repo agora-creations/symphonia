@@ -13,6 +13,8 @@ import { cn } from "@/lib/utils";
 import { CheckCircle2, ExternalLink, FileDiff, Filter, GitBranch, GitPullRequest, LayoutGrid, List, Plus, RefreshCw, SlidersHorizontal, X } from "lucide-react";
 import {
   DAEMON_URL,
+  executeWorkspaceCleanup,
+  getDaemonStatus,
   getGithubStatus,
   getIssues,
   getProviders,
@@ -23,9 +25,12 @@ import {
   getRuns,
   getTrackerStatus,
   getWorkspace,
+  getWorkspaceCleanupPlan,
+  getWorkspaceInventory,
   getWorkflowStatus,
   refreshReviewArtifacts,
   refreshIssues,
+  refreshWorkspaceInventory,
   reloadWorkflow,
   respondApproval,
   retryRun,
@@ -36,6 +41,7 @@ import {
   ApprovalDecision,
   ApprovalState,
   AgentEventSchema,
+  type DaemonStatus,
   isTerminalRunStatus,
   type AgentEvent,
   type Issue as DaemonIssue,
@@ -50,6 +56,9 @@ import {
   type TrackerStatus,
   type WorkflowStatus,
   type WorkspaceInfo,
+  type WorkspaceCleanupPlan,
+  type WorkspaceCleanupResult,
+  type WorkspaceInventory,
 } from "@symphonia/types";
 
 type Issue = {
@@ -198,8 +207,15 @@ export function IssuesView() {
   const [workflow, setWorkflow] = useState<WorkflowStatus | null>(null);
   const [trackerStatus, setTrackerStatus] = useState<TrackerStatus | null>(null);
   const [githubStatus, setGithubStatus] = useState<GitHubStatus | null>(null);
+  const [daemonStatus, setDaemonStatus] = useState<DaemonStatus | null>(null);
+  const [workspaceInventory, setWorkspaceInventory] = useState<WorkspaceInventory | null>(null);
+  const [cleanupPlan, setCleanupPlan] = useState<WorkspaceCleanupPlan | null>(null);
+  const [cleanupResult, setCleanupResult] = useState<WorkspaceCleanupResult | null>(null);
+  const [cleanupConfirm, setCleanupConfirm] = useState("");
   const [refreshingIssues, setRefreshingIssues] = useState(false);
   const [refreshingReviewArtifacts, setRefreshingReviewArtifacts] = useState(false);
+  const [refreshingWorkspaces, setRefreshingWorkspaces] = useState(false);
+  const [executingCleanup, setExecutingCleanup] = useState(false);
   const [workflowOpen, setWorkflowOpen] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const sourcesRef = useRef<Map<string, EventSource>>(new Map());
@@ -311,12 +327,14 @@ export function IssuesView() {
     const sources = sourcesRef.current;
 
     async function loadIssues() {
-      const [loadedIssues, loadedRuns, loadedProviders, loadedWorkflow, loadedGithubStatus] = await Promise.all([
+      const [loadedIssues, loadedRuns, loadedProviders, loadedWorkflow, loadedGithubStatus, loadedDaemonStatus, loadedWorkspaceInventory] = await Promise.all([
         getIssues(),
         getRuns(),
         getProviders(),
         getWorkflowStatus(),
         getGithubStatus().catch(() => null),
+        getDaemonStatus().catch(() => null),
+        getWorkspaceInventory().catch(() => null),
       ]);
       const loadedTrackerStatus = await getTrackerStatus();
       if (!alive) return;
@@ -325,6 +343,8 @@ export function IssuesView() {
       setWorkflow(loadedWorkflow);
       setTrackerStatus(loadedTrackerStatus);
       setGithubStatus(loadedGithubStatus);
+      setDaemonStatus(loadedDaemonStatus);
+      setWorkspaceInventory(loadedWorkspaceInventory);
       const defaultProvider = loadedWorkflow.effectiveConfigSummary?.defaultProvider;
       if (defaultProvider === "mock" || defaultProvider === "codex" || defaultProvider === "claude" || defaultProvider === "cursor") {
         setSelectedProvider((current) => current || defaultProvider);
@@ -491,6 +511,54 @@ export function IssuesView() {
     }
   }, []);
 
+  const handleRefreshWorkspaces = useCallback(async () => {
+    try {
+      setRefreshingWorkspaces(true);
+      setDetailError(null);
+      const inventory = await refreshWorkspaceInventory();
+      setWorkspaceInventory(inventory);
+      setCleanupPlan(await getWorkspaceCleanupPlan());
+      setDaemonStatus(await getDaemonStatus().catch(() => null));
+    } catch (caught) {
+      setDetailError(caught instanceof Error ? caught.message : "Failed to refresh workspaces.");
+    } finally {
+      setRefreshingWorkspaces(false);
+    }
+  }, []);
+
+  const handlePlanCleanup = useCallback(async () => {
+    try {
+      setRefreshingWorkspaces(true);
+      setDetailError(null);
+      setWorkspaceInventory(await getWorkspaceInventory());
+      setCleanupPlan(await getWorkspaceCleanupPlan());
+    } catch (caught) {
+      setDetailError(caught instanceof Error ? caught.message : "Failed to plan workspace cleanup.");
+    } finally {
+      setRefreshingWorkspaces(false);
+    }
+  }, []);
+
+  const handleExecuteCleanup = useCallback(async () => {
+    if (!cleanupPlan) return;
+    try {
+      setExecutingCleanup(true);
+      setDetailError(null);
+      const result = await executeWorkspaceCleanup({
+        planId: cleanupPlan.id,
+        confirm: cleanupConfirm,
+      });
+      setCleanupResult(result);
+      setWorkspaceInventory(await refreshWorkspaceInventory());
+      setCleanupPlan(await getWorkspaceCleanupPlan());
+      setCleanupConfirm("");
+    } catch (caught) {
+      setDetailError(caught instanceof Error ? caught.message : "Failed to execute workspace cleanup.");
+    } finally {
+      setExecutingCleanup(false);
+    }
+  }, [cleanupConfirm, cleanupPlan]);
+
   const handleApprovalResponse = useCallback(async (approval: ApprovalState, decision: ApprovalDecision) => {
     try {
       setDetailError(null);
@@ -550,6 +618,9 @@ export function IssuesView() {
           </span>
           <span className="rounded-full border px-2 py-0.5 text-[11px]">
             Providers {providers.filter((provider) => provider.available).length}/{providers.length || 4} available
+          </span>
+          <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", daemonStatus?.recoveredRunsCount ? "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300" : "border-border bg-muted/60 text-muted-foreground")}>
+            Recovery {daemonStatus ? `${daemonStatus.recoveredRunsCount} recovered` : "unknown"}
           </span>
         </div>
         <div className="flex items-center gap-1">
@@ -644,11 +715,22 @@ export function IssuesView() {
 
       {workflowOpen && (
         <WorkflowPanel
+          cleanupConfirm={cleanupConfirm}
+          cleanupPlan={cleanupPlan}
+          cleanupResult={cleanupResult}
+          daemonStatus={daemonStatus}
+          executingCleanup={executingCleanup}
           githubStatus={githubStatus}
+          onCleanupConfirmChange={setCleanupConfirm}
+          onExecuteCleanup={handleExecuteCleanup}
+          onPlanCleanup={handlePlanCleanup}
+          onRefreshWorkspaces={handleRefreshWorkspaces}
           onReload={handleWorkflowReload}
           providers={providers}
+          refreshingWorkspaces={refreshingWorkspaces}
           trackerStatus={trackerStatus}
           workflow={workflow}
+          workspaceInventory={workspaceInventory}
         />
       )}
 
@@ -760,7 +842,13 @@ function RunDetailsCard({
   workspace: WorkspaceInfo | null;
 }) {
   const running = run ? !isTerminalRunStatus(run.status) : false;
-  const retryable = run?.status === "failed" || run?.status === "cancelled" || run?.status === "timed_out";
+  const retryable =
+    run?.status === "failed" ||
+    run?.status === "cancelled" ||
+    run?.status === "timed_out" ||
+    run?.status === "interrupted" ||
+    run?.status === "orphaned" ||
+    run?.status === "recovered";
   const codexMetadata = extractCodexMetadata(events);
   const providerMetadata = extractProviderMetadata(events, run?.provider ?? selectedProvider);
   const pendingApprovals = approvals.filter((approval) => approval.status === "pending");
@@ -827,6 +915,15 @@ function RunDetailsCard({
               <dt className="text-muted-foreground">Latest run</dt>
               <dd className="mt-1 font-medium">{run ? `${run.provider} ${run.status.replaceAll("_", " ")}` : `Ready with ${selectedProvider}`}</dd>
             </div>
+            {run && (
+              <div className="rounded-md border p-3">
+                <dt className="text-muted-foreground">Recovery state</dt>
+                <dd className="mt-1 font-medium">{run.recoveryState.replaceAll("_", " ")}</dd>
+                <dd className="mt-1 text-xs text-muted-foreground">
+                  {run.recoveredAt ? `recovered ${formatTime(run.recoveredAt)}` : "no restart recovery recorded"}
+                </dd>
+              </div>
+            )}
             <div className="rounded-md border p-3">
               <dt className="text-muted-foreground">Workspace</dt>
               <dd className="mt-1 break-all font-medium">
@@ -1168,17 +1265,39 @@ function RunStatusBadge({ status }: { status: RunStatus }) {
 }
 
 function WorkflowPanel({
+  cleanupConfirm,
+  cleanupPlan,
+  cleanupResult,
+  daemonStatus,
+  executingCleanup,
   githubStatus,
+  onCleanupConfirmChange,
+  onExecuteCleanup,
+  onPlanCleanup,
+  onRefreshWorkspaces,
   onReload,
   providers,
+  refreshingWorkspaces,
   trackerStatus,
   workflow,
+  workspaceInventory,
 }: {
+  cleanupConfirm: string;
+  cleanupPlan: WorkspaceCleanupPlan | null;
+  cleanupResult: WorkspaceCleanupResult | null;
+  daemonStatus: DaemonStatus | null;
+  executingCleanup: boolean;
   githubStatus: GitHubStatus | null;
+  onCleanupConfirmChange: (value: string) => void;
+  onExecuteCleanup: () => Promise<void>;
+  onPlanCleanup: () => Promise<void>;
+  onRefreshWorkspaces: () => Promise<void>;
   onReload: () => Promise<void>;
   providers: ProviderHealth[];
+  refreshingWorkspaces: boolean;
   trackerStatus: TrackerStatus | null;
   workflow: WorkflowStatus | null;
+  workspaceInventory: WorkspaceInventory | null;
 }) {
   const summary = workflow?.effectiveConfigSummary;
 
@@ -1213,6 +1332,22 @@ function WorkflowPanel({
         <div className="rounded-md border bg-background p-2">
           <dt className="text-muted-foreground">Workspace root</dt>
           <dd className="mt-1 break-all font-medium">{summary?.workspaceRoot ?? "Unavailable"}</dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">Daemon instance</dt>
+          <dd className="mt-1 break-all font-medium">{daemonStatus?.daemonInstanceId.slice(0, 8) ?? "unknown"}</dd>
+          <dd className="mt-1 text-[11px] text-muted-foreground">
+            {daemonStatus ? `${daemonStatus.activeRunsCount} active · ${daemonStatus.recoveredRunsCount} recovered` : "status unavailable"}
+          </dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">Workspace cleanup</dt>
+          <dd className="mt-1 font-medium">
+            {summary?.workspaceCleanup.enabled ? "enabled" : "disabled"} · {summary?.workspaceCleanup.dryRun ? "dry-run" : "delete enabled"}
+          </dd>
+          <dd className="mt-1 text-[11px] text-muted-foreground">
+            {workspaceInventory ? `${workspaceInventory.counts.candidates} candidates · ${workspaceInventory.counts.protected} protected` : "inventory not loaded"}
+          </dd>
         </div>
         {(["mock", "codex", "claude", "cursor"] as ProviderId[]).map((providerId) => {
           const provider = providers.find((item) => item.id === providerId);
@@ -1304,6 +1439,19 @@ function WorkflowPanel({
       <p className="mt-3 rounded-md border p-2 text-xs text-muted-foreground">
         Codex supports interactive approval requests through app-server. Claude Code and Cursor Agent run as CLI stream providers with pre-run permission configuration.
       </p>
+      <RecoveryCleanupPanel
+        cleanupConfirm={cleanupConfirm}
+        cleanupPlan={cleanupPlan}
+        cleanupResult={cleanupResult}
+        daemonStatus={daemonStatus}
+        executingCleanup={executingCleanup}
+        onCleanupConfirmChange={onCleanupConfirmChange}
+        onExecuteCleanup={onExecuteCleanup}
+        onPlanCleanup={onPlanCleanup}
+        onRefreshWorkspaces={onRefreshWorkspaces}
+        refreshingWorkspaces={refreshingWorkspaces}
+        workspaceInventory={workspaceInventory}
+      />
       {workflow?.error && (
         <p role="alert" className="mt-3 rounded-md border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-600 dark:text-red-300">
           {workflow.error}
@@ -1325,6 +1473,169 @@ function WorkflowPanel({
         </p>
       )}
     </section>
+  );
+}
+
+function RecoveryCleanupPanel({
+  cleanupConfirm,
+  cleanupPlan,
+  cleanupResult,
+  daemonStatus,
+  executingCleanup,
+  onCleanupConfirmChange,
+  onExecuteCleanup,
+  onPlanCleanup,
+  onRefreshWorkspaces,
+  refreshingWorkspaces,
+  workspaceInventory,
+}: {
+  cleanupConfirm: string;
+  cleanupPlan: WorkspaceCleanupPlan | null;
+  cleanupResult: WorkspaceCleanupResult | null;
+  daemonStatus: DaemonStatus | null;
+  executingCleanup: boolean;
+  onCleanupConfirmChange: (value: string) => void;
+  onExecuteCleanup: () => Promise<void>;
+  onPlanCleanup: () => Promise<void>;
+  onRefreshWorkspaces: () => Promise<void>;
+  refreshingWorkspaces: boolean;
+  workspaceInventory: WorkspaceInventory | null;
+}) {
+  const cleanupEnabled = cleanupPlan?.enabled === true && cleanupPlan.dryRun === false;
+  const canExecute = cleanupEnabled && cleanupConfirm === "delete workspaces" && (cleanupPlan?.candidates.length ?? 0) > 0 && !executingCleanup;
+
+  return (
+    <section aria-labelledby="recovery-cleanup-heading" className="mt-3 rounded-md border bg-background p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h3 id="recovery-cleanup-heading" className="text-sm font-semibold">
+            Recovery and workspace cleanup
+          </h3>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Restart recovery preserves old timelines and marks prior active runs interrupted. Cleanup is preview-first.
+          </p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button
+            type="button"
+            onClick={() => void onRefreshWorkspaces()}
+            disabled={refreshingWorkspaces}
+            className="inline-flex items-center gap-1 rounded-md border px-2 py-1 text-xs font-medium hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <RefreshCw className={cn("h-3.5 w-3.5", refreshingWorkspaces && "animate-spin")} />
+            Refresh inventory
+          </button>
+          <button
+            type="button"
+            onClick={() => void onPlanCleanup()}
+            disabled={refreshingWorkspaces}
+            className="rounded-md border px-2 py-1 text-xs font-medium hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            Preview cleanup
+          </button>
+        </div>
+      </div>
+
+      <dl className="mt-3 grid gap-2 text-xs sm:grid-cols-4">
+        <div className="rounded-md border p-2">
+          <dt className="text-muted-foreground">Recovered runs</dt>
+          <dd className="mt-1 font-medium">{daemonStatus?.recoveredRunsCount ?? 0}</dd>
+        </div>
+        <div className="rounded-md border p-2">
+          <dt className="text-muted-foreground">Orphaned runs</dt>
+          <dd className="mt-1 font-medium">{daemonStatus?.orphanedRunsCount ?? 0}</dd>
+        </div>
+        <div className="rounded-md border p-2">
+          <dt className="text-muted-foreground">Workspaces</dt>
+          <dd className="mt-1 font-medium">{workspaceInventory?.counts.total ?? 0}</dd>
+        </div>
+        <div className="rounded-md border p-2">
+          <dt className="text-muted-foreground">Cleanup candidates</dt>
+          <dd className="mt-1 font-medium">{cleanupPlan?.candidates.length ?? workspaceInventory?.counts.candidates ?? 0}</dd>
+        </div>
+      </dl>
+
+      {cleanupPlan && (
+        <div className="mt-3 grid gap-3 lg:grid-cols-2">
+          <WorkspacePlanList title="Candidates" items={cleanupPlan.candidates} emptyText="No cleanup candidates." />
+          <WorkspacePlanList title="Protected" items={cleanupPlan.protected.slice(0, 12)} emptyText="No protected workspaces reported." />
+        </div>
+      )}
+
+      {cleanupPlan?.warnings.length ? (
+        <p className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 p-2 text-xs text-amber-700 dark:text-amber-300">
+          {cleanupPlan.warnings.join(", ").replaceAll("_", " ")}
+        </p>
+      ) : null}
+
+      <div className="mt-3 rounded-md border p-3">
+        <label className="block text-xs font-medium">
+          Confirmation text
+          <input
+            value={cleanupConfirm}
+            onChange={(event) => onCleanupConfirmChange(event.target.value)}
+            placeholder="delete workspaces"
+            className="mt-1 w-full rounded-md border bg-background px-2 py-1.5 text-sm"
+          />
+        </label>
+        <button
+          type="button"
+          onClick={() => void onExecuteCleanup()}
+          disabled={!canExecute}
+          className="mt-2 rounded-md border px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-500/10 disabled:cursor-not-allowed disabled:opacity-50 dark:text-red-300"
+        >
+          {executingCleanup ? "Cleaning..." : "Execute cleanup"}
+        </button>
+        <p className="mt-2 text-xs text-muted-foreground">
+          Execution stays disabled unless cleanup is enabled, dry-run is false, candidates exist, and the confirmation text matches exactly.
+        </p>
+      </div>
+
+      {cleanupResult && (
+        <p className="mt-3 rounded-md border p-2 text-xs text-muted-foreground">
+          Cleanup result: {cleanupResult.deleted.length} deleted, {cleanupResult.skipped.length} skipped, {cleanupResult.errors.length} errors.
+        </p>
+      )}
+    </section>
+  );
+}
+
+function WorkspacePlanList({
+  emptyText,
+  items,
+  title,
+}: {
+  emptyText: string;
+  items: WorkspaceCleanupPlan["candidates"];
+  title: string;
+}) {
+  return (
+    <div className="rounded-md border">
+      <h4 className="border-b px-3 py-2 text-xs font-medium">{title}</h4>
+      {items.length === 0 ? (
+        <p className="p-3 text-xs text-muted-foreground">{emptyText}</p>
+      ) : (
+        <ul className="max-h-64 divide-y overflow-auto">
+          {items.map((item) => (
+            <li key={`${title}-${item.workspaceKey}`} className="p-3 text-xs">
+              <div className="flex flex-wrap items-center justify-between gap-2">
+                <span className="font-medium">{item.issueIdentifier}</span>
+                <span className="text-muted-foreground">{item.sizeBytes === null ? "size unknown" : `${item.sizeBytes} bytes`}</span>
+              </div>
+              <p className="mt-1 break-all text-muted-foreground">{item.path}</p>
+              <p className="mt-1 text-muted-foreground">
+                reasons: {item.reasons.length ? item.reasons.join(", ").replaceAll("_", " ") : "none"}
+              </p>
+              {item.protectionReasons.length > 0 && (
+                <p className="mt-1 text-muted-foreground">
+                  protected: {item.protectionReasons.join(", ").replaceAll("_", " ")}
+                </p>
+              )}
+            </li>
+          ))}
+        </ul>
+      )}
+    </div>
   );
 }
 
@@ -1410,10 +1721,15 @@ function runStatusClassName(status: RunStatus) {
     case "timed_out":
     case "stalled":
     case "cancelled":
+    case "interrupted":
+    case "orphaned":
       return "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300";
+    case "recovered":
+      return "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300";
     case "waiting_for_approval":
       return "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300";
     case "streaming":
+    case "running":
     case "launching_agent":
     case "building_prompt":
     case "preparing_workspace":
@@ -1428,6 +1744,8 @@ function eventLabel(event: AgentEvent) {
   switch (event.type) {
     case "run.status":
       return `Run ${event.status.replaceAll("_", " ")}`;
+    case "run.recovered":
+      return "Run recovered";
     case "agent.message":
       return `${event.role} message`;
     case "tool.call":
@@ -1436,6 +1754,8 @@ function eventLabel(event: AgentEvent) {
       return "Approval requested";
     case "approval.resolved":
       return `Approval ${event.resolution}`;
+    case "approval.recovered":
+      return "Approval recovered";
     case "usage":
       return "Token usage";
     case "artifact":
@@ -1446,6 +1766,18 @@ function eventLabel(event: AgentEvent) {
       return "Workflow invalid";
     case "workspace.ready":
       return "Workspace ready";
+    case "workspace.cleanup.planned":
+      return "Workspace cleanup planned";
+    case "workspace.cleanup.started":
+      return "Workspace cleanup started";
+    case "workspace.cleanup.skipped":
+      return "Workspace cleanup skipped";
+    case "workspace.cleanup.deleted":
+      return "Workspace cleanup deleted";
+    case "workspace.cleanup.failed":
+      return "Workspace cleanup failed";
+    case "workspace.cleanup.completed":
+      return "Workspace cleanup completed";
     case "hook.started":
       return `${event.hook.hookName} started`;
     case "hook.succeeded":
@@ -1545,6 +1877,8 @@ function eventSummary(event: AgentEvent) {
   switch (event.type) {
     case "run.status":
       return event.error ?? event.message ?? `Status changed to ${event.status.replaceAll("_", " ")}.`;
+    case "run.recovered":
+      return `${event.previousStatus.replaceAll("_", " ")} -> ${event.newStatus.replaceAll("_", " ")}\nreason: ${event.reason}\nretry available: ${event.retryAvailable ? "yes" : "no"}`;
     case "agent.message":
       return event.message;
     case "tool.call":
@@ -1553,6 +1887,8 @@ function eventSummary(event: AgentEvent) {
       return event.prompt;
     case "approval.resolved":
       return `Approval ${event.approvalId} was ${event.resolution}.`;
+    case "approval.recovered":
+      return `Approval ${event.approvalId} was marked stale after daemon startup recovery.`;
     case "usage":
       return `${event.totalTokens.toLocaleString()} total tokens (${event.inputTokens.toLocaleString()} in, ${event.outputTokens.toLocaleString()} out).`;
     case "artifact":
@@ -1563,6 +1899,18 @@ function eventSummary(event: AgentEvent) {
       return `${event.code}: ${event.error}`;
     case "workspace.ready":
       return event.workspace.path;
+    case "workspace.cleanup.planned":
+      return `${event.plan.candidates.length} candidates, ${event.plan.protected.length} protected.\n${event.plan.warnings.join(", ")}`;
+    case "workspace.cleanup.started":
+      return event.path;
+    case "workspace.cleanup.skipped":
+      return `${event.path}\n${event.reason}`;
+    case "workspace.cleanup.deleted":
+      return `${event.path}\n${event.bytesFreed ?? 0} bytes freed.`;
+    case "workspace.cleanup.failed":
+      return `${event.path}\n${event.error}`;
+    case "workspace.cleanup.completed":
+      return `${event.result.deleted.length} deleted, ${event.result.skipped.length} skipped, ${event.result.errors.length} errors.`;
     case "hook.started":
     case "hook.succeeded":
     case "hook.failed":

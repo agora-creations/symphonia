@@ -21,3 +21,4 @@ export * from "./time.js";
 export * from "./tracker.js";
 export * from "./workflow.js";
 export * from "./workspace-manager.js";
+export * from "./workspace-cleanup.js";

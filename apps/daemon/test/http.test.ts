@@ -1,4 +1,4 @@
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -343,6 +343,90 @@ describe("daemon API", () => {
     expect(getEvents(created.id).some((event) => event.type === "approval.resolved" && event.resolution === "accept")).toBe(true);
   });
 
+  it("reconstructs active persisted runs on startup and allows manual retry", async () => {
+    process.env.SYMPHONIA_MOCK_DELAY_MS = "50";
+    const databasePath = join(directory, "restart.sqlite");
+    daemon.close();
+    daemon = createDaemonServer(new EventStore(databasePath), { workflowPath, cwd: directory }).daemon;
+
+    const created = await daemon.startRun("issue-frontend-board", "mock");
+    await waitForEvent(created.id, "agent.message");
+    daemon.close();
+
+    daemon = createDaemonServer(new EventStore(databasePath), { workflowPath, cwd: directory }).daemon;
+    const recovered = daemon.requireRun(created.id);
+
+    expect(recovered.status).toBe("interrupted");
+    expect(recovered.recoveryState).toBe("interrupted_by_restart");
+    expect(getEvents(created.id).some((event) => event.type === "run.recovered")).toBe(true);
+
+    const retried = await daemon.retryRun(created.id);
+    await waitForTerminal(retried.id, "succeeded");
+    expect(daemon.requireRun(created.id).recoveryState).toBe("manually_retried");
+  });
+
+  it("leaves terminal persisted runs unchanged on startup", async () => {
+    const databasePath = join(directory, "terminal-restart.sqlite");
+    daemon.close();
+    daemon = createDaemonServer(new EventStore(databasePath), { workflowPath, cwd: directory }).daemon;
+
+    const created = await daemon.startRun("issue-frontend-board", "mock");
+    await waitForTerminal(created.id, "succeeded");
+    daemon.close();
+
+    daemon = createDaemonServer(new EventStore(databasePath), { workflowPath, cwd: directory }).daemon;
+
+    expect(daemon.requireRun(created.id).status).toBe("succeeded");
+    expect(getEvents(created.id).some((event) => event.type === "run.recovered")).toBe(false);
+  });
+
+  it("recovers stale pending approvals as non-actionable", async () => {
+    const databasePath = join(directory, "approval-restart.sqlite");
+    daemon.close();
+    daemon = createDaemonServer(new EventStore(databasePath), { workflowPath, cwd: directory }).daemon;
+    writeWorkflow({ codexCommand: fakeCodexCommand("approval") });
+
+    const created = await daemon.startRun("issue-frontend-board", "codex");
+    await waitForApproval(created.id);
+    daemon.close();
+
+    daemon = createDaemonServer(new EventStore(databasePath), { workflowPath, cwd: directory }).daemon;
+
+    expect(daemon.listApprovals(created.id)).toHaveLength(0);
+    expect(getEvents(created.id).some((event) => event.type === "approval.recovered")).toBe(true);
+    expect(getEvents(created.id).some((event) => event.type === "approval.resolved" && event.resolution === "cancel")).toBe(true);
+  });
+
+  it("reports daemon status, workspace inventory, and dry-run cleanup plans", async () => {
+    writeWorkflow({ cleanupEnabled: true, cleanupDryRun: true, cleanupAfterMs: 0 });
+    mkdirSync(join(directory, "workspaces", "ORPHAN-1"), { recursive: true });
+    writeFileSync(join(directory, "workspaces", "ORPHAN-1", "notes.txt"), "stale\n");
+
+    const status = await daemon.getDaemonStatus();
+    const inventory = await daemon.refreshWorkspaceInventory();
+    const plan = await daemon.createCleanupPlan();
+    const result = await daemon.executeCleanup({ planId: plan.id, confirm: "delete workspaces" });
+
+    expect(status.daemonInstanceId).toBeTruthy();
+    expect(inventory.workspaces.some((workspace) => workspace.workspaceKey === "ORPHAN-1")).toBe(true);
+    expect(plan.dryRun).toBe(true);
+    expect(plan.candidates.some((workspace) => workspace.workspaceKey === "ORPHAN-1")).toBe(true);
+    expect(result.skipped[0]?.skippedReason).toBe("dry_run");
+    expect(existsSync(join(directory, "workspaces", "ORPHAN-1"))).toBe(true);
+  });
+
+  it("executes confirmed cleanup only when policy allows it", async () => {
+    writeWorkflow({ cleanupEnabled: true, cleanupDryRun: false, cleanupAfterMs: 0 });
+    mkdirSync(join(directory, "workspaces", "ORPHAN-2"), { recursive: true });
+    writeFileSync(join(directory, "workspaces", "ORPHAN-2", "notes.txt"), "stale\n");
+
+    const plan = await daemon.createCleanupPlan(["ORPHAN-2"]);
+    const result = await daemon.executeCleanup({ planId: plan.id, confirm: "delete workspaces" });
+
+    expect(result.deleted.some((workspace) => workspace.workspaceKey === "ORPHAN-2")).toBe(true);
+    expect(existsSync(join(directory, "workspaces", "ORPHAN-2"))).toBe(false);
+  });
+
   it("fails codex runs gracefully when the command is unavailable", async () => {
     writeWorkflow({ codexCommand: "definitely-not-a-symphonia-command" });
 
@@ -450,6 +534,9 @@ function writeWorkflow(
     cursorCommand?: string;
     provider?: "mock" | "codex" | "claude" | "cursor";
     githubToken?: string;
+    cleanupEnabled?: boolean;
+    cleanupDryRun?: boolean;
+    cleanupAfterMs?: number;
   } = {},
 ): void {
   writeFileSync(
@@ -460,6 +547,16 @@ tracker:
   kind: mock
 workspace:
   root: "./workspaces"
+  cleanup:
+    enabled: ${options.cleanupEnabled ? "true" : "false"}
+    dry_run: ${options.cleanupDryRun === false ? "false" : "true"}
+    require_manual_confirmation: true
+    delete_terminal_after_ms: ${options.cleanupAfterMs ?? 604800000}
+    delete_orphaned_after_ms: ${options.cleanupAfterMs ?? 1209600000}
+    delete_interrupted_after_ms: ${options.cleanupAfterMs ?? 1209600000}
+    protect_active: true
+    protect_recent_runs_ms: 0
+    protect_dirty_git: true
 ${options.githubToken ? `github:
   enabled: true
   endpoint: "https://api.github.test"

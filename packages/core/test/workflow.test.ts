@@ -392,6 +392,37 @@ describe("workflow config resolution", () => {
       resolveWorkflowConfig(definition({ tracker: { kind: "mock" }, agent: { max_turns: -1 } })),
     ).toThrow("agent.max_turns must be positive");
   });
+
+  it("resolves workspace cleanup policy defaults and safe summaries", () => {
+    const config = resolveWorkflowConfig(
+      definition({
+        tracker: { kind: "mock" },
+        workspace: {
+          root: ".symphonia/workspaces",
+          cleanup: {
+            enabled: true,
+            dry_run: false,
+            require_manual_confirmation: true,
+            delete_terminal_after_ms: 0,
+            protect_active: true,
+            protect_dirty_git: true,
+            exclude_identifiers: ["ENG-SECRET"],
+          },
+        },
+      }),
+    );
+    const summary = summarizeWorkflowConfig(config);
+
+    expect(config.workspace.cleanup).toMatchObject({
+      enabled: true,
+      dryRun: false,
+      requireManualConfirmation: true,
+      deleteTerminalAfterMs: 0,
+      protectActive: true,
+      protectDirtyGit: true,
+    });
+    expect(summary.workspaceCleanup.excludeIdentifiers).toEqual(["ENG-SECRET"]);
+  });
 });
 
 describe("prompt rendering", () => {

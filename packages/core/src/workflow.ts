@@ -30,6 +30,7 @@ export type WorkflowErrorCode =
   | "workflow_github_page_size_invalid"
   | "workflow_github_max_pages_invalid"
   | "workflow_github_write_guard_invalid"
+  | "workflow_workspace_cleanup_invalid"
   | "workflow_hook_timeout_invalid"
   | "workflow_agent_max_turns_invalid"
   | "workflow_agent_max_concurrent_invalid"
@@ -79,6 +80,23 @@ const maxGithubMaxPages = 20;
 const defaultCliTimeoutMs = 3600000;
 const defaultCliStallTimeoutMs = 300000;
 const defaultCliReadTimeoutMs = 5000;
+const dayMs = 86_400_000;
+const defaultWorkspaceCleanupPolicy = {
+  enabled: false,
+  dryRun: true,
+  requireManualConfirmation: true,
+  deleteTerminalAfterMs: 7 * dayMs,
+  deleteOrphanedAfterMs: 14 * dayMs,
+  deleteInterruptedAfterMs: 14 * dayMs,
+  maxWorkspaceAgeMs: null,
+  maxTotalBytes: null,
+  protectActive: true,
+  protectRecentRunsMs: dayMs,
+  protectDirtyGit: true,
+  includeTerminalStates: ["Done", "Closed", "Cancelled", "Canceled", "Duplicate"],
+  excludeIdentifiers: [],
+  includeIdentifiers: [],
+};
 const defaultPrTitleTemplate = "{{ issue.identifier }}: {{ issue.title }}";
 const defaultPrBodyTemplate = `## Summary
 
@@ -354,6 +372,85 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
     readString(workspaceRaw, "root") ?? join(tmpdir(), "symphonia_workspaces"),
     dirname(definition.workflowPath),
   );
+  const cleanupRaw = readObject(workspaceRaw, "cleanup");
+  const cleanupPolicy = {
+    enabled: readBoolean(cleanupRaw, defaultWorkspaceCleanupPolicy.enabled, "enabled"),
+    dryRun: readBoolean(cleanupRaw, defaultWorkspaceCleanupPolicy.dryRun, "dryRun", "dry_run"),
+    requireManualConfirmation: readBoolean(
+      cleanupRaw,
+      defaultWorkspaceCleanupPolicy.requireManualConfirmation,
+      "requireManualConfirmation",
+      "require_manual_confirmation",
+    ),
+    deleteTerminalAfterMs: readOptionalNonnegativeInteger(
+      cleanupRaw,
+      defaultWorkspaceCleanupPolicy.deleteTerminalAfterMs,
+      "deleteTerminalAfterMs",
+      "delete_terminal_after_ms",
+    ),
+    deleteOrphanedAfterMs: readOptionalNonnegativeInteger(
+      cleanupRaw,
+      defaultWorkspaceCleanupPolicy.deleteOrphanedAfterMs,
+      "deleteOrphanedAfterMs",
+      "delete_orphaned_after_ms",
+    ),
+    deleteInterruptedAfterMs: readOptionalNonnegativeInteger(
+      cleanupRaw,
+      defaultWorkspaceCleanupPolicy.deleteInterruptedAfterMs,
+      "deleteInterruptedAfterMs",
+      "delete_interrupted_after_ms",
+    ),
+    maxWorkspaceAgeMs: readOptionalNonnegativeInteger(
+      cleanupRaw,
+      defaultWorkspaceCleanupPolicy.maxWorkspaceAgeMs,
+      "maxWorkspaceAgeMs",
+      "max_workspace_age_ms",
+    ),
+    maxTotalBytes: readOptionalNonnegativeInteger(
+      cleanupRaw,
+      defaultWorkspaceCleanupPolicy.maxTotalBytes,
+      "maxTotalBytes",
+      "max_total_bytes",
+    ),
+    protectActive: readBoolean(cleanupRaw, defaultWorkspaceCleanupPolicy.protectActive, "protectActive", "protect_active"),
+    protectRecentRunsMs: readNonnegativeInteger(
+      cleanupRaw,
+      defaultWorkspaceCleanupPolicy.protectRecentRunsMs,
+      "protectRecentRunsMs",
+      "protect_recent_runs_ms",
+    ),
+    protectDirtyGit: readBoolean(
+      cleanupRaw,
+      defaultWorkspaceCleanupPolicy.protectDirtyGit,
+      "protectDirtyGit",
+      "protect_dirty_git",
+    ),
+    includeTerminalStates: readStringArray(
+      cleanupRaw,
+      defaultWorkspaceCleanupPolicy.includeTerminalStates,
+      "includeTerminalStates",
+      "include_terminal_states",
+    ),
+    excludeIdentifiers: readStringArray(cleanupRaw, [], "excludeIdentifiers", "exclude_identifiers"),
+    includeIdentifiers: readStringArray(cleanupRaw, [], "includeIdentifiers", "include_identifiers"),
+  };
+
+  if (
+    [
+      cleanupPolicy.deleteTerminalAfterMs,
+      cleanupPolicy.deleteOrphanedAfterMs,
+      cleanupPolicy.deleteInterruptedAfterMs,
+      cleanupPolicy.maxWorkspaceAgeMs,
+      cleanupPolicy.maxTotalBytes,
+      cleanupPolicy.protectRecentRunsMs,
+    ].some((value) => value !== null && value < 0)
+  ) {
+    throw new WorkflowError(
+      "workflow_workspace_cleanup_invalid",
+      "workspace.cleanup durations and byte limits must be non-negative or null.",
+      definition.workflowPath,
+    );
+  }
 
   const config = {
     provider,
@@ -387,6 +484,7 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
     },
     workspace: {
       root: workspaceRoot,
+      cleanup: cleanupPolicy,
     },
     hooks: {
       afterCreate: readString(hooksRaw, "afterCreate", "after_create") ?? null,
@@ -505,6 +603,22 @@ export function summarizeWorkflowConfig(config: WorkflowConfig): WorkflowConfigS
     readOnly: config.tracker.readOnly,
     writeEnabled: config.tracker.write.enabled,
     workspaceRoot: config.workspace.root,
+    workspaceCleanup: {
+      enabled: config.workspace.cleanup.enabled,
+      dryRun: config.workspace.cleanup.dryRun,
+      requireManualConfirmation: config.workspace.cleanup.requireManualConfirmation,
+      protectActive: config.workspace.cleanup.protectActive,
+      protectRecentRunsMs: config.workspace.cleanup.protectRecentRunsMs,
+      protectDirtyGit: config.workspace.cleanup.protectDirtyGit,
+      deleteTerminalAfterMs: config.workspace.cleanup.deleteTerminalAfterMs,
+      deleteOrphanedAfterMs: config.workspace.cleanup.deleteOrphanedAfterMs,
+      deleteInterruptedAfterMs: config.workspace.cleanup.deleteInterruptedAfterMs,
+      maxWorkspaceAgeMs: config.workspace.cleanup.maxWorkspaceAgeMs,
+      maxTotalBytes: config.workspace.cleanup.maxTotalBytes,
+      includeTerminalStates: config.workspace.cleanup.includeTerminalStates,
+      excludeIdentifiers: config.workspace.cleanup.excludeIdentifiers,
+      includeIdentifiers: config.workspace.cleanup.includeIdentifiers,
+    },
     maxConcurrentAgents: config.agent.maxConcurrentAgents,
     maxTurns: config.agent.maxTurns,
     hookTimeoutMs: config.hooks.timeoutMs,
@@ -712,6 +826,16 @@ function readOptionalPositiveInteger(record: Record<string, unknown>, ...keys: s
 function readNonnegativeInteger(record: Record<string, unknown>, fallback: number, ...keys: string[]): number {
   const value = readNumber(record, ...keys);
   return value === undefined ? fallback : value;
+}
+
+function readOptionalNonnegativeInteger(
+  record: Record<string, unknown>,
+  fallback: number | null,
+  ...keys: string[]
+): number | null {
+  const value = readNumber(record, ...keys);
+  if (value === undefined || value === null) return fallback;
+  return value;
 }
 
 function readNumber(record: Record<string, unknown>, ...keys: string[]): number | undefined {

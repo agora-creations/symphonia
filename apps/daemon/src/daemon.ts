@@ -1,8 +1,11 @@
 import { randomUUID } from "node:crypto";
+import { lstatSync, rmSync } from "node:fs";
 import { createServer, IncomingMessage, Server, ServerResponse } from "node:http";
+import { basename, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   applyRunEvent,
+  buildWorkspaceInventory,
   canStartRunForIssue,
   claudeProvider,
   codexProvider,
@@ -24,6 +27,7 @@ import {
   mockTrackerAdapter,
   MockRunCancelledError,
   nowIso,
+  planWorkspaceCleanup,
   PromptTemplateError,
   refreshReviewArtifacts,
   renderPromptTemplate,
@@ -36,6 +40,7 @@ import {
   WorkflowRuntime,
   WorkspaceError,
   WorkspaceManager,
+  isInsideWorkspaceRoot,
 } from "@symphonia/core";
 import { EventStore } from "@symphonia/db";
 import {
@@ -43,6 +48,7 @@ import {
   ApprovalState,
   AgentEvent,
   AgentEventSchema,
+  DaemonStatus,
   HookName,
   HookRun,
   Issue,
@@ -58,9 +64,14 @@ import {
   TrackerHealth,
   TrackerKind,
   TrackerStatus,
+  WorkspaceCleanupExecuteRequestSchema,
+  WorkspaceCleanupExecuteRequest,
+  WorkspaceCleanupPlan,
+  WorkspaceCleanupResult,
   WorkflowConfigSummary,
   WorkflowStatus,
   WorkspaceInfo,
+  WorkspaceInventory,
 } from "@symphonia/types";
 
 type RunRecord = {
@@ -91,6 +102,8 @@ export type SymphoniaDaemonOptions = {
 
 export class SymphoniaDaemon {
   private readonly runs = new Map<string, RunRecord>();
+  private readonly daemonInstanceId = randomUUID();
+  private readonly startedAt = nowIso();
   private readonly subscribers = new Map<string, Set<ServerResponse>>();
   private readonly workspaces = new Map<string, WorkspaceInfo>();
   private readonly approvals = new Map<string, ApprovalRecord>();
@@ -104,11 +117,19 @@ export class SymphoniaDaemon {
   private githubLastError: string | null = null;
   private githubLastHealth: GitHubHealth | null = null;
   private readonly artifactRefreshes = new Set<string>();
+  private recoveredAt: string | null = null;
+  private recoveredRunsCount = 0;
+  private orphanedRunsCount = 0;
+  private latestWorkspaceInventory: WorkspaceInventory | null = null;
+  private latestCleanupPlan: WorkspaceCleanupPlan | null = null;
+  private closed = false;
 
   constructor(
     private readonly eventStore: EventStore,
     private readonly options: SymphoniaDaemonOptions = {},
-  ) {}
+  ) {
+    this.reconstructPersistedRuns();
+  }
 
   createHttpServer(): Server {
     return createServer((request, response) => {
@@ -116,7 +137,163 @@ export class SymphoniaDaemon {
     });
   }
 
+  private reconstructPersistedRuns(): void {
+    const recoveredAt = nowIso();
+    const persistedRuns = this.eventStore.listRuns();
+    let recovered = 0;
+    let orphaned = 0;
+
+    for (const persisted of persistedRuns) {
+      const previousDaemonInstanceId = persisted.lastSeenDaemonInstanceId ?? persisted.createdByDaemonInstanceId;
+      let run = RunSchema.parse({
+        ...persisted,
+        lastSeenDaemonInstanceId: this.daemonInstanceId,
+      });
+
+      if (!isTerminalRunStatus(run.status) && run.createdByDaemonInstanceId !== this.daemonInstanceId) {
+        const previousStatus = run.status;
+        const recoveryState = previousStatus === "queued" ? "orphaned_on_startup" : "interrupted_by_restart";
+        const newStatus = previousStatus === "queued" ? "orphaned" : "interrupted";
+
+        const recoveryEvent = AgentEventSchema.parse({
+          id: randomUUID(),
+          runId: run.id,
+          type: "run.recovered",
+          timestamp: recoveredAt,
+          previousStatus,
+          newStatus,
+          previousDaemonInstanceId,
+          currentDaemonInstanceId: this.daemonInstanceId,
+          recoveredAt,
+          reason: "daemon_startup_recovery",
+          retryAvailable: true,
+        });
+        this.eventStore.append(recoveryEvent);
+
+        for (const approvalId of this.findPendingApprovalIds(run.id)) {
+          this.eventStore.append(
+            AgentEventSchema.parse({
+              id: randomUUID(),
+              runId: run.id,
+              type: "approval.recovered",
+              timestamp: recoveredAt,
+              approvalId,
+              previousStatus: "pending",
+              newStatus: "stale",
+              previousDaemonInstanceId,
+              currentDaemonInstanceId: this.daemonInstanceId,
+              recoveredAt,
+              reason: "daemon_startup_recovery",
+            }),
+          );
+          this.eventStore.append(
+            AgentEventSchema.parse({
+              id: randomUUID(),
+              runId: run.id,
+              type: "approval.resolved",
+              timestamp: recoveredAt,
+              approvalId,
+              resolution: "cancel",
+            }),
+          );
+        }
+
+        const statusEvent = AgentEventSchema.parse({
+          id: randomUUID(),
+          runId: run.id,
+          type: "run.status",
+          timestamp: recoveredAt,
+          status: newStatus,
+          message: "Run was interrupted by daemon startup recovery.",
+          error: "daemon_startup_recovery",
+        });
+        this.eventStore.append(statusEvent);
+        run = RunSchema.parse({
+          ...applyRunEvent(run, statusEvent),
+          recoveryState,
+          recoveredAt,
+          endedAt: recoveredAt,
+          terminalReason: "daemon_startup_recovery",
+          error: "daemon_startup_recovery",
+          lastSeenDaemonInstanceId: this.daemonInstanceId,
+        });
+        recovered += 1;
+        if (newStatus === "orphaned") orphaned += 1;
+      }
+
+      this.eventStore.saveRun(run);
+      const record = this.recordFromPersistedRun(run);
+      this.runs.set(run.id, record);
+      if (run.workspacePath) {
+        this.workspaces.set(run.issueIdentifier, {
+          issueIdentifier: run.issueIdentifier,
+          workspaceKey: basename(run.workspacePath),
+          path: run.workspacePath,
+          createdNow: false,
+          exists: true,
+        });
+      }
+    }
+
+    if (recovered > 0) {
+      this.recoveredAt = recoveredAt;
+      this.recoveredRunsCount = recovered;
+      this.orphanedRunsCount = orphaned;
+    }
+  }
+
+  private recordFromPersistedRun(run: Run): RunRecord {
+    return {
+      run,
+      issue: this.issueForRun(run),
+      controller: new AbortController(),
+      attempt: run.attempt,
+      prompt: this.getPersistedRunPrompt(run.id),
+      workspace: run.workspacePath
+        ? {
+            issueIdentifier: run.issueIdentifier,
+            workspaceKey: basename(run.workspacePath),
+            path: run.workspacePath,
+            createdNow: false,
+            exists: true,
+          }
+        : null,
+      workflowSummary: null,
+      providerStarted: false,
+    };
+  }
+
+  private issueForRun(run: Run): Issue {
+    return (
+      this.eventStore.getIssue(run.issueId) ??
+      this.eventStore.getIssueByIdentifier(run.issueIdentifier) ??
+      getMockIssue(run.issueId) ?? {
+        id: run.issueId,
+        identifier: run.issueIdentifier,
+        title: run.issueTitle ?? run.issueIdentifier,
+        description: "",
+        state: "Recovered",
+        labels: [],
+        priority: "No priority",
+        createdAt: run.startedAt ?? nowIso(),
+        updatedAt: run.updatedAt ?? nowIso(),
+        url: "http://localhost/recovered-run",
+        tracker: { kind: run.trackerKind, sourceId: run.issueId },
+      }
+    );
+  }
+
+  private findPendingApprovalIds(runId: string): string[] {
+    const pending = new Set<string>();
+    for (const event of this.eventStore.getEventsForRun(runId)) {
+      if (event.type === "approval.requested") pending.add(event.approvalId);
+      if (event.type === "approval.resolved") pending.delete(event.approvalId);
+    }
+    return [...pending];
+  }
+
   close(): void {
+    this.closed = true;
     if (this.trackerPollingTimer) {
       clearInterval(this.trackerPollingTimer);
       this.trackerPollingTimer = null;
@@ -182,6 +359,10 @@ export class SymphoniaDaemon {
         return sendJson(response, 200, { github: await this.getGithubHealth() });
       }
 
+      if (request.method === "GET" && (path === "/daemon/status" || path === "/recovery/status")) {
+        return sendJson(response, 200, { daemon: await this.getDaemonStatus() });
+      }
+
       const providerHealthMatch = path.match(/^\/providers\/(mock|codex|claude|cursor)\/health$/);
       if (request.method === "GET" && providerHealthMatch) {
         return sendJson(response, 200, { provider: await this.getProviderHealth(providerHealthMatch[1]! as ProviderId) });
@@ -229,7 +410,27 @@ export class SymphoniaDaemon {
       }
 
       if (request.method === "GET" && path === "/workspaces") {
-        return sendJson(response, 200, { workspaces: this.listWorkspaces() });
+        const inventory = await this.refreshWorkspaceInventory();
+        return sendJson(response, 200, { workspaces: inventory.workspaces, inventory });
+      }
+
+      if (request.method === "POST" && path === "/workspaces/refresh") {
+        const inventory = await this.refreshWorkspaceInventory();
+        return sendJson(response, 200, { inventory });
+      }
+
+      if (request.method === "GET" && path === "/workspaces/cleanup/plan") {
+        return sendJson(response, 200, { plan: await this.createCleanupPlan() });
+      }
+
+      if (request.method === "POST" && path === "/workspaces/cleanup/plan") {
+        const body = WorkspaceCleanupExecuteRequestSchema.partial().parse(await readJsonBody(request));
+        return sendJson(response, 200, { plan: await this.createCleanupPlan(body.identifiers) });
+      }
+
+      if (request.method === "POST" && path === "/workspaces/cleanup/execute") {
+        const body = WorkspaceCleanupExecuteRequestSchema.parse(await readJsonBody(request));
+        return sendJson(response, 200, { result: await this.executeCleanup(body) });
       }
 
       const workspaceMatch = path.match(/^\/workspaces\/([^/]+)$/);
@@ -337,14 +538,18 @@ export class SymphoniaDaemon {
 
     const timestamp = nowIso();
     const provider = requestedProvider ?? runtime?.config.provider ?? this.getDefaultProvider();
+    const attempt = this.countRunsForIssue(issue.id) + 1;
     const run = createQueuedRun({
       id: randomUUID(),
       issueId: issue.id,
       issueIdentifier: issue.identifier,
+      issueTitle: issue.title,
+      trackerKind: issue.tracker?.kind ?? runtime?.config.tracker.kind ?? "mock",
       provider,
+      attempt,
       timestamp,
+      daemonInstanceId: this.daemonInstanceId,
     });
-    const attempt = this.countRunsForIssue(issue.id) + 1;
     const record: RunRecord = {
       run,
       issue,
@@ -388,7 +593,19 @@ export class SymphoniaDaemon {
     }
 
     const timestamp = nowIso();
-    const run = createRetryRun({ previousRun, id: randomUUID(), timestamp });
+    const previousRecord = this.requireRecord(runId);
+    previousRecord.run = RunSchema.parse({
+      ...previousRecord.run,
+      recoveryState:
+        previousRecord.run.recoveryState === "interrupted_by_restart" || previousRecord.run.recoveryState === "orphaned_on_startup"
+          ? "manually_retried"
+          : previousRecord.run.recoveryState,
+      updatedAt: timestamp,
+      lastSeenDaemonInstanceId: this.daemonInstanceId,
+    });
+    this.eventStore.saveRun(previousRecord.run);
+
+    const run = createRetryRun({ previousRun, id: randomUUID(), timestamp, daemonInstanceId: this.daemonInstanceId });
     const record: RunRecord = {
       run,
       issue,
@@ -841,6 +1058,31 @@ export class SymphoniaDaemon {
     }
   }
 
+  async getDaemonStatus(): Promise<DaemonStatus> {
+    const workflow = this.refreshWorkflowStatus();
+    const tracker = this.getTrackerStatus();
+    const providers = await this.listProviderHealth();
+
+    return {
+      daemonInstanceId: this.daemonInstanceId,
+      startedAt: this.startedAt,
+      recoveredAt: this.recoveredAt,
+      recoveredRunsCount: this.recoveredRunsCount,
+      orphanedRunsCount: this.orphanedRunsCount,
+      activeRunsCount: this.listRuns().filter((run) => !isTerminalRunStatus(run.status)).length,
+      dbPath: this.eventStore.getDatabasePath(),
+      workspaceRoot: workflow.effectiveConfigSummary?.workspaceRoot ?? null,
+      workflowStatus: workflow.status,
+      trackerStatus: tracker.status,
+      providerSummary: providers.map((provider) => ({
+        id: provider.id,
+        enabled: provider.enabled,
+        available: provider.available,
+        status: provider.status,
+      })),
+    };
+  }
+
   getReviewArtifacts(runId: string): ReviewArtifactSnapshot | null {
     this.requireRun(runId);
     return this.eventStore.getReviewArtifactSnapshot(runId);
@@ -878,6 +1120,194 @@ export class SymphoniaDaemon {
     }
   }
 
+  async refreshWorkspaceInventory(): Promise<WorkspaceInventory> {
+    const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+    const issues = this.eventStore.listIssues(runtime.config.tracker.kind);
+    const inventory = await buildWorkspaceInventory({
+      workspaceRoot: runtime.config.workspace.root,
+      runs: this.listRuns(),
+      issues: issues.length > 0 ? issues : runtime.config.tracker.kind === "mock" ? listMockIssues() : [],
+      cleanupPolicy: runtime.config.workspace.cleanup,
+    });
+    this.latestWorkspaceInventory = inventory;
+
+    for (const workspace of inventory.workspaces) {
+      this.workspaces.set(workspace.issueIdentifier, {
+        issueIdentifier: workspace.issueIdentifier,
+        workspaceKey: workspace.workspaceKey,
+        path: workspace.path,
+        createdNow: false,
+        exists: workspace.exists,
+      });
+    }
+
+    return inventory;
+  }
+
+  async createCleanupPlan(identifiers: string[] = []): Promise<WorkspaceCleanupPlan> {
+    const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+    const inventory = await this.refreshWorkspaceInventory();
+    const plan = planWorkspaceCleanup(inventory, runtime.config.workspace.cleanup, {
+      id: randomUUID(),
+      selectedIdentifiers: identifiers,
+    });
+    this.latestCleanupPlan = plan;
+    this.appendDaemonEvent({
+      id: randomUUID(),
+      runId: "__daemon__",
+      type: "workspace.cleanup.planned",
+      timestamp: plan.generatedAt,
+      plan,
+    });
+    return plan;
+  }
+
+  async executeCleanup(request: WorkspaceCleanupExecuteRequest): Promise<WorkspaceCleanupResult> {
+    const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+    const policy = runtime.config.workspace.cleanup;
+    const startedAt = nowIso();
+    const plan =
+      request.planId && this.latestCleanupPlan?.id === request.planId
+        ? this.latestCleanupPlan
+        : await this.createCleanupPlan(request.identifiers ?? []);
+    const deleted: WorkspaceCleanupResult["deleted"] = [];
+    const skipped: WorkspaceCleanupResult["skipped"] = [];
+    const errors: WorkspaceCleanupResult["errors"] = [];
+
+    if (!policy.enabled || policy.dryRun || (policy.requireManualConfirmation && request.confirm !== "delete workspaces")) {
+      const reason = !policy.enabled
+        ? "cleanup_disabled"
+        : policy.dryRun
+          ? "dry_run"
+          : "missing_confirmation";
+      for (const item of plan.candidates) {
+        skipped.push({ ...item, skippedReason: reason });
+        this.appendDaemonEvent({
+          id: randomUUID(),
+          runId: "__daemon__",
+          type: "workspace.cleanup.skipped",
+          timestamp: nowIso(),
+          workspaceKey: item.workspaceKey,
+          path: item.path,
+          reason,
+        });
+      }
+      return {
+        startedAt,
+        completedAt: nowIso(),
+        dryRun: policy.dryRun,
+        deleted,
+        skipped,
+        errors,
+        bytesFreed: 0,
+      };
+    }
+
+    for (const item of plan.candidates) {
+      const path = resolve(item.path);
+      const root = resolve(plan.root);
+      const activeRun = this.listRuns().find(
+        (run) => !isTerminalRunStatus(run.status) && (run.issueIdentifier === item.issueIdentifier || run.workspacePath === path),
+      );
+
+      if (activeRun) {
+        skipped.push({ ...item, skippedReason: "active_run" });
+        continue;
+      }
+
+      if (!isInsideWorkspaceRoot(root, path) || path === root) {
+        skipped.push({ ...item, skippedReason: "outside_workspace_root" });
+        continue;
+      }
+
+      try {
+        const stats = lstatSync(path);
+        if (stats.isSymbolicLink()) {
+          skipped.push({ ...item, skippedReason: "symlink_escape_protected" });
+          continue;
+        }
+
+        if (runtime.config.hooks.beforeRemove) {
+          const hook = await runHook({
+            hookName: "beforeRemove",
+            command: runtime.config.hooks.beforeRemove,
+            cwd: path,
+            timeoutMs: runtime.config.hooks.timeoutMs,
+          });
+          if (hook.status !== "succeeded") {
+            skipped.push({ ...item, skippedReason: "before_remove_failed" });
+            continue;
+          }
+        }
+
+        this.appendDaemonEvent({
+          id: randomUUID(),
+          runId: "__daemon__",
+          type: "workspace.cleanup.started",
+          timestamp: nowIso(),
+          workspaceKey: item.workspaceKey,
+          path,
+        });
+        rmSync(path, { recursive: true, force: true });
+        deleted.push(item);
+        this.appendDaemonEvent({
+          id: randomUUID(),
+          runId: "__daemon__",
+          type: "workspace.cleanup.deleted",
+          timestamp: nowIso(),
+          workspaceKey: item.workspaceKey,
+          path,
+          bytesFreed: item.sizeBytes,
+        });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : "Workspace cleanup failed.";
+        errors.push({ workspaceKey: item.workspaceKey, path, error: message });
+        this.appendDaemonEvent({
+          id: randomUUID(),
+          runId: "__daemon__",
+          type: "workspace.cleanup.failed",
+          timestamp: nowIso(),
+          workspaceKey: item.workspaceKey,
+          path,
+          error: message,
+        });
+      }
+    }
+
+    for (const item of skipped) {
+      this.appendDaemonEvent({
+        id: randomUUID(),
+        runId: "__daemon__",
+        type: "workspace.cleanup.skipped",
+        timestamp: nowIso(),
+        workspaceKey: item.workspaceKey,
+        path: item.path,
+        reason: item.skippedReason,
+      });
+    }
+
+    const result: WorkspaceCleanupResult = {
+      startedAt,
+      completedAt: nowIso(),
+      dryRun: false,
+      deleted,
+      skipped,
+      errors,
+      bytesFreed: deleted.some((item) => item.sizeBytes === null)
+        ? null
+        : deleted.reduce((total, item) => total + (item.sizeBytes ?? 0), 0),
+    };
+    this.appendDaemonEvent({
+      id: randomUUID(),
+      runId: "__daemon__",
+      type: "workspace.cleanup.completed",
+      timestamp: result.completedAt,
+      result,
+    });
+    this.latestWorkspaceInventory = null;
+    return result;
+  }
+
   getWorkspaceInfo(issueIdentifier: string): WorkspaceInfo {
     const issue = this.eventStore.getIssueByIdentifier(issueIdentifier) ?? this.eventStore.getIssue(issueIdentifier);
     const normalizedIdentifier = issue?.identifier ?? issueIdentifier;
@@ -892,6 +1322,10 @@ export class SymphoniaDaemon {
     const record = this.requireRecord(runId);
     if (record.prompt) return record.prompt;
 
+    return this.getPersistedRunPrompt(runId);
+  }
+
+  private getPersistedRunPrompt(runId: string): string | null {
     const promptEvent = this.eventStore
       .getEventsForRun(runId)
       .filter((event) => event.type === "prompt.rendered")
@@ -1141,6 +1575,7 @@ export class SymphoniaDaemon {
   }
 
   private async emit(record: RunRecord, event: AgentEvent): Promise<void> {
+    if (this.closed) return;
     const parsed = AgentEventSchema.parse(event);
 
     if (isTerminalRunStatus(record.run.status) && parsed.type === "run.status") {
@@ -1148,8 +1583,17 @@ export class SymphoniaDaemon {
     }
 
     this.eventStore.append(parsed);
-    record.run = RunSchema.parse(applyRunEvent(record.run, parsed));
+    record.run = RunSchema.parse({
+      ...applyRunEvent(record.run, parsed),
+      lastSeenDaemonInstanceId: this.daemonInstanceId,
+    });
+    this.eventStore.saveRun(record.run);
     this.broadcast(parsed);
+  }
+
+  private appendDaemonEvent(event: AgentEvent): void {
+    if (this.closed) return;
+    this.eventStore.append(AgentEventSchema.parse(event));
   }
 
   private streamRunEvents(runId: string, request: IncomingMessage, response: ServerResponse): void {

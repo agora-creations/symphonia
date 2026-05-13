@@ -3,6 +3,8 @@ import {
   ApprovalResponseRequest,
   ApprovalState,
   ApprovalsResponseSchema,
+  DaemonStatus,
+  DaemonStatusResponseSchema,
   EventsResponseSchema,
   GitHubHealth,
   GitHubHealthResponseSchema,
@@ -27,7 +29,15 @@ import {
   TrackerStatusResponseSchema,
   WorkflowStatus,
   WorkflowStatusResponseSchema,
+  WorkspaceCleanupExecuteRequest,
+  WorkspaceCleanupExecuteResponseSchema,
+  WorkspaceCleanupPlan,
+  WorkspaceCleanupPlanResponseSchema,
+  WorkspaceCleanupResult,
   WorkspaceInfo,
+  WorkspaceInventory,
+  WorkspaceInventoryItem,
+  WorkspaceInventoryResponseSchema,
   WorkspaceResponseSchema,
   WorkspacesResponseSchema,
 } from "@symphonia/types";
@@ -80,6 +90,11 @@ export async function getRuns(): Promise<Run[]> {
   return RunsResponseSchema.parse(response).runs;
 }
 
+export async function getDaemonStatus(): Promise<DaemonStatus> {
+  const response = await request("/daemon/status");
+  return DaemonStatusResponseSchema.parse(response).daemon;
+}
+
 export async function getRunEvents(runId: string): Promise<AgentEvent[]> {
   const response = await request(`/runs/${runId}/events`);
   return EventsResponseSchema.parse(response).events;
@@ -115,14 +130,47 @@ export async function getWorkflowConfig() {
   return WorkflowConfigResponseSchema.parse(response).config;
 }
 
-export async function getWorkspaces(): Promise<WorkspaceInfo[]> {
+export async function getWorkspaces(): Promise<WorkspaceInventoryItem[]> {
   const response = await request("/workspaces");
   return WorkspacesResponseSchema.parse(response).workspaces;
 }
 
+export async function getWorkspaceInventory(): Promise<WorkspaceInventory> {
+  const response = await request("/workspaces");
+  return WorkspacesResponseSchema.parse(response).inventory;
+}
+
+export async function refreshWorkspaceInventory(): Promise<WorkspaceInventory> {
+  const response = await request("/workspaces/refresh", { method: "POST" });
+  return WorkspaceInventoryResponseSchema.parse(response).inventory;
+}
+
 export async function getWorkspace(issueIdentifier: string): Promise<WorkspaceInfo> {
   const response = await request(`/workspaces/${encodeURIComponent(issueIdentifier)}`);
-  return WorkspaceResponseSchema.parse(response).workspace;
+  const workspace = WorkspaceResponseSchema.parse(response).workspace;
+  return "createdNow" in workspace
+    ? workspace
+    : {
+        issueIdentifier: workspace.issueIdentifier,
+        workspaceKey: workspace.workspaceKey,
+        path: workspace.path,
+        createdNow: false,
+        exists: workspace.exists,
+      };
+}
+
+export async function getWorkspaceCleanupPlan(): Promise<WorkspaceCleanupPlan> {
+  const response = await request("/workspaces/cleanup/plan");
+  return WorkspaceCleanupPlanResponseSchema.parse(response).plan;
+}
+
+export async function executeWorkspaceCleanup(input: WorkspaceCleanupExecuteRequest): Promise<WorkspaceCleanupResult> {
+  const response = await request("/workspaces/cleanup/execute", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return WorkspaceCleanupExecuteResponseSchema.parse(response).result;
 }
 
 export async function getProviders(): Promise<ProviderHealth[]> {
