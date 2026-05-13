@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import {
+  ApprovalStateSchema,
   AgentEventSchema,
   HookRunSchema,
   IssueSchema,
@@ -109,6 +110,7 @@ describe("shared schemas", () => {
 
   it("parses valid workflow config, definition, status, workspace, and hook payloads", () => {
     const config = WorkflowConfigSchema.parse({
+      provider: "mock",
       tracker: {
         kind: "mock",
         endpoint: null,
@@ -134,6 +136,7 @@ describe("shared schemas", () => {
       },
       codex: {
         command: "codex app-server",
+        model: null,
         approvalPolicy: null,
         threadSandbox: null,
         turnSandboxPolicy: null,
@@ -159,6 +162,7 @@ describe("shared schemas", () => {
       loadedAt: timestamp,
       error: null,
       effectiveConfigSummary: {
+        defaultProvider: "mock",
         trackerKind: "mock",
         endpoint: null,
         projectSlug: null,
@@ -169,6 +173,7 @@ describe("shared schemas", () => {
         maxTurns: 8,
         hookTimeoutMs: 60000,
         codexCommand: "codex app-server",
+        codexModel: null,
       },
     });
     expect(status.status).toBe("healthy");
@@ -207,6 +212,7 @@ describe("shared schemas", () => {
         workflowPath: "/repo/WORKFLOW.md",
         loadedAt: timestamp,
         configSummary: {
+          defaultProvider: "mock",
           trackerKind: "mock",
           endpoint: null,
           projectSlug: null,
@@ -217,6 +223,7 @@ describe("shared schemas", () => {
           maxTurns: 8,
           hookTimeoutMs: 60000,
           codexCommand: "codex app-server",
+          codexModel: null,
         },
       },
       {
@@ -251,6 +258,58 @@ describe("shared schemas", () => {
         },
       },
       {
+        id: "event-provider",
+        runId: "run-1",
+        type: "provider.started",
+        timestamp,
+        provider: "codex",
+        command: "codex app-server",
+        pid: 123,
+      },
+      {
+        id: "event-codex-thread",
+        runId: "run-1",
+        type: "codex.thread.started",
+        timestamp,
+        threadId: "thread-1",
+        model: null,
+        cwd: "/tmp/symphonia_workspaces/SYM-1",
+      },
+      {
+        id: "event-codex-delta",
+        runId: "run-1",
+        type: "codex.assistant.delta",
+        timestamp,
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "item-1",
+        delta: "Hello",
+      },
+      {
+        id: "event-approval",
+        runId: "run-1",
+        type: "approval.requested",
+        timestamp,
+        approvalId: "approval-1",
+        prompt: "Approve command: pnpm test",
+        approvalType: "command",
+        threadId: "thread-1",
+        turnId: "turn-1",
+        itemId: "item-1",
+        reason: "Run tests",
+        command: "pnpm test",
+        cwd: "/tmp/symphonia_workspaces/SYM-1",
+        availableDecisions: ["accept", "decline", "cancel"],
+      },
+      {
+        id: "event-approval-resolved",
+        runId: "run-1",
+        type: "approval.resolved",
+        timestamp,
+        approvalId: "approval-1",
+        resolution: "accept",
+      },
+      {
         id: "event-prompt",
         runId: "run-1",
         type: "prompt.rendered",
@@ -259,12 +318,37 @@ describe("shared schemas", () => {
       },
     ];
 
-    expect(events.map((event) => AgentEventSchema.parse(event))).toHaveLength(4);
+    expect(events.map((event) => AgentEventSchema.parse(event))).toHaveLength(9);
+  });
+
+  it("parses approval state payloads", () => {
+    const approval = ApprovalStateSchema.parse({
+      approvalId: "approval-1",
+      runId: "run-1",
+      provider: "codex",
+      approvalType: "command",
+      status: "pending",
+      prompt: "Approve command: pnpm test",
+      threadId: "thread-1",
+      turnId: "turn-1",
+      itemId: "item-1",
+      reason: "Run tests",
+      command: "pnpm test",
+      cwd: "/tmp/symphonia_workspaces/SYM-1",
+      fileSummary: null,
+      availableDecisions: ["accept", "acceptForSession", "decline", "cancel"],
+      decision: null,
+      requestedAt: timestamp,
+      resolvedAt: null,
+    });
+
+    expect(approval.status).toBe("pending");
   });
 
   it("rejects invalid workflow-related payloads", () => {
     expect(() =>
       WorkflowConfigSchema.parse({
+        provider: "mock",
         tracker: {
           kind: "mock",
           endpoint: null,
@@ -290,6 +374,7 @@ describe("shared schemas", () => {
         },
         codex: {
           command: "codex app-server",
+          model: null,
           approvalPolicy: null,
           threadSandbox: null,
           turnSandboxPolicy: null,

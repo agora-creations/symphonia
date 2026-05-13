@@ -4,9 +4,11 @@ import { pathToFileURL } from "node:url";
 import {
   applyRunEvent,
   canStartRunForIssue,
+  codexProvider,
   createQueuedRun,
   createRetryRun,
   getMockIssue,
+  mockProviderHealth,
   getMockIssueByIdentifier,
   getWorkflowStatus,
   listMockIssues,
@@ -15,6 +17,7 @@ import {
   nowIso,
   PromptTemplateError,
   renderPromptTemplate,
+  runCodexAgentProvider,
   runMockAgentProvider,
   runHook,
   WorkflowError,
@@ -24,11 +27,15 @@ import {
 } from "@symphonia/core";
 import { EventStore } from "@symphonia/db";
 import {
+  ApprovalResponseRequestSchema,
+  ApprovalState,
   AgentEvent,
   AgentEventSchema,
   HookName,
   HookRun,
   isTerminalRunStatus,
+  ProviderHealth,
+  ProviderId,
   Run,
   RunSchema,
   StartRunRequestSchema,
@@ -47,6 +54,10 @@ type RunRecord = {
   providerStarted: boolean;
 };
 
+type ApprovalRecord = ApprovalState & {
+  resolve?: (decision: "accept" | "acceptForSession" | "decline" | "cancel") => void;
+};
+
 type JsonValue = Record<string, unknown> | unknown[] | string | number | boolean | null;
 
 const defaultPort = 4100;
@@ -60,6 +71,7 @@ export class SymphoniaDaemon {
   private readonly runs = new Map<string, RunRecord>();
   private readonly subscribers = new Map<string, Set<ServerResponse>>();
   private readonly workspaces = new Map<string, WorkspaceInfo>();
+  private readonly approvals = new Map<string, ApprovalRecord>();
   private workflowRuntime: WorkflowRuntime | null = null;
 
   constructor(
@@ -113,6 +125,15 @@ export class SymphoniaDaemon {
         return sendJson(response, 200, { config: status.effectiveConfigSummary });
       }
 
+      if (request.method === "GET" && path === "/providers") {
+        return sendJson(response, 200, { providers: await this.listProviderHealth() });
+      }
+
+      const providerHealthMatch = path.match(/^\/providers\/(mock|codex)\/health$/);
+      if (request.method === "GET" && providerHealthMatch) {
+        return sendJson(response, 200, { provider: await this.getProviderHealth(providerHealthMatch[1]! as ProviderId) });
+      }
+
       if (request.method === "POST" && path === "/workflow/reload") {
         this.workflowRuntime = null;
         return sendJson(response, 200, { workflow: this.refreshWorkflowStatus() });
@@ -126,6 +147,10 @@ export class SymphoniaDaemon {
         return sendJson(response, 200, { runs: this.listRuns() });
       }
 
+      if (request.method === "GET" && path === "/approvals") {
+        return sendJson(response, 200, { approvals: this.listApprovals() });
+      }
+
       if (request.method === "GET" && path === "/workspaces") {
         return sendJson(response, 200, { workspaces: this.listWorkspaces() });
       }
@@ -137,8 +162,22 @@ export class SymphoniaDaemon {
 
       if (request.method === "POST" && path === "/runs") {
         const body = StartRunRequestSchema.parse(await readJsonBody(request));
-        const run = await this.startRun(body.issueId);
+        const run = await this.startRun(body.issueId, body.provider);
         return sendJson(response, 201, { run });
+      }
+
+      const runApprovalsMatch = path.match(/^\/runs\/([^/]+)\/approvals$/);
+      if (request.method === "GET" && runApprovalsMatch) {
+        this.requireRun(runApprovalsMatch[1]!);
+        return sendJson(response, 200, { approvals: this.listApprovals(runApprovalsMatch[1]!) });
+      }
+
+      const approvalResponseMatch = path.match(/^\/approvals\/([^/]+)\/respond$/);
+      if (request.method === "POST" && approvalResponseMatch) {
+        const body = ApprovalResponseRequestSchema.parse(await readJsonBody(request));
+        return sendJson(response, 200, {
+          approval: await this.respondApproval(decodeURIComponent(approvalResponseMatch[1]!), body.decision),
+        });
       }
 
       const runEventsStreamMatch = path.match(/^\/runs\/([^/]+)\/events\/stream$/);
@@ -184,7 +223,7 @@ export class SymphoniaDaemon {
     }
   }
 
-  async startRun(issueId: string): Promise<Run> {
+  async startRun(issueId: string, requestedProvider?: ProviderId): Promise<Run> {
     const issue = getMockIssue(issueId);
     if (!issue) {
       throw new ApiError(404, `Unknown issue: ${issueId}`);
@@ -195,10 +234,12 @@ export class SymphoniaDaemon {
     }
 
     const timestamp = nowIso();
+    const provider = requestedProvider ?? this.getDefaultProvider();
     const run = createQueuedRun({
       id: randomUUID(),
       issueId: issue.id,
       issueIdentifier: issue.identifier,
+      provider,
       timestamp,
     });
     const attempt = this.countRunsForIssue(issue.id) + 1;
@@ -275,6 +316,7 @@ export class SymphoniaDaemon {
       return record.run;
     }
 
+    this.cancelPendingApprovalsForRun(runId);
     record.controller.abort();
     await this.emit(record, {
       id: randomUUID(),
@@ -367,14 +409,29 @@ export class SymphoniaDaemon {
       if (record.controller.signal.aborted) return;
 
       record.providerStarted = true;
-      await runMockAgentProvider({
-        run: record.run,
-        issue,
-        attempt: record.attempt,
-        signal: record.controller.signal,
-        delayMs: Number(process.env.SYMPHONIA_MOCK_DELAY_MS ?? 450),
-        emit: (event) => this.emit(record, event),
-      });
+      if (record.run.provider === "codex") {
+        await runCodexAgentProvider({
+          run: record.run,
+          issue,
+          attempt: record.attempt,
+          workspacePath: workspace.path,
+          renderedPrompt: prompt,
+          workflowConfig: runtime.config,
+          codexConfig: runtime.config.codex,
+          signal: record.controller.signal,
+          emit: (event) => this.emit(record, event),
+          requestApproval: (request) => this.requestApproval(record, request),
+        });
+      } else {
+        await runMockAgentProvider({
+          run: record.run,
+          issue,
+          attempt: record.attempt,
+          signal: record.controller.signal,
+          delayMs: Number(process.env.SYMPHONIA_MOCK_DELAY_MS ?? 450),
+          emit: (event) => this.emit(record, event),
+        });
+      }
     } catch (error) {
       if (error instanceof MockRunCancelledError || record.controller.signal.aborted) {
         return;
@@ -479,6 +536,132 @@ export class SymphoniaDaemon {
       .at(-1);
 
     return promptEvent?.type === "prompt.rendered" ? promptEvent.prompt : null;
+  }
+
+  async listProviderHealth(): Promise<ProviderHealth[]> {
+    return [mockProviderHealth, await this.getProviderHealth("codex")];
+  }
+
+  async getProviderHealth(providerId: ProviderId): Promise<ProviderHealth> {
+    if (providerId === "mock") return mockProviderHealth;
+    return codexProvider.health(this.getCodexConfigForHealth());
+  }
+
+  listApprovals(runId?: string): ApprovalState[] {
+    return [...this.approvals.values()]
+      .filter((approval) => !runId || approval.runId === runId)
+      .map((approval) => this.serializeApproval(approval))
+      .sort((a, b) => a.requestedAt.localeCompare(b.requestedAt));
+  }
+
+  private requestApproval(
+    record: RunRecord,
+    request: {
+      approvalId: string;
+      provider: ProviderId;
+      approvalType: ApprovalState["approvalType"];
+      threadId: string | null;
+      turnId: string | null;
+      itemId: string | null;
+      prompt: string;
+      reason: string | null;
+      command: string | null;
+      cwd: string | null;
+      fileSummary: string | null;
+      availableDecisions: Array<"accept" | "acceptForSession" | "decline" | "cancel">;
+    },
+  ): Promise<"accept" | "acceptForSession" | "decline" | "cancel"> {
+    if (record.controller.signal.aborted) return Promise.resolve("cancel");
+
+    return new Promise((resolve) => {
+      const approval: ApprovalRecord = {
+        approvalId: request.approvalId,
+        runId: record.run.id,
+        provider: request.provider,
+        approvalType: request.approvalType,
+        status: "pending",
+        prompt: request.prompt,
+        threadId: request.threadId,
+        turnId: request.turnId,
+        itemId: request.itemId,
+        reason: request.reason,
+        command: request.command,
+        cwd: request.cwd,
+        fileSummary: request.fileSummary,
+        availableDecisions: request.availableDecisions,
+        decision: null,
+        requestedAt: nowIso(),
+        resolvedAt: null,
+        resolve,
+      };
+      this.approvals.set(request.approvalId, approval);
+
+      record.controller.signal.addEventListener(
+        "abort",
+        () => {
+          void this.resolveApproval(request.approvalId, "cancel");
+        },
+        { once: true },
+      );
+    });
+  }
+
+  private async respondApproval(approvalId: string, decision: ApprovalState["decision"]): Promise<ApprovalState> {
+    if (decision !== "accept" && decision !== "acceptForSession" && decision !== "decline" && decision !== "cancel") {
+      throw new ApiError(400, `Unsupported approval decision: ${decision ?? "null"}`);
+    }
+    const resolved = await this.resolveApproval(approvalId, decision);
+    if (!resolved) throw new ApiError(404, `Unknown approval: ${approvalId}`);
+    return resolved;
+  }
+
+  private async resolveApproval(
+    approvalId: string,
+    decision: "accept" | "acceptForSession" | "decline" | "cancel",
+  ): Promise<ApprovalState | null> {
+    const approval = this.approvals.get(approvalId);
+    if (!approval) return null;
+    if (approval.status === "resolved") {
+      return this.serializeApproval(approval);
+    }
+
+    approval.status = "resolved";
+    approval.decision = decision;
+    approval.resolvedAt = nowIso();
+    const resolve = approval.resolve;
+    approval.resolve = undefined;
+    resolve?.(decision);
+    return this.serializeApproval(approval);
+  }
+
+  private serializeApproval(approval: ApprovalRecord): ApprovalState {
+    return {
+      approvalId: approval.approvalId,
+      runId: approval.runId,
+      provider: approval.provider,
+      approvalType: approval.approvalType,
+      status: approval.status,
+      prompt: approval.prompt,
+      threadId: approval.threadId,
+      turnId: approval.turnId,
+      itemId: approval.itemId,
+      reason: approval.reason,
+      command: approval.command,
+      cwd: approval.cwd,
+      fileSummary: approval.fileSummary,
+      availableDecisions: approval.availableDecisions,
+      decision: approval.decision,
+      requestedAt: approval.requestedAt,
+      resolvedAt: approval.resolvedAt,
+    };
+  }
+
+  private cancelPendingApprovalsForRun(runId: string): void {
+    for (const approval of this.approvals.values()) {
+      if (approval.runId === runId && approval.status === "pending") {
+        void this.resolveApproval(approval.approvalId, "cancel");
+      }
+    }
   }
 
   private async executeHook(
@@ -600,6 +783,36 @@ export class SymphoniaDaemon {
 
   private countRunsForIssue(issueId: string): number {
     return this.listRuns().filter((run) => run.issueId === issueId).length;
+  }
+
+  private getDefaultProvider(): ProviderId {
+    const envProvider = process.env.SYMPHONIA_PROVIDER;
+    if (envProvider === "mock" || envProvider === "codex") return envProvider;
+
+    try {
+      const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+      return runtime.config.provider;
+    } catch {
+      return "mock";
+    }
+  }
+
+  private getCodexConfigForHealth() {
+    try {
+      const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+      return runtime.config.codex;
+    } catch {
+      return {
+        command: process.env.SYMPHONIA_CODEX_COMMAND ?? "codex app-server",
+        model: null,
+        approvalPolicy: null,
+        threadSandbox: null,
+        turnSandboxPolicy: null,
+        turnTimeoutMs: 3600000,
+        readTimeoutMs: 5000,
+        stallTimeoutMs: 300000,
+      };
+    }
   }
 
   private requireRecord(runId: string): RunRecord {

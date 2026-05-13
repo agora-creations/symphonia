@@ -19,6 +19,7 @@ dist-ssr
 .tanstack/**
 .nitro
 *.local
+*.tsbuildinfo
 Screenshot *.png
 
 # Wrangler / Cloudflare
@@ -26,6 +27,8 @@ Screenshot *.png
 .dev.vars
 
 # Legacy root scaffold retained locally
+.prettierignore
+.prettierrc
 /bun.lock
 /components.json
 /vite.config.ts

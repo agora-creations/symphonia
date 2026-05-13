@@ -103,12 +103,49 @@ describe("workflow config resolution", () => {
   it("applies defaults for mock tracker config without credentials", () => {
     const config = resolveWorkflowConfig(definition({ tracker: { kind: "mock" } }));
 
+    expect(config.provider).toBe("mock");
     expect(config.tracker.kind).toBe("mock");
     expect(config.tracker.apiKey).toBeNull();
     expect(config.polling.intervalMs).toBe(30000);
     expect(config.agent.maxConcurrentAgents).toBe(10);
     expect(config.codex.command).toBe("codex app-server");
     expect(config.workspace.root).toContain("symphonia_workspaces");
+  });
+
+  it("resolves provider and codex settings from workflow config", () => {
+    const config = resolveWorkflowConfig(
+      definition({
+        provider: "codex",
+        tracker: { kind: "mock" },
+        codex: {
+          command: "codex app-server",
+          model: "gpt-test",
+          approval_policy: "on-request",
+          turn_sandbox_policy: "workspaceWrite",
+        },
+      }),
+    );
+
+    expect(config.provider).toBe("codex");
+    expect(config.codex.model).toBe("gpt-test");
+    expect(config.codex.approvalPolicy).toBe("on-request");
+    expect(config.codex.turnSandboxPolicy).toBe("workspaceWrite");
+  });
+
+  it("supports provider and codex command environment overrides", () => {
+    process.env.SYMPHONIA_PROVIDER = "codex";
+    process.env.SYMPHONIA_CODEX_COMMAND = "node fake-app-server.mjs";
+
+    const config = resolveWorkflowConfig(definition({ tracker: { kind: "mock" }, provider: "mock" }));
+
+    expect(config.provider).toBe("codex");
+    expect(config.codex.command).toBe("node fake-app-server.mjs");
+  });
+
+  it("rejects unsupported providers", () => {
+    expect(() => resolveWorkflowConfig(definition({ tracker: { kind: "mock" }, provider: "claude" }))).toThrow(
+      "Unsupported provider",
+    );
   });
 
   it("resolves env vars for api keys and workspace roots", () => {
@@ -163,6 +200,7 @@ describe("workflow config resolution", () => {
 describe("prompt rendering", () => {
   const issue = mockIssue();
   const workflow = {
+    defaultProvider: "mock" as const,
     trackerKind: "mock" as const,
     endpoint: null,
     projectSlug: null,
@@ -173,6 +211,7 @@ describe("prompt rendering", () => {
     maxTurns: 8,
     hookTimeoutMs: 30000,
     codexCommand: "codex app-server",
+    codexModel: null,
   };
 
   it("renders issue fields, labels, and attempt", () => {

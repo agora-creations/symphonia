@@ -3,6 +3,7 @@ import { homedir, tmpdir } from "node:os";
 import { dirname, isAbsolute, join, resolve } from "node:path";
 import { parse as parseYaml } from "yaml";
 import {
+  ProviderId,
   TrackerKind,
   WorkflowConfig,
   WorkflowConfigSchema,
@@ -26,6 +27,7 @@ export type WorkflowErrorCode =
   | "workflow_agent_max_turns_invalid"
   | "workflow_agent_max_concurrent_invalid"
   | "workflow_codex_command_invalid"
+  | "workflow_provider_unsupported"
   | "workflow_config_invalid";
 
 export class WorkflowError extends Error {
@@ -173,11 +175,12 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
   const hooksRaw = readObject(raw, "hooks");
   const agentRaw = readObject(raw, "agent");
   const codexRaw = readObject(raw, "codex");
+  const provider = resolveProvider(raw, agentRaw, definition.workflowPath);
 
   const hookTimeoutMs = readPositiveInteger(hooksRaw, 60000, "timeoutMs", "timeout_ms");
   const maxTurns = readPositiveInteger(agentRaw, 20, "maxTurns", "max_turns");
   const maxConcurrentAgents = readPositiveInteger(agentRaw, 10, "maxConcurrentAgents", "max_concurrent_agents");
-  const codexCommand = readString(codexRaw, "command") ?? "codex app-server";
+  const codexCommand = process.env.SYMPHONIA_CODEX_COMMAND ?? readString(codexRaw, "command") ?? "codex app-server";
 
   if (hookTimeoutMs <= 0) {
     throw new WorkflowError("workflow_hook_timeout_invalid", "hooks.timeout_ms must be positive.", definition.workflowPath);
@@ -205,6 +208,7 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
   );
 
   const config = {
+    provider,
     tracker: {
       kind: trackerKind,
       endpoint,
@@ -238,6 +242,7 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
     },
     codex: {
       command: codexCommand,
+      model: readString(codexRaw, "model") ?? null,
       approvalPolicy: readString(codexRaw, "approvalPolicy", "approval_policy") ?? null,
       threadSandbox: readString(codexRaw, "threadSandbox", "thread_sandbox") ?? null,
       turnSandboxPolicy: readString(codexRaw, "turnSandboxPolicy", "turn_sandbox_policy") ?? null,
@@ -260,6 +265,7 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
 
 export function summarizeWorkflowConfig(config: WorkflowConfig): WorkflowConfigSummary {
   return {
+    defaultProvider: config.provider,
     trackerKind: config.tracker.kind,
     endpoint: config.tracker.endpoint,
     projectSlug: config.tracker.projectSlug,
@@ -270,6 +276,7 @@ export function summarizeWorkflowConfig(config: WorkflowConfig): WorkflowConfigS
     maxTurns: config.agent.maxTurns,
     hookTimeoutMs: config.hooks.timeoutMs,
     codexCommand: config.codex.command,
+    codexModel: config.codex.model,
   };
 }
 
@@ -339,6 +346,16 @@ function resolveEnvReference(value: string | undefined): string | null {
   if (!value.startsWith("$")) return value;
   const name = value.startsWith("${") && value.endsWith("}") ? value.slice(2, -1) : value.slice(1);
   return process.env[name] ?? null;
+}
+
+function resolveProvider(
+  raw: Record<string, unknown>,
+  agentRaw: Record<string, unknown>,
+  workflowPath: string,
+): ProviderId {
+  const value = process.env.SYMPHONIA_PROVIDER ?? readString(raw, "provider") ?? readString(agentRaw, "provider") ?? "mock";
+  if (value === "mock" || value === "codex") return value;
+  throw new WorkflowError("workflow_provider_unsupported", `Unsupported provider: ${value}.`, workflowPath);
 }
 
 function readObject(record: Record<string, unknown>, key: string): Record<string, unknown> {

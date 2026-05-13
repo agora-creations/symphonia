@@ -38,6 +38,9 @@ export const RunStatusSchema = z.enum([
 ]);
 export type RunStatus = z.infer<typeof RunStatusSchema>;
 
+export const ProviderIdSchema = z.enum(["mock", "codex"]);
+export type ProviderId = z.infer<typeof ProviderIdSchema>;
+
 export const terminalRunStatuses: readonly RunStatus[] = [
   "succeeded",
   "failed",
@@ -55,7 +58,7 @@ export const RunSchema = z.object({
   issueId: z.string().min(1),
   issueIdentifier: z.string().min(1),
   status: RunStatusSchema,
-  provider: z.string().min(1),
+  provider: ProviderIdSchema,
   startedAt: isoDateTime.nullable(),
   endedAt: isoDateTime.nullable(),
   error: z.string().nullable(),
@@ -89,16 +92,31 @@ export const ToolCallEventSchema = BaseAgentEventSchema.extend({
   output: z.string().optional(),
 });
 
+export const ApprovalDecisionSchema = z.enum(["accept", "acceptForSession", "decline", "cancel", "approved", "rejected"]);
+export type ApprovalDecision = z.infer<typeof ApprovalDecisionSchema>;
+
+export const ApprovalTypeSchema = z.enum(["command", "file_change", "unknown"]);
+export type ApprovalType = z.infer<typeof ApprovalTypeSchema>;
+
 export const ApprovalRequestedEventSchema = BaseAgentEventSchema.extend({
   type: z.literal("approval.requested"),
   approvalId: z.string().min(1),
   prompt: z.string().min(1),
+  approvalType: ApprovalTypeSchema.optional(),
+  threadId: z.string().min(1).nullable().optional(),
+  turnId: z.string().min(1).nullable().optional(),
+  itemId: z.string().min(1).nullable().optional(),
+  reason: z.string().nullable().optional(),
+  command: z.string().nullable().optional(),
+  cwd: z.string().nullable().optional(),
+  fileSummary: z.string().nullable().optional(),
+  availableDecisions: z.array(ApprovalDecisionSchema).optional(),
 });
 
 export const ApprovalResolvedEventSchema = BaseAgentEventSchema.extend({
   type: z.literal("approval.resolved"),
   approvalId: z.string().min(1),
-  resolution: z.enum(["approved", "rejected"]),
+  resolution: ApprovalDecisionSchema,
 });
 
 export const UsageEventSchema = BaseAgentEventSchema.extend({
@@ -163,6 +181,7 @@ export type AgentConfig = z.infer<typeof AgentConfigSchema>;
 
 export const CodexConfigSchema = z.object({
   command: z.string().min(1),
+  model: z.string().min(1).nullable(),
   approvalPolicy: z.string().min(1).nullable(),
   threadSandbox: z.string().min(1).nullable(),
   turnSandboxPolicy: z.string().min(1).nullable(),
@@ -173,6 +192,7 @@ export const CodexConfigSchema = z.object({
 export type CodexConfig = z.infer<typeof CodexConfigSchema>;
 
 export const WorkflowConfigSchema = z.object({
+  provider: ProviderIdSchema,
   tracker: TrackerConfigSchema,
   polling: PollingConfigSchema,
   workspace: WorkspaceConfigSchema,
@@ -191,6 +211,7 @@ export const WorkflowDefinitionSchema = z.object({
 export type WorkflowDefinition = z.infer<typeof WorkflowDefinitionSchema>;
 
 export const WorkflowConfigSummarySchema = z.object({
+  defaultProvider: ProviderIdSchema,
   trackerKind: TrackerKindSchema,
   endpoint: z.string().min(1).nullable(),
   projectSlug: z.string().min(1).nullable(),
@@ -201,6 +222,7 @@ export const WorkflowConfigSummarySchema = z.object({
   maxTurns: z.number().int().positive(),
   hookTimeoutMs: z.number().int().positive(),
   codexCommand: z.string().min(1),
+  codexModel: z.string().min(1).nullable(),
 });
 export type WorkflowConfigSummary = z.infer<typeof WorkflowConfigSummarySchema>;
 
@@ -280,6 +302,82 @@ export const PromptRenderedEventSchema = BaseAgentEventSchema.extend({
   prompt: z.string(),
 });
 
+export const ProviderStartedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("provider.started"),
+  provider: ProviderIdSchema,
+  command: z.string().min(1),
+  pid: z.number().int().positive().nullable(),
+});
+
+export const ProviderStderrEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("provider.stderr"),
+  provider: ProviderIdSchema,
+  message: z.string().min(1),
+});
+
+export const CodexThreadStartedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("codex.thread.started"),
+  threadId: z.string().min(1),
+  model: z.string().min(1).nullable().optional(),
+  cwd: z.string().min(1).nullable().optional(),
+});
+
+export const CodexTurnStartedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("codex.turn.started"),
+  threadId: z.string().min(1),
+  turnId: z.string().min(1),
+  status: z.string().min(1),
+});
+
+export const CodexTurnCompletedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("codex.turn.completed"),
+  threadId: z.string().min(1),
+  turnId: z.string().min(1),
+  status: z.string().min(1),
+  error: z.string().nullable().optional(),
+});
+
+export const CodexItemStartedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("codex.item.started"),
+  threadId: z.string().min(1),
+  turnId: z.string().min(1),
+  itemId: z.string().min(1),
+  itemType: z.string().min(1),
+  summary: z.string(),
+});
+
+export const CodexItemCompletedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("codex.item.completed"),
+  threadId: z.string().min(1),
+  turnId: z.string().min(1),
+  itemId: z.string().min(1),
+  itemType: z.string().min(1),
+  summary: z.string(),
+});
+
+export const CodexAssistantDeltaEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("codex.assistant.delta"),
+  threadId: z.string().min(1),
+  turnId: z.string().min(1),
+  itemId: z.string().min(1),
+  delta: z.string(),
+});
+
+export const CodexUsageEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("codex.usage"),
+  threadId: z.string().min(1),
+  turnId: z.string().min(1),
+  inputTokens: z.number().int().nonnegative(),
+  outputTokens: z.number().int().nonnegative(),
+  totalTokens: z.number().int().nonnegative(),
+});
+
+export const CodexErrorEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("codex.error"),
+  message: z.string().min(1),
+  code: z.union([z.string(), z.number()]).nullable().optional(),
+});
+
 export const AgentEventSchema = z.discriminatedUnion("type", [
   RunStatusEventSchema,
   AgentMessageEventSchema,
@@ -296,13 +394,29 @@ export const AgentEventSchema = z.discriminatedUnion("type", [
   HookFailedEventSchema,
   HookTimedOutEventSchema,
   PromptRenderedEventSchema,
+  ProviderStartedEventSchema,
+  ProviderStderrEventSchema,
+  CodexThreadStartedEventSchema,
+  CodexTurnStartedEventSchema,
+  CodexTurnCompletedEventSchema,
+  CodexItemStartedEventSchema,
+  CodexItemCompletedEventSchema,
+  CodexAssistantDeltaEventSchema,
+  CodexUsageEventSchema,
+  CodexErrorEventSchema,
 ]);
 export type AgentEvent = z.infer<typeof AgentEventSchema>;
 
 export const StartRunRequestSchema = z.object({
   issueId: z.string().min(1),
+  provider: ProviderIdSchema.optional(),
 });
 export type StartRunRequest = z.infer<typeof StartRunRequestSchema>;
+
+export const ApprovalResponseRequestSchema = z.object({
+  decision: ApprovalDecisionSchema,
+});
+export type ApprovalResponseRequest = z.infer<typeof ApprovalResponseRequestSchema>;
 
 export const IssuesResponseSchema = z.object({
   issues: z.array(IssueSchema),
@@ -323,6 +437,53 @@ export const EventsResponseSchema = z.object({
   events: z.array(AgentEventSchema),
 });
 export type EventsResponse = z.infer<typeof EventsResponseSchema>;
+
+export const ProviderHealthSchema = z.object({
+  id: ProviderIdSchema,
+  displayName: z.string().min(1),
+  available: z.boolean(),
+  command: z.string().min(1).nullable(),
+  version: z.string().nullable(),
+  error: z.string().nullable(),
+  hint: z.string().nullable(),
+});
+export type ProviderHealth = z.infer<typeof ProviderHealthSchema>;
+
+export const ProvidersResponseSchema = z.object({
+  providers: z.array(ProviderHealthSchema),
+});
+export type ProvidersResponse = z.infer<typeof ProvidersResponseSchema>;
+
+export const ProviderHealthResponseSchema = z.object({
+  provider: ProviderHealthSchema,
+});
+export type ProviderHealthResponse = z.infer<typeof ProviderHealthResponseSchema>;
+
+export const ApprovalStateSchema = z.object({
+  approvalId: z.string().min(1),
+  runId: z.string().min(1),
+  provider: ProviderIdSchema,
+  approvalType: ApprovalTypeSchema,
+  status: z.enum(["pending", "resolved"]),
+  prompt: z.string().min(1),
+  threadId: z.string().min(1).nullable(),
+  turnId: z.string().min(1).nullable(),
+  itemId: z.string().min(1).nullable(),
+  reason: z.string().nullable(),
+  command: z.string().nullable(),
+  cwd: z.string().nullable(),
+  fileSummary: z.string().nullable(),
+  availableDecisions: z.array(ApprovalDecisionSchema),
+  decision: ApprovalDecisionSchema.nullable(),
+  requestedAt: isoDateTime,
+  resolvedAt: isoDateTime.nullable(),
+});
+export type ApprovalState = z.infer<typeof ApprovalStateSchema>;
+
+export const ApprovalsResponseSchema = z.object({
+  approvals: z.array(ApprovalStateSchema),
+});
+export type ApprovalsResponse = z.infer<typeof ApprovalsResponseSchema>;
 
 export const WorkflowStatusResponseSchema = z.object({
   workflow: WorkflowStatusSchema,

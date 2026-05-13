@@ -1,4 +1,6 @@
 ---
+provider: mock
+
 tracker:
   kind: mock
   active_states:
@@ -29,6 +31,9 @@ agent:
 
 codex:
   command: "codex app-server"
+  model: null
+  approval_policy: "on-request"
+  turn_sandbox_policy: "workspaceWrite"
   turn_timeout_ms: 3600000
   read_timeout_ms: 5000
   stall_timeout_ms: 300000

@@ -1,10 +1,10 @@
-import { AgentEvent, isTerminalRunStatus, Run, RunStatus } from "@symphonia/types";
+import { AgentEvent, isTerminalRunStatus, ProviderId, Run, RunStatus } from "@symphonia/types";
 
 export function createQueuedRun(input: {
   id: string;
   issueId: string;
   issueIdentifier: string;
-  provider?: string;
+  provider?: ProviderId;
   timestamp: string;
 }): Run {
   return {

@@ -36,9 +36,9 @@ export function AppSidebar() {
       <div className="flex items-center justify-between gap-2 px-3 py-2.5 border-b">
         <button className="flex items-center gap-2 rounded-md px-1.5 py-1 hover:bg-sidebar-accent transition-colors">
           <span className="grid h-6 w-6 place-items-center rounded-md bg-foreground text-background text-xs font-bold">
-            C
+            S
           </span>
-          <span className="text-sm font-medium">Circle</span>
+          <span className="text-sm font-medium">Symphonia</span>
           <ChevronDown className="h-3.5 w-3.5 text-muted-foreground" />
         </button>
         <div className="flex items-center gap-0.5">

@@ -1,131 +1,173 @@
 # Symphonia Goal Progress
 
-## Milestone 2 Objective
+## Milestone 3 Objective
 
-Implement the repo-owned `WORKFLOW.md` system and real local workspace lifecycle while preserving the Milestone 1 mock tracker/provider loop.
+Implement a real Codex app-server provider while preserving the mock tracker and `WORKFLOW.md` runtime. A user can choose mock or Codex from the UI, start a Codex-backed run, see streamed and persisted Codex events, respond to approvals from the UI, interrupt active turns, retry terminal Codex runs, and keep validation passing without requiring real Codex for automated tests.
 
-## Current Checkpoint
+## Starting Repo State
 
-Checkpoint 12 - documentation and final validation complete.
+- Branch: `main`
+- Starting commit: `1bf679d` (`New commit`)
+- Working tree at start: clean.
+- Milestone 1 and Milestone 2 behavior were present and committed.
+- `WORKFLOW.md` existed at the repo root with mock tracker config and harmless local hooks.
+- Current local Codex CLI: `codex-cli 0.130.0`.
 
-## Completed Work
+## External Dependency Notes
 
-- Inspected the Milestone 1 baseline: `README.md`, `GOAL_PROGRESS.md`, root scripts, workspace config, daemon, web app, shared types, core package, and SQLite package.
-- Added shared zod schemas and exported TypeScript types for workflow definitions, workflow config, workflow status, workspace info, hook runs, prompt responses, workspace responses, and workflow event variants.
-- Extended persisted/SSE agent events with `workflow.loaded`, `workflow.invalid`, `workspace.ready`, `hook.started`, `hook.succeeded`, `hook.failed`, `hook.timed_out`, and `prompt.rendered`.
-- Added `yaml` to `@symphonia/core`.
-- Implemented `WORKFLOW.md` discovery, including upward repo-root discovery when the daemon is launched from `apps/daemon`.
-- Implemented YAML front matter parsing, prompt-only files, typed workflow errors, empty prompt bodies, and unknown-key tolerance.
-- Implemented workflow config resolution with defaults, mock/linear validation, env var expansion, `~` expansion, relative workspace root resolution, and secret-safe summaries.
-- Implemented strict `{{ path.to.value }}` prompt rendering with unknown variable/helper failures and a fallback prompt.
-- Implemented per-issue workspace manager with deterministic key sanitization, root containment checks, creation, reuse, listing, and future before-remove target support.
-- Implemented POSIX hook runner with `sh -lc`, timeout handling, abort handling, stdout/stderr capture, exit code capture, and structured hook results.
-- Wired workflow, workspace, prompt, hooks, and existing mock provider into the daemon run lifecycle.
-- Added daemon APIs: `GET /workflow/status`, `GET /workflow/config`, `POST /workflow/reload`, `GET /workspaces`, `GET /workspaces/:issueIdentifier`, and `GET /runs/:runId/prompt`.
-- Preserved run concurrency protection, stop, retry, SSE streaming, and append-only SQLite event persistence.
-- Updated the Next.js UI with workflow health, a workflow panel, reload button, workspace path, rendered prompt preview, hook log details, and new timeline event labels.
-- Added root `WORKFLOW.md` configured for the mock tracker with harmless local hooks.
-- Updated README with Milestone 2 behavior, config format, hook safety, prompt variables, endpoints, validation, and limitations.
-- Added `.symphonia` and a local legacy scaffold copy to `.gitignore`.
+- Official Codex app-server docs confirm default stdio transport uses newline-delimited JSON.
+- The app-server protocol uses JSON-RPC-style requests, responses, and notifications with the `jsonrpc` header omitted on the wire.
+- Clients send `initialize`, then `initialized`, before later requests.
+- Threads start with `thread/start`; work starts with `turn/start`; active turns can be interrupted with `turn/interrupt`.
+- App-server streams notifications including turn, item, assistant delta, approval, and usage events.
+- Approval prompts arrive as server-initiated requests such as `item/commandExecution/requestApproval` and `item/fileChange/requestApproval`, and the client responds on the same JSON-RPC id.
+- `codex app-server generate-ts --experimental --out /private/tmp/symphonia-codex-protocol` succeeded locally for protocol inspection; generated files are version-specific and are not required for the normal test suite.
+
+## Completed Checkpoints
+
+1. Provider abstraction cleanup.
+2. Codex provider config and provider selection.
+3. Protocol layer for the app-server JSON-RPC subset.
+4. Stdio JSONL app-server client with fake server tests.
+5. Codex event mapping into Symphonia events.
+6. Daemon approval registry and approval endpoints.
+7. Daemon Codex run lifecycle wiring.
+8. Web provider controls, health, Codex timeline, and approvals.
+9. Provider health diagnostics.
+10. Real Codex manual validation documentation.
+11. Automated test coverage.
+12. Final validation and smoke checks.
 
 ## Implemented Files and Directories
 
+- `.gitignore`
 - `WORKFLOW.md`
-- `packages/types/src/index.ts`
-- `packages/types/test/schemas.test.ts`
-- `packages/core/src/workflow.ts`
-- `packages/core/src/prompt-template.ts`
-- `packages/core/src/workspace-manager.ts`
-- `packages/core/src/hook-runner.ts`
-- `packages/core/test/workflow.test.ts`
+- `README.md`
 - `apps/daemon/src/daemon.ts`
 - `apps/daemon/test/http.test.ts`
-- `apps/web/app/page.tsx`
+- `apps/web/components/app-sidebar.tsx`
+- `apps/web/components/issues-view.tsx`
 - `apps/web/lib/api.ts`
-- `README.md`
-- `GOAL_PROGRESS.md`
+- `packages/core/src/provider.ts`
+- `packages/core/src/command-utils.ts`
+- `packages/core/src/codex-protocol.ts`
+- `packages/core/src/codex-event-mapper.ts`
+- `packages/core/src/codex-client.ts`
+- `packages/core/src/codex-provider.ts`
+- `packages/core/src/workflow.ts`
+- `packages/core/src/run-state.ts`
+- `packages/core/src/index.ts`
+- `packages/core/test/codex-protocol.test.ts`
+- `packages/core/test/codex-client.test.ts`
+- `packages/core/test/workflow.test.ts`
+- `packages/core/package.json`
+- `packages/types/src/index.ts`
+- `packages/types/test/schemas.test.ts`
+- `pnpm-lock.yaml`
+
+## Completed Work
+
+- Added shared provider, health, approval, Codex config, and Codex event schemas.
+- Added workflow provider resolution through `provider`, `agent.provider`, `SYMPHONIA_PROVIDER`, and `SYMPHONIA_CODEX_COMMAND`.
+- Added `codex.model` support and safe config summaries.
+- Added provider contract types for mock and Codex providers.
+- Added command parsing and Codex command health checks.
+- Added a minimal app-server JSON-RPC protocol layer.
+- Added Codex notification/request mapping into Symphonia timeline and approval events.
+- Added a stdio JSONL Codex app-server client.
+- Added a Codex provider wrapper that launches app-server, streams events, maps failures, and respects abort.
+- Wired daemon `POST /runs` provider selection, provider-preserving retry, Codex lifecycle execution, provider health endpoints, and approval endpoints.
+- Added fake app-server tests for initialize, thread/start, turn/start, assistant deltas, usage, approvals, JSON-RPC errors, malformed JSON, process exit handling, and interrupt cleanup.
+- Updated the web UI with provider selection, provider health, workflow panel status, Codex metadata, rendered prompt, hook output, stderr/error diagnostics, and approval response controls.
+- Kept mock provider behavior available and deterministic.
+- Changed remaining visible app branding from Circle to Symphonia.
 
 ## Validation Commands Run
 
-- `pnpm --filter @symphonia/types test` - succeeded; 7 tests passed.
-- `pnpm --filter @symphonia/types build` - succeeded.
-- `pnpm --filter @symphonia/core test` - succeeded; 33 tests passed.
-- `pnpm --filter @symphonia/core build` - succeeded.
-- `pnpm --filter @symphonia/daemon test` - succeeded; 5 tests passed.
-- `pnpm --filter @symphonia/daemon build` - succeeded.
-- `pnpm --filter @symphonia/web build` - succeeded.
-- `pnpm --filter @symphonia/db test` - succeeded; 3 tests passed.
-- `pnpm test` - succeeded; all package and daemon tests passed.
-- `pnpm lint` - succeeded.
-- `pnpm build` - succeeded. Next.js still emits the existing non-blocking warning that the Next ESLint plugin is not detected in the root flat ESLint config.
-- `pnpm dev` - succeeded; daemon started on `http://localhost:4100`, web started on `http://localhost:3001` because port `3000` was already occupied by another process.
+- `git status --short --branch` - clean on `main...origin/main` before Milestone 3 edits.
+- `codex --version` - succeeded; local CLI is `codex-cli 0.130.0`.
+- `codex app-server --help` - succeeded.
+- `codex app-server generate-ts --experimental --out /private/tmp/symphonia-codex-protocol` - succeeded.
+- `pnpm --filter @symphonia/types test` - passed; 8 tests.
+- `pnpm --filter @symphonia/types build` - passed.
+- `pnpm --filter @symphonia/core test` - passed; 47 tests.
+- `pnpm --filter @symphonia/core build` - passed.
+- `pnpm --filter @symphonia/daemon build` - passed.
+- `pnpm --filter @symphonia/daemon test` - passed; 10 tests.
+- `pnpm --filter @symphonia/web lint` - passed.
+- `pnpm test` - passed.
+- `pnpm lint` - passed.
+- `pnpm build` - passed.
+- `pnpm dev` - started daemon on `http://localhost:4100` and web on `http://localhost:3001` because local port `3000` was already occupied.
 
-## Manual Validation Results
+## Smoke Validation Results
 
-- `GET /healthz` returned healthy daemon status.
-- `GET /workflow/status` returned `healthy` with root `WORKFLOW.md` and workspace root `.symphonia/workspaces`.
-- Web app responded with HTTP 200 on the available Next.js dev port.
-- Starting `SYM-1` created `.symphonia/workspaces/SYM-1`.
-- `GET /runs/:runId/events` showed `workflow.loaded`, `workspace.ready`, `prompt.rendered`, hook events, mock provider events, `succeeded`, and `afterRun` hook logs.
-- `GET /runs/:runId/prompt` returned the rendered prompt with issue data.
-- SSE endpoint replayed and streamed `agent-event` records for an active run; the `curl --max-time` command exited with code 28 after receiving expected events.
-- Refresh-style validation via repeated `GET /runs/:runId/events` confirmed persisted timeline events remained available.
-- `SYM-6` failed deterministically on first attempt and succeeded after `POST /runs/:runId/retry`.
-- A slower mock run returned `cancelled` from `POST /runs/:runId/stop`; retry of that cancelled run queued a new attempt.
-- Temporary prompt edit plus `POST /workflow/reload` produced a rendered prompt containing the edit.
-- Temporary invalid YAML plus `POST /workflow/reload` returned `invalid` workflow status without daemon crash.
-- Restoring `WORKFLOW.md` plus `POST /workflow/reload` returned `healthy`.
+- `GET /healthz` returned `ok`.
+- `GET /workflow/status` returned healthy, root `WORKFLOW.md`, default provider `mock`, workspace root `.symphonia/workspaces`, and Codex command `codex app-server`.
+- `GET /providers` returned mock available and Codex available in this environment.
+- Web route `http://localhost:3001/issues` returned HTTP 200.
+- Started a mock run for `issue-daemon-api`; it emitted workflow, workspace, prompt, hook, and mock provider events and reached `succeeded`.
+- Fetched the mock run events after completion and confirmed persisted timeline events were available.
+- Started a real Codex run for `issue-blocked-looking`; it emitted provider start, stderr diagnostics, `codex.thread.started`, `codex.turn.started`, item events, assistant deltas, usage, and command item summaries.
+- Real Codex run exposed thread id `019e2135-0950-7a83-9904-d60f7f3c4613` and turn id `019e2135-0ae9-7070-bdb7-9c188b7e8cc7`.
+- Interrupted the real Codex run through the daemon stop endpoint; the timeline recorded `codex.turn.completed` with interrupted status and the run ended `cancelled`.
+- SSE replay for the real Codex run returned persisted event-stream data.
+- Retried the cancelled Codex run; a new Codex run was created with provider `codex` and could be stopped.
+- No real approval request occurred during the short manual Codex run; approval behavior is validated by fake app-server tests and exposed in the UI.
 
 ## Failures Encountered
 
-- The goal tracker still contains the completed Milestone 1 objective and did not allow creating a second thread goal in this conversation. This file acted as the Milestone 2 checkpoint ledger.
-- `pnpm --filter @symphonia/core add yaml` first hit pnpm store mismatch. Retrying against the existing store completed, though sandbox DNS prevented registry metadata refreshes.
-- First core test run consumed stale built exports from `@symphonia/types`; rebuilding the types package fixed it.
-- SQLite native bindings were compiled for a different Node ABI after dependency work; `pnpm --filter @symphonia/db rebuild better-sqlite3` fixed tests.
-- Automated HTTP tests could not bind a local port in the sandbox, so daemon tests exercise the same daemon methods directly; manual smoke validation covered real HTTP/SSE with `curl`.
-- Initial dev smoke found workflow discovery looking in `apps/daemon/WORKFLOW.md`; fixed by walking upward to the repo root.
-- `tsx watch` hit a sandbox IPC `EPERM` on one dev run; rerunning dev with escalation started successfully.
-- Node `fetch` to localhost was blocked by sandbox networking during smoke scripting; `curl` validation worked.
+- The thread-level goal tracker was still occupied by a completed Milestone 1 objective, so this file served as the Milestone 3 checkpoint ledger.
+- Official OpenAI docs MCP tools were not exposed in this session, so the official web docs plus local CLI schema generation were used.
+- `@symphonia/core` needed a direct `zod` dependency for the protocol helper module.
+- `pnpm --filter @symphonia/core add zod` hit sandbox DNS warnings for registry metadata but completed using the local store.
+- `better-sqlite3` was compiled for Node ABI 137 while the active Node requires ABI 141; `pnpm --filter @symphonia/db rebuild better-sqlite3` rebuilt it successfully.
+- Next.js build still reports the existing warning that the Next.js ESLint plugin was not detected in the ESLint configuration; lint and build both pass.
 
-## How To Run The App
+## How To Run
 
 ```bash
-pnpm install
 pnpm dev
 ```
 
-Open the Next.js URL printed by the dev server. The daemon defaults to `http://localhost:4100`. If SQLite native bindings are stale after changing Node versions, run:
+Open the web URL printed by Next.js. The daemon defaults to `http://localhost:4100`. If port `3000` is occupied, Next chooses the next available port, such as `3001`.
 
-```bash
-pnpm --filter @symphonia/db rebuild better-sqlite3
-```
+Use the provider selector in the header or run controls:
 
-## How To Inspect Workflow And Workspace Behavior
+- `Mock`: deterministic fake provider for tests and demos.
+- `Codex`: local Codex app-server provider using `codex app-server` by default.
 
-- `GET http://localhost:4100/workflow/status`
-- `GET http://localhost:4100/workflow/config`
-- `POST http://localhost:4100/workflow/reload`
-- `GET http://localhost:4100/workspaces`
-- `GET http://localhost:4100/workspaces/SYM-1`
-- `GET http://localhost:4100/runs/<runId>/prompt`
-- Workspace folders are under `.symphonia/workspaces` by default.
-- Run events are persisted in SQLite at `./.data/agentboard.sqlite` by default.
+## How To Inspect Workflow, Workspace, and Provider Behavior
+
+- Workflow health: `GET /workflow/status`.
+- Safe workflow config: `GET /workflow/config`.
+- Reload workflow: `POST /workflow/reload`.
+- Provider list: `GET /providers`.
+- Codex health: `GET /providers/codex/health`.
+- Workspace list: `GET /workspaces`.
+- Run events: `GET /runs/:runId/events`.
+- Run event stream: `GET /runs/:runId/events/stream`.
+- Run approvals: `GET /runs/:runId/approvals`.
+- Respond to approval: `POST /approvals/:approvalId/respond`.
 
 ## Known Limitations
 
-- Real Codex provider is still not implemented.
 - Linear adapter is still not implemented.
 - GitHub PR/CI adapter is still not implemented.
-- Workflow hot reload is manual through the reload endpoint/button.
+- Claude Code provider is still not implemented.
+- Cursor provider is still not implemented.
+- Real Codex validation depends on local Codex CLI installation and authentication.
+- App-server event mapping covers the practical subset needed for Milestone 3, not every possible app-server event.
+- WebSocket app-server transport is intentionally not implemented.
+- Daemon restart reconstruction of active runs and approvals is not implemented yet.
 - Workspace cleanup is not automatic.
-- Run metadata is still in daemon memory and is not reconstructed after daemon restart, though events persist in SQLite.
-- Hooks execute trusted local shell commands from repo configuration.
-- Next.js build emits the existing non-blocking root ESLint plugin warning.
-
-## Recommended Next /goal Prompt Title
-
-Milestone 3 — Implement real Codex app-server provider while keeping mock tracker and `WORKFLOW.md` runtime.
+- Assistant deltas are displayed compactly as timeline events rather than fully aggregated chat bubbles.
+- Hooks execute trusted local shell commands.
 
 ## Final Acceptance Status
 
-Complete for Milestone 2.
+Milestone 3 is complete. Mock provider behavior still works, Codex provider behavior is implemented and validated with fake app-server tests, real local Codex app-server smoke validation succeeded, approval handling is implemented and test-covered, stop/retry paths work, SQLite persistence and SSE streaming are intact, and `pnpm test`, `pnpm lint`, and `pnpm build` pass.
+
+## Recommended Next Goal
+
+Milestone 4 - Add Linear adapter and issue-state synchronization while keeping Codex provider stable.

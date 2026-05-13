@@ -1,22 +1,24 @@
 # Symphonia
 
-Symphonia is a local-first visual orchestration prototype for coding-agent work. Milestone 2 keeps the Milestone 1 mock tracker/provider loop, then adds the repo-owned `WORKFLOW.md` contract, real per-issue workspaces on disk, prompt rendering, safe local hooks, workflow APIs, and UI visibility for the orchestration preparation phase.
+Symphonia is a local-first visual orchestration prototype for coding-agent work. It is a Linear-like control plane for starting, watching, stopping, and retrying agent runs against repo-owned workflow configuration.
 
-This prototype still does not integrate real Codex app-server, Claude Code, Cursor, Linear, GitHub PR/CI, auth, billing, cloud tenancy, Electron, or Tauri.
+Milestone 3 keeps the mock tracker and `WORKFLOW.md` runtime from earlier milestones, then adds a production-shaped Codex app-server provider. Users can choose mock or Codex mode from the UI, run preparation hooks in real per-issue workspaces, stream provider events into the timeline, respond to Codex approval requests, interrupt active Codex turns, and refresh the page without losing persisted run events.
 
-## What Milestone 2 Includes
+This prototype still does not integrate Linear, GitHub PR/CI, Claude Code, Cursor, auth, billing, cloud tenancy, Electron, or Tauri.
 
-- `WORKFLOW.md` discovery from the repo root or `SYMPHONIA_WORKFLOW_PATH`.
-- YAML front matter parsing with typed validation errors.
-- Resolved workflow config defaults for tracker, polling, workspace, hooks, agent, and codex settings.
-- Strict `{{ path.to.value }}` prompt template rendering.
-- Real workspace folders under the configured workspace root.
-- Workspace key sanitization: characters outside `[A-Za-z0-9._-]` become `_`.
-- Hook execution for `after_create`, `before_run`, `after_run`, and implemented `before_remove` support for future cleanup.
-- Captured hook stdout, stderr, exit code, timeout, and error status.
-- Daemon endpoints for workflow status/config/reload, workspaces, and rendered prompts.
-- UI workflow health panel, reload button, workspace path, prompt preview, and hook log details.
-- Tests for workflow parsing, config validation, prompt rendering, workspace management, hook behavior, daemon lifecycle, SQLite events, and Milestone 1 run state behavior.
+Reference: the Codex app-server integration follows the official OpenAI developer docs at <https://developers.openai.com/codex/app-server/>.
+
+## What Milestone 3 Includes
+
+- The Milestone 1 mock tracker/provider loop remains available for tests and demos.
+- The Milestone 2 `WORKFLOW.md` parser, config resolver, prompt renderer, workspace manager, and hook runner remain in the run lifecycle.
+- Provider selection for `mock` or `codex` through the UI, run API, workflow config, or environment override.
+- Provider health APIs and UI status for mock and Codex.
+- A stdio JSONL Codex app-server client using initialize, thread/start, turn/start, turn/interrupt, and server-request responses.
+- Codex event mapping into the Symphonia timeline for thread/turn metadata, assistant deltas, items, usage, stderr diagnostics, errors, and approvals.
+- Approval APIs and UI cards for accept, accept for session, decline, and cancel decisions.
+- SQLite append-only persistence for workflow, workspace, prompt, hook, mock, and Codex events.
+- Fake app-server tests, so automated validation does not require real Codex, network access, or OpenAI credentials.
 
 ## Install
 
@@ -49,38 +51,47 @@ Useful daemon environment variables:
 - `SYMPHONIA_DB_PATH`: SQLite file path, defaults to `./.data/agentboard.sqlite`.
 - `SYMPHONIA_MOCK_DELAY_MS`: mock provider delay per event, defaults to `450`.
 - `SYMPHONIA_WORKFLOW_PATH`: explicit workflow file path; defaults to `WORKFLOW.md` in the current repo root.
+- `SYMPHONIA_PROVIDER`: `mock` or `codex`; overrides workflow default provider.
+- `SYMPHONIA_CODEX_COMMAND`: Codex app-server command, defaults to `codex app-server`.
 
 ## Validate
 
 ```bash
 pnpm test
-pnpm build
 pnpm lint
+pnpm build
 ```
 
 ## WORKFLOW.md
 
-`WORKFLOW.md` has optional YAML front matter followed by a Markdown prompt template. The starter file uses the mock tracker and requires no credentials:
+`WORKFLOW.md` has optional YAML front matter followed by a Markdown prompt template. The starter file uses the mock tracker, harmless hooks, and a Codex config block that can be used when the local Codex CLI is installed and authenticated.
 
 ```yaml
 ---
+provider: mock
 tracker:
   kind: mock
 workspace:
   root: ".symphonia/workspaces"
 hooks:
   timeout_ms: 30000
+codex:
+  command: "codex app-server"
+  model: null
+  approval_policy: "on-request"
+  turn_sandbox_policy: "workspaceWrite"
 ---
 ```
 
 Supported config groups:
 
+- `provider`: `mock` or `codex`.
 - `tracker`: `kind`, `endpoint`, `api_key`, `project_slug`, `active_states`, `terminal_states`.
 - `polling`: `interval_ms`.
 - `workspace`: `root`.
 - `hooks`: `after_create`, `before_run`, `after_run`, `before_remove`, `timeout_ms`.
 - `agent`: `max_concurrent_agents`, `max_turns`, `max_retry_backoff_ms`, `max_concurrent_agents_by_state`.
-- `codex`: `command`, `approval_policy`, `thread_sandbox`, `turn_sandbox_policy`, `turn_timeout_ms`, `read_timeout_ms`, `stall_timeout_ms`.
+- `codex`: `command`, `model`, `approval_policy`, `thread_sandbox`, `turn_sandbox_policy`, `turn_timeout_ms`, `read_timeout_ms`, `stall_timeout_ms`.
 
 `workspace.root` supports `~`, `$VAR` or `${VAR}`, and relative paths. Relative paths resolve from the `WORKFLOW.md` directory. The effective root is always absolute.
 
@@ -99,16 +110,58 @@ Attempt: {{ attempt }}
 
 Template input includes `issue`, `attempt`, and `workflow`. Unknown variables and unsupported helpers/filters fail rendering. Empty prompt bodies use the fallback: `You are working on an issue from the mock tracker.`
 
+## Workspaces
+
+Each run creates or reuses a real per-issue workspace:
+
+- The key is derived from `issue.identifier`.
+- Characters outside `[A-Za-z0-9._-]` become `_`.
+- The path is `<workspace.root>/<workspace_key>`.
+- Workspaces are reused on later runs and are not deleted after successful runs.
+- Path handling prevents issue identifiers from escaping the configured root.
+
 ## Hooks
 
 Hooks execute locally with `sh -lc` in the issue workspace directory. Symphonia captures stdout, stderr, exit code, start/end timestamps, and timeout status.
 
 - `after_create`: runs only when the workspace directory is created for the first time.
-- `before_run`: runs before every mock provider run.
-- `after_run`: runs after the mock provider finishes, fails, or is cancelled; failures are logged without replacing the provider terminal status.
+- `before_run`: runs before every mock or Codex provider run.
+- `after_run`: runs after the provider finishes, fails, or is cancelled; failures are logged without replacing the provider terminal status.
 - `before_remove`: implemented for future cleanup paths, but normal successful runs do not delete workspaces.
 
-Hooks are trusted repo configuration and can run shell commands on your machine. Keep starter hooks harmless and review changes before running workflows from untrusted repos.
+Hooks are trusted repo configuration and can run shell commands on your machine. Review workflow changes before running hooks from untrusted repos.
+
+## Codex Provider
+
+The Codex provider uses the local Codex CLI app-server over stdio JSONL. It does not run in automated tests unless a fake app-server test fixture is being used.
+
+Prerequisites for real Codex validation:
+
+- Codex CLI installed.
+- Local Codex environment authenticated.
+- `WORKFLOW.md` points workspaces at a safe local directory.
+- The UI or run request selects provider `codex`.
+
+Manual flow:
+
+1. Run `pnpm dev`.
+2. Open the web app.
+3. Confirm daemon and workflow status are healthy.
+4. Confirm provider health shows Codex available.
+5. Select `Codex`.
+6. Start a run.
+7. Open the run detail panel.
+8. Confirm workspace path, rendered prompt, thread id, turn id, Codex events, and terminal status.
+9. Respond to approval cards if Codex requests command or file-change approval.
+10. Use `Interrupt Codex` to stop an active turn.
+
+Troubleshooting:
+
+- `codex command not found`: install Codex or set `SYMPHONIA_CODEX_COMMAND`.
+- `Codex unavailable`: check provider health in the header or `GET /providers/codex/health`.
+- `app-server failed to initialize`: run the configured command manually and check authentication.
+- `malformed provider output`: inspect `provider.stderr` and `codex.error` events in the timeline.
+- `approval request stuck`: use the run approval panel or `POST /approvals/:approvalId/respond`.
 
 ## Daemon Endpoints
 
@@ -119,7 +172,7 @@ Hooks are trusted repo configuration and can run shell commands on your machine.
 - `GET /runs/:runId/events`
 - `GET /runs/:runId/events/stream`
 - `GET /runs/:runId/prompt`
-- `POST /runs`
+- `POST /runs` with `{ "issueId": "...", "provider": "mock" | "codex" }`
 - `POST /runs/:runId/stop`
 - `POST /runs/:runId/retry`
 - `GET /workflow/status`
@@ -127,42 +180,49 @@ Hooks are trusted repo configuration and can run shell commands on your machine.
 - `POST /workflow/reload`
 - `GET /workspaces`
 - `GET /workspaces/:issueIdentifier`
+- `GET /providers`
+- `GET /providers/mock/health`
+- `GET /providers/codex/health`
+- `GET /approvals`
+- `GET /runs/:runId/approvals`
+- `POST /approvals/:approvalId/respond`
 
 Workflow config responses are summaries and do not expose API keys or secrets.
 
 ## Manual Validation Flow
 
 1. Run `pnpm dev`.
-2. Open `http://localhost:3000`.
+2. Open the web app.
 3. Confirm daemon and workflow status are healthy.
-4. Open the workflow panel and confirm the workflow path and workspace root.
-5. Start a Todo issue run.
-6. Open the run detail panel.
-7. Confirm the workspace path appears and exists under `.symphonia/workspaces`.
-8. Confirm the rendered prompt appears.
-9. Confirm hook logs appear.
-10. Confirm mock provider events stream after workflow, workspace, prompt, and hook events.
-11. Refresh and confirm persisted events remain visible.
-12. Stop a slow run.
-13. Retry `SYM-6` and confirm the second attempt succeeds.
-14. Edit `WORKFLOW.md`, click Reload, start another run, and confirm the rendered prompt reflects the edit.
-15. Temporarily break `WORKFLOW.md` YAML, reload, and confirm invalid workflow status without daemon crash.
-16. Restore `WORKFLOW.md` and reload successfully.
+4. Confirm provider list shows mock and Codex.
+5. Start a mock run and confirm the timeline still streams workflow, workspace, prompt, hook, and mock provider events.
+6. Refresh and confirm persisted events remain visible.
+7. Select Codex provider.
+8. If Codex CLI is unavailable, confirm the UI shows unavailable or the run fails gracefully with a clear provider error.
+9. If Codex CLI is available, start a Codex run and confirm workspace, rendered prompt, thread id, turn id, Codex events, and terminal status.
+10. Respond to approval cards if Codex requests approval.
+11. Interrupt an active Codex turn.
+12. Retry a failed or cancelled Codex run.
+13. Edit `WORKFLOW.md`, click Reload, start another run, and confirm the rendered prompt reflects the edit.
 
 ## SQLite Data
 
-Run events are append-only in SQLite. The default path is `./.data/agentboard.sqlite`, relative to the daemon process. Workspaces are not stored in SQLite; they are real folders under the configured workflow workspace root.
+Run events are append-only in SQLite. The default path is `./.data/agentboard.sqlite`, relative to the daemon process. Workspaces are real folders under the configured workflow workspace root.
 
 ## Known Limitations
 
-- Real Codex provider is still not implemented.
 - Linear adapter is still not implemented.
 - GitHub PR/CI adapter is still not implemented.
-- Workflow hot reload is manual through the reload endpoint/button.
+- Claude Code provider is still not implemented.
+- Cursor provider is still not implemented.
+- Real Codex validation depends on local Codex CLI installation and authentication.
+- App-server event mapping covers the practical subset needed for Milestone 3, not every possible app-server event.
+- WebSocket app-server transport is intentionally not implemented.
+- Daemon restart reconstruction of active runs and approvals is not implemented yet.
 - Workspace cleanup is not automatic.
-- Run metadata is still daemon memory; persisted events survive page refreshes while the daemon is running, but runs are not reconstructed after daemon restart yet.
+- Assistant deltas are displayed compactly as timeline events rather than fully aggregated chat bubbles.
 - Hooks execute trusted local shell commands.
 
 ## Next Milestone
 
-Milestone 3 — Implement real Codex app-server provider while keeping mock tracker and `WORKFLOW.md` runtime.
+Milestone 4 - Add Linear adapter and issue-state synchronization while keeping Codex provider stable.

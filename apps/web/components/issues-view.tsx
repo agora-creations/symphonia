@@ -11,16 +11,37 @@ import { PriorityIcon } from "@/components/icons/status-icons";
 import { UserAvatar } from "@/components/avatar-stack";
 import { cn } from "@/lib/utils";
 import { Filter, Plus, SlidersHorizontal, LayoutGrid, List, X } from "lucide-react";
-import { DAEMON_URL, getIssues, getRunEvents, getRuns, retryRun, startRun, stopRun } from "@/lib/api";
 import {
+  DAEMON_URL,
+  getIssues,
+  getProviders,
+  getRunApprovals,
+  getRunEvents,
+  getRunPrompt,
+  getRuns,
+  getWorkspace,
+  getWorkflowStatus,
+  reloadWorkflow,
+  respondApproval,
+  retryRun,
+  startRun,
+  stopRun,
+} from "@/lib/api";
+import {
+  ApprovalDecision,
+  ApprovalState,
   AgentEventSchema,
   isTerminalRunStatus,
   type AgentEvent,
   type Issue as DaemonIssue,
   type IssuePriority,
   type IssueState,
+  type ProviderHealth,
+  type ProviderId,
   type Run,
   type RunStatus,
+  type WorkflowStatus,
+  type WorkspaceInfo,
 } from "@symphonia/types";
 
 type Issue = {
@@ -71,6 +92,7 @@ function IssueCard({
       <div className="flex items-center gap-2 text-[11px] text-muted-foreground tabular-nums">
         <PriorityIcon priority={issue.priority} />
         <span>{issue.key}</span>
+        {issue.latestRun && <span className="rounded-full border px-1.5 py-0.5 text-[10px]">{issue.latestRun.provider}</span>}
         {issue.latestRun && <RunStatusBadge status={issue.latestRun.status} />}
       </div>
       <p className="mt-1.5 text-sm leading-snug line-clamp-2">{issue.title}</p>
@@ -131,6 +153,7 @@ function IssueRow({
             {l.name}
           </span>
         ))}
+        {issue.latestRun && <span className="rounded-full border px-1.5 py-0.5 text-[10px] text-muted-foreground">{issue.latestRun.provider}</span>}
         {issue.latestRun && <RunStatusBadge status={issue.latestRun.status} />}
         {issue.assignee && <UserAvatar user={issue.assignee} size={20} />}
       </div>
@@ -148,6 +171,13 @@ export function IssuesView() {
   const [selectedIssueId, setSelectedIssueId] = useState<string | null>(null);
   const [selectedRunId, setSelectedRunId] = useState<string | null>(null);
   const [selectedEvents, setSelectedEvents] = useState<AgentEvent[]>([]);
+  const [selectedPrompt, setSelectedPrompt] = useState<string | null>(null);
+  const [selectedWorkspace, setSelectedWorkspace] = useState<WorkspaceInfo | null>(null);
+  const [selectedApprovals, setSelectedApprovals] = useState<ApprovalState[]>([]);
+  const [providers, setProviders] = useState<ProviderHealth[]>([]);
+  const [selectedProvider, setSelectedProvider] = useState<ProviderId>("mock");
+  const [workflow, setWorkflow] = useState<WorkflowStatus | null>(null);
+  const [workflowOpen, setWorkflowOpen] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const sourcesRef = useRef<Map<string, EventSource>>(new Map());
   const selectedRunIdRef = useRef<string | null>(null);
@@ -156,6 +186,7 @@ export function IssuesView() {
     () => allIssues.find((issue) => issue.id === selectedIssueId) ?? null,
     [allIssues, selectedIssueId],
   );
+  const selectedIssueKey = selectedIssue?.key ?? null;
 
   const selectedRun = selectedIssue?.latestRun ?? null;
 
@@ -175,6 +206,36 @@ export function IssuesView() {
         if (current.some((item) => item.id === event.id)) return current;
         return [...current, event];
       });
+
+      if (event.type === "prompt.rendered") {
+        setSelectedPrompt(event.prompt);
+      }
+
+      if (event.type === "workspace.ready") {
+        setSelectedWorkspace(event.workspace);
+      }
+
+      if (event.type === "approval.requested") {
+        setSelectedApprovals((current) => [
+          ...current.filter((approval) => approval.approvalId !== event.approvalId),
+          approvalStateFromEvent(event),
+        ]);
+      }
+
+      if (event.type === "approval.resolved") {
+        setSelectedApprovals((current) =>
+          current.map((approval) =>
+            approval.approvalId === event.approvalId
+              ? {
+                  ...approval,
+                  status: "resolved",
+                  decision: event.resolution,
+                  resolvedAt: event.timestamp,
+                }
+              : approval,
+          ),
+        );
+      }
     }
 
     if (event.type === "run.status") {
@@ -223,9 +284,20 @@ export function IssuesView() {
     const sources = sourcesRef.current;
 
     async function loadIssues() {
-      const [loadedIssues, loadedRuns] = await Promise.all([getIssues(), getRuns()]);
+      const [loadedIssues, loadedRuns, loadedProviders, loadedWorkflow] = await Promise.all([
+        getIssues(),
+        getRuns(),
+        getProviders(),
+        getWorkflowStatus(),
+      ]);
       if (!alive) return;
       setAllIssues(mapDaemonIssues(loadedIssues, loadedRuns));
+      setProviders(loadedProviders);
+      setWorkflow(loadedWorkflow);
+      const defaultProvider = loadedWorkflow.effectiveConfigSummary?.defaultProvider;
+      if (defaultProvider === "mock" || defaultProvider === "codex") {
+        setSelectedProvider((current) => current ?? defaultProvider);
+      }
     }
 
     void loadIssues();
@@ -244,22 +316,38 @@ export function IssuesView() {
   useEffect(() => {
     if (!selectedRunId) {
       setSelectedEvents([]);
+      setSelectedPrompt(null);
+      setSelectedWorkspace(null);
+      setSelectedApprovals([]);
       return;
     }
 
     setDetailError(null);
-    void getRunEvents(selectedRunId)
-      .then(setSelectedEvents)
+    void Promise.all([
+      getRunEvents(selectedRunId),
+      getRunPrompt(selectedRunId),
+      selectedIssueKey ? getWorkspace(selectedIssueKey) : Promise.resolve(null),
+      getRunApprovals(selectedRunId),
+    ])
+      .then(([events, prompt, workspace, approvals]) => {
+        setSelectedEvents(events);
+        setSelectedPrompt(prompt);
+        setSelectedWorkspace(workspace);
+        setSelectedApprovals(approvals);
+      })
       .catch((caught) => {
         setDetailError(caught instanceof Error ? caught.message : "Failed to load run events.");
       });
     subscribeRun(selectedRunId);
-  }, [selectedRunId, subscribeRun]);
+  }, [selectedIssueKey, selectedRunId, subscribeRun]);
 
   const selectIssue = useCallback((issue: Issue) => {
     setSelectedIssueId(issue.id);
     setSelectedRunId(issue.latestRun?.id ?? null);
     setSelectedEvents([]);
+    setSelectedPrompt(null);
+    setSelectedWorkspace(null);
+    setSelectedApprovals([]);
     setDetailError(null);
   }, []);
 
@@ -267,6 +355,9 @@ export function IssuesView() {
     setSelectedIssueId(null);
     setSelectedRunId(null);
     setSelectedEvents([]);
+    setSelectedPrompt(null);
+    setSelectedWorkspace(null);
+    setSelectedApprovals([]);
     setDetailError(null);
   }, []);
 
@@ -274,17 +365,20 @@ export function IssuesView() {
     async (issue: Issue) => {
       try {
         setDetailError(null);
-        const run = await startRun(issue.id);
+        const run = await startRun(issue.id, selectedProvider);
         updateIssueRun(run);
         setSelectedIssueId(issue.id);
         setSelectedRunId(run.id);
         setSelectedEvents([]);
+        setSelectedPrompt(null);
+        setSelectedWorkspace(null);
+        setSelectedApprovals([]);
         subscribeRun(run.id);
       } catch (caught) {
         setDetailError(caught instanceof Error ? caught.message : "Failed to start run.");
       }
     },
-    [subscribeRun, updateIssueRun],
+    [selectedProvider, subscribeRun, updateIssueRun],
   );
 
   const handleStop = useCallback(
@@ -307,6 +401,9 @@ export function IssuesView() {
         updateIssueRun(nextRun);
         setSelectedRunId(nextRun.id);
         setSelectedEvents([]);
+        setSelectedPrompt(null);
+        setSelectedWorkspace(null);
+        setSelectedApprovals([]);
         subscribeRun(nextRun.id);
       } catch (caught) {
         setDetailError(caught instanceof Error ? caught.message : "Failed to retry run.");
@@ -314,6 +411,28 @@ export function IssuesView() {
     },
     [subscribeRun, updateIssueRun],
   );
+
+  const handleWorkflowReload = useCallback(async () => {
+    try {
+      setDetailError(null);
+      setWorkflow(await reloadWorkflow());
+      setProviders(await getProviders());
+    } catch (caught) {
+      setDetailError(caught instanceof Error ? caught.message : "Failed to reload workflow.");
+    }
+  }, []);
+
+  const handleApprovalResponse = useCallback(async (approval: ApprovalState, decision: ApprovalDecision) => {
+    try {
+      setDetailError(null);
+      const updated = await respondApproval(approval.approvalId, decision);
+      setSelectedApprovals((current) =>
+        current.map((item) => (item.approvalId === updated.approvalId ? updated : item)),
+      );
+    } catch (caught) {
+      setDetailError(caught instanceof Error ? caught.message : "Failed to respond to approval.");
+    }
+  }, []);
 
   const filtered = useMemo(
     () =>
@@ -336,11 +455,36 @@ export function IssuesView() {
   return (
     <div className="flex h-full flex-col">
       <header className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-2.5">
-        <div className="flex items-center gap-2 text-sm">
+        <div className="flex flex-wrap items-center gap-2 text-sm">
           <span className="font-semibold">Issues</span>
           <span className="text-muted-foreground tabular-nums">{filtered.length}</span>
+          <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", workflowStatusClass(workflow?.status))}>
+            Workflow {workflow?.status ?? "unknown"}
+          </span>
+          <span className="rounded-full border px-2 py-0.5 text-[11px]">
+            Codex {providerLabel(providers.find((provider) => provider.id === "codex"))}
+          </span>
         </div>
         <div className="flex items-center gap-1">
+          <label className="inline-flex items-center gap-1.5 text-[12px] text-muted-foreground">
+            Provider
+            <select
+              value={selectedProvider}
+              onChange={(e) => setSelectedProvider(e.target.value as ProviderId)}
+              className="rounded-md border bg-background px-2 py-1 text-[12px] text-foreground"
+              aria-label="Provider mode"
+            >
+              <option value="mock">Mock</option>
+              <option value="codex">Codex</option>
+            </select>
+          </label>
+          <button
+            type="button"
+            onClick={() => setWorkflowOpen((open) => !open)}
+            className="inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[12px] hover:bg-muted"
+          >
+            Workflow
+          </button>
           <div className="flex items-center rounded-md border p-0.5">
             <button
               onClick={() => setView("board")}
@@ -396,16 +540,29 @@ export function IssuesView() {
         </div>
       </header>
 
+      {workflowOpen && (
+        <WorkflowPanel
+          onReload={handleWorkflowReload}
+          providers={providers}
+          workflow={workflow}
+        />
+      )}
+
       {selectedIssue && (
         <RunDetailsCard
+          approvals={selectedApprovals}
           error={detailError}
           events={selectedEvents}
           issue={selectedIssue}
           onClose={closeDetails}
+          onRespondApproval={handleApprovalResponse}
           onRetry={handleRetry}
           onStart={handleStart}
           onStop={handleStop}
+          prompt={selectedPrompt}
           run={selectedRun}
+          selectedProvider={selectedProvider}
+          workspace={selectedWorkspace}
         />
       )}
 
@@ -461,26 +618,38 @@ export function IssuesView() {
 }
 
 function RunDetailsCard({
+  approvals,
   error,
   events,
   issue,
   onClose,
+  onRespondApproval,
   onRetry,
   onStart,
   onStop,
+  prompt,
   run,
+  selectedProvider,
+  workspace,
 }: {
+  approvals: ApprovalState[];
   error: string | null;
   events: AgentEvent[];
   issue: Issue;
   onClose: () => void;
+  onRespondApproval: (approval: ApprovalState, decision: ApprovalDecision) => Promise<void>;
   onRetry: (run: Run) => Promise<void>;
   onStart: (issue: Issue) => Promise<void>;
   onStop: (run: Run) => Promise<void>;
+  prompt: string | null;
   run?: Run | null;
+  selectedProvider: ProviderId;
+  workspace: WorkspaceInfo | null;
 }) {
   const running = run ? !isTerminalRunStatus(run.status) : false;
   const retryable = run?.status === "failed" || run?.status === "cancelled" || run?.status === "timed_out";
+  const codexMetadata = extractCodexMetadata(events);
+  const pendingApprovals = approvals.filter((approval) => approval.status === "pending");
 
   return (
     <div className="fixed inset-0 z-50 grid place-items-center bg-background/70 px-4 py-6 backdrop-blur-sm">
@@ -530,7 +699,19 @@ function RunDetailsCard({
             </div>
             <div className="rounded-md border p-3">
               <dt className="text-muted-foreground">Latest run</dt>
-              <dd className="mt-1 font-medium">{run ? run.status.replaceAll("_", " ") : "No run yet"}</dd>
+              <dd className="mt-1 font-medium">{run ? `${run.provider} ${run.status.replaceAll("_", " ")}` : `Ready with ${selectedProvider}`}</dd>
+            </div>
+            <div className="rounded-md border p-3">
+              <dt className="text-muted-foreground">Workspace</dt>
+              <dd className="mt-1 break-all font-medium">
+                {workspace ? `${workspace.path} (${workspace.createdNow ? "created" : "reused"})` : "Not prepared yet"}
+              </dd>
+            </div>
+            <div className="rounded-md border p-3">
+              <dt className="text-muted-foreground">Codex thread</dt>
+              <dd className="mt-1 break-all font-medium">
+                {codexMetadata.threadId ? `${codexMetadata.threadId}${codexMetadata.turnId ? ` / ${codexMetadata.turnId}` : ""}` : "No Codex turn"}
+              </dd>
             </div>
           </dl>
 
@@ -541,7 +722,7 @@ function RunDetailsCard({
                 onClick={() => void onStop(run)}
                 className="inline-flex items-center rounded-md border px-3 py-1.5 text-sm font-medium text-red-600 hover:bg-red-500/10 dark:text-red-300"
               >
-                Stop run
+                {run.provider === "codex" ? "Interrupt Codex" : "Stop run"}
               </button>
             ) : retryable && run ? (
               <button
@@ -557,7 +738,7 @@ function RunDetailsCard({
                 onClick={() => void onStart(issue)}
                 className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90"
               >
-                Start run
+                Start {selectedProvider === "codex" ? "Codex" : "mock"} run
               </button>
             )}
           </div>
@@ -567,6 +748,31 @@ function RunDetailsCard({
               {error}
             </p>
           )}
+
+          {pendingApprovals.length > 0 && (
+            <section aria-labelledby="approvals-heading" className="mt-6">
+              <h3 id="approvals-heading" className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+                Pending approvals
+              </h3>
+              <div className="mt-3 space-y-3">
+                {pendingApprovals.map((approval) => (
+                  <ApprovalCard key={approval.approvalId} approval={approval} onRespond={onRespondApproval} />
+                ))}
+              </div>
+            </section>
+          )}
+
+          <section aria-labelledby="prompt-heading" className="mt-6">
+            <h3 id="prompt-heading" className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              Rendered prompt
+            </h3>
+            <textarea
+              readOnly
+              value={prompt ?? "No rendered prompt yet."}
+              className="mt-3 min-h-36 w-full resize-y rounded-md border bg-background p-3 font-mono text-xs leading-5 text-muted-foreground"
+              aria-label="Rendered run prompt"
+            />
+          </section>
 
           <section aria-labelledby="timeline-heading" className="mt-6">
             <h3 id="timeline-heading" className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
@@ -590,9 +796,7 @@ function RunDetailsCard({
                         {formatTime(event.timestamp)}
                       </time>
                     </div>
-                    <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">
-                      {eventSummary(event)}
-                    </p>
+                    <EventBody event={event} />
                   </li>
                 ))}
               </ol>
@@ -614,6 +818,154 @@ function RunStatusBadge({ status }: { status: RunStatus }) {
     >
       {status.replaceAll("_", " ")}
     </span>
+  );
+}
+
+function WorkflowPanel({
+  onReload,
+  providers,
+  workflow,
+}: {
+  onReload: () => Promise<void>;
+  providers: ProviderHealth[];
+  workflow: WorkflowStatus | null;
+}) {
+  const summary = workflow?.effectiveConfigSummary;
+  const codex = providers.find((provider) => provider.id === "codex");
+
+  return (
+    <section aria-labelledby="workflow-panel-heading" className="border-b bg-muted/20 px-4 py-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 id="workflow-panel-heading" className="text-sm font-semibold">
+            Workflow status
+          </h2>
+          <p className="mt-1 text-xs text-muted-foreground">
+            {workflow?.workflowPath ?? "No workflow loaded"}
+          </p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void onReload()}
+          className="inline-flex items-center rounded-md border px-3 py-1.5 text-sm font-medium hover:bg-background"
+        >
+          Reload workflow
+        </button>
+      </div>
+      <dl className="mt-3 grid gap-2 text-xs sm:grid-cols-2 lg:grid-cols-4">
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">Status</dt>
+          <dd className="mt-1 font-medium">{workflow?.status ?? "unknown"}</dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">Provider</dt>
+          <dd className="mt-1 font-medium">{summary?.defaultProvider ?? "mock"}</dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">Workspace root</dt>
+          <dd className="mt-1 break-all font-medium">{summary?.workspaceRoot ?? "Unavailable"}</dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">Codex</dt>
+          <dd className="mt-1 font-medium">{codex ? providerLabel(codex) : "unknown"}</dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">Active states</dt>
+          <dd className="mt-1 font-medium">{summary?.activeStates.join(", ") ?? "Unavailable"}</dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">Max agents</dt>
+          <dd className="mt-1 font-medium">{summary?.maxConcurrentAgents ?? "Unavailable"}</dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">Hook timeout</dt>
+          <dd className="mt-1 font-medium">{summary ? `${summary.hookTimeoutMs}ms` : "Unavailable"}</dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">Codex command</dt>
+          <dd className="mt-1 break-all font-medium">{summary?.codexCommand ?? "codex app-server"}</dd>
+        </div>
+      </dl>
+      {workflow?.error && (
+        <p role="alert" className="mt-3 rounded-md border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-600 dark:text-red-300">
+          {workflow.error}
+        </p>
+      )}
+    </section>
+  );
+}
+
+function ApprovalCard({
+  approval,
+  onRespond,
+}: {
+  approval: ApprovalState;
+  onRespond: (approval: ApprovalState, decision: ApprovalDecision) => Promise<void>;
+}) {
+  const decisions: ApprovalDecision[] =
+    approval.availableDecisions.length > 0 ? approval.availableDecisions : ["accept", "decline", "cancel"];
+
+  return (
+    <article className="rounded-md border border-amber-500/30 bg-amber-500/10 p-3">
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <h4 className="text-sm font-medium">
+          {approval.approvalType.replaceAll("_", " ")} approval
+        </h4>
+        <span className="text-xs text-muted-foreground">{approval.approvalId}</span>
+      </div>
+      <p className="mt-2 text-sm text-muted-foreground">{approval.reason ?? approval.prompt}</p>
+      {approval.command && (
+        <pre className="mt-2 overflow-auto rounded-md border bg-background p-2 text-xs">{approval.command}</pre>
+      )}
+      {approval.cwd && <p className="mt-2 break-all text-xs text-muted-foreground">cwd: {approval.cwd}</p>}
+      {approval.fileSummary && <p className="mt-2 break-all text-xs text-muted-foreground">{approval.fileSummary}</p>}
+      <p className="mt-2 text-xs text-muted-foreground">
+        Approvals execute local Codex-requested actions in the workspace. Review commands and file scopes before accepting.
+      </p>
+      <div className="mt-3 flex flex-wrap gap-2">
+        {decisions.map((decision) => (
+          <button
+            key={decision}
+            type="button"
+            onClick={() => void onRespond(approval, decision)}
+            className="rounded-md border bg-background px-2 py-1 text-xs font-medium hover:bg-muted"
+          >
+            {decisionLabel(decision)}
+          </button>
+        ))}
+      </div>
+    </article>
+  );
+}
+
+function EventBody({ event }: { event: AgentEvent }) {
+  if (event.type === "hook.started" || event.type === "hook.succeeded" || event.type === "hook.failed" || event.type === "hook.timed_out") {
+    return (
+      <div className="mt-2 text-sm leading-6 text-muted-foreground">
+        <p className="whitespace-pre-wrap">{event.hook.error ?? event.hook.command ?? event.hook.status}</p>
+        {(event.hook.stdout || event.hook.stderr) && (
+          <details className="mt-2 rounded-md border bg-background p-2">
+            <summary className="cursor-pointer text-xs font-medium text-foreground">Hook output</summary>
+            {event.hook.stdout && <pre className="mt-2 overflow-auto whitespace-pre-wrap text-xs">{event.hook.stdout}</pre>}
+            {event.hook.stderr && <pre className="mt-2 overflow-auto whitespace-pre-wrap text-xs text-red-600 dark:text-red-300">{event.hook.stderr}</pre>}
+          </details>
+        )}
+      </div>
+    );
+  }
+
+  if (event.type === "provider.stderr" || event.type === "codex.error") {
+    return <pre className="mt-2 overflow-auto whitespace-pre-wrap rounded-md border bg-background p-2 text-xs text-red-600 dark:text-red-300">{eventSummary(event)}</pre>;
+  }
+
+  if (event.type === "prompt.rendered" || event.type === "artifact") {
+    return <pre className="mt-2 max-h-60 overflow-auto whitespace-pre-wrap rounded-md border bg-background p-2 text-xs text-muted-foreground">{eventSummary(event)}</pre>;
+  }
+
+  return (
+    <p className="mt-2 whitespace-pre-wrap text-sm leading-6 text-muted-foreground">
+      {eventSummary(event)}
+    </p>
   );
 }
 
@@ -671,6 +1023,26 @@ function eventLabel(event: AgentEvent) {
       return `${event.hook.hookName} timed out`;
     case "prompt.rendered":
       return "Prompt rendered";
+    case "provider.started":
+      return `${event.provider} provider started`;
+    case "provider.stderr":
+      return `${event.provider} stderr`;
+    case "codex.thread.started":
+      return "Codex thread started";
+    case "codex.turn.started":
+      return "Codex turn started";
+    case "codex.turn.completed":
+      return `Codex turn ${event.status}`;
+    case "codex.item.started":
+      return `${event.itemType} started`;
+    case "codex.item.completed":
+      return `${event.itemType} completed`;
+    case "codex.assistant.delta":
+      return "Codex assistant delta";
+    case "codex.usage":
+      return "Codex usage";
+    case "codex.error":
+      return "Codex error";
   }
 }
 
@@ -710,7 +1082,97 @@ function eventSummary(event: AgentEvent) {
         .join("\n\n");
     case "prompt.rendered":
       return event.prompt;
+    case "provider.started":
+      return [`pid ${event.pid ?? "unknown"}`, event.command].join("\n");
+    case "provider.stderr":
+      return event.message;
+    case "codex.thread.started":
+      return [`thread ${event.threadId}`, event.model ? `model ${event.model}` : null, event.cwd ? `cwd ${event.cwd}` : null]
+        .filter(Boolean)
+        .join("\n");
+    case "codex.turn.started":
+      return `${event.threadId} / ${event.turnId}\n${event.status}`;
+    case "codex.turn.completed":
+      return [event.threadId, event.turnId, event.status, event.error].filter(Boolean).join("\n");
+    case "codex.item.started":
+    case "codex.item.completed":
+      return event.summary;
+    case "codex.assistant.delta":
+      return event.delta;
+    case "codex.usage":
+      return `${event.totalTokens.toLocaleString()} total tokens (${event.inputTokens.toLocaleString()} in, ${event.outputTokens.toLocaleString()} out).`;
+    case "codex.error":
+      return event.message;
   }
+}
+
+function approvalStateFromEvent(event: Extract<AgentEvent, { type: "approval.requested" }>): ApprovalState {
+  return {
+    approvalId: event.approvalId,
+    runId: event.runId,
+    provider: "codex",
+    approvalType: event.approvalType ?? "unknown",
+    status: "pending",
+    prompt: event.prompt,
+    threadId: event.threadId ?? null,
+    turnId: event.turnId ?? null,
+    itemId: event.itemId ?? null,
+    reason: event.reason ?? null,
+    command: event.command ?? null,
+    cwd: event.cwd ?? null,
+    fileSummary: event.fileSummary ?? null,
+    availableDecisions: event.availableDecisions ?? ["accept", "decline", "cancel"],
+    decision: null,
+    requestedAt: event.timestamp,
+    resolvedAt: null,
+  };
+}
+
+function providerLabel(provider?: ProviderHealth) {
+  if (!provider) return "unknown";
+  return provider.available ? "available" : "unavailable";
+}
+
+function workflowStatusClass(status?: WorkflowStatus["status"]) {
+  switch (status) {
+    case "healthy":
+      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300";
+    case "invalid":
+    case "missing":
+      return "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300";
+    default:
+      return "border-border bg-muted/60 text-muted-foreground";
+  }
+}
+
+function decisionLabel(decision: ApprovalDecision) {
+  switch (decision) {
+    case "accept":
+      return "Accept";
+    case "acceptForSession":
+      return "Accept for session";
+    case "decline":
+      return "Decline";
+    case "cancel":
+      return "Cancel";
+    case "approved":
+      return "Approved";
+    case "rejected":
+      return "Rejected";
+  }
+}
+
+function extractCodexMetadata(events: AgentEvent[]): { threadId: string | null; turnId: string | null } {
+  let threadId: string | null = null;
+  let turnId: string | null = null;
+  for (const event of events) {
+    if (event.type === "codex.thread.started") threadId = event.threadId;
+    if (event.type === "codex.turn.started" || event.type === "codex.turn.completed" || event.type === "codex.assistant.delta") {
+      threadId = event.threadId;
+      turnId = event.turnId;
+    }
+  }
+  return { threadId, turnId };
 }
 
 function formatTime(timestamp: string) {

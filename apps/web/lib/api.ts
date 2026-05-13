@@ -1,8 +1,15 @@
 import {
   AgentEvent,
+  ApprovalResponseRequest,
+  ApprovalState,
+  ApprovalsResponseSchema,
   EventsResponseSchema,
   HealthResponseSchema,
   IssuesResponseSchema,
+  ProviderHealth,
+  ProviderHealthResponseSchema,
+  ProviderId,
+  ProvidersResponseSchema,
   Run,
   RunResponseSchema,
   RunsResponseSchema,
@@ -73,11 +80,35 @@ export async function getWorkspace(issueIdentifier: string): Promise<WorkspaceIn
   return WorkspaceResponseSchema.parse(response).workspace;
 }
 
-export async function startRun(issueId: string): Promise<Run> {
+export async function getProviders(): Promise<ProviderHealth[]> {
+  const response = await request("/providers");
+  return ProvidersResponseSchema.parse(response).providers;
+}
+
+export async function getProviderHealth(provider: ProviderId): Promise<ProviderHealth> {
+  const response = await request(`/providers/${provider}/health`);
+  return ProviderHealthResponseSchema.parse(response).provider;
+}
+
+export async function getRunApprovals(runId: string): Promise<ApprovalState[]> {
+  const response = await request(`/runs/${runId}/approvals`);
+  return ApprovalsResponseSchema.parse(response).approvals;
+}
+
+export async function respondApproval(approvalId: string, decision: ApprovalResponseRequest["decision"]): Promise<ApprovalState> {
+  const response = await request(`/approvals/${encodeURIComponent(approvalId)}/respond`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ decision }),
+  });
+  return (response as { approval: ApprovalState }).approval;
+}
+
+export async function startRun(issueId: string, provider?: ProviderId): Promise<Run> {
   const response = await request("/runs", {
     method: "POST",
     headers: { "Content-Type": "application/json" },
-    body: JSON.stringify({ issueId }),
+    body: JSON.stringify({ issueId, provider }),
   });
   return RunResponseSchema.parse(response).run;
 }
