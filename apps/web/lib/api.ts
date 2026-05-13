@@ -15,6 +15,10 @@ import {
   RunsResponseSchema,
   PromptResponseSchema,
   WorkflowConfigResponseSchema,
+  TrackerHealth,
+  TrackerHealthResponseSchema,
+  TrackerStatus,
+  TrackerStatusResponseSchema,
   WorkflowStatus,
   WorkflowStatusResponseSchema,
   WorkspaceInfo,
@@ -38,6 +42,21 @@ export async function getHealth(): Promise<boolean> {
 export async function getIssues() {
   const response = await request("/issues");
   return IssuesResponseSchema.parse(response).issues;
+}
+
+export async function refreshIssues() {
+  const response = await request("/issues/refresh", { method: "POST" });
+  return IssuesResponseSchema.parse(response).issues;
+}
+
+export async function getTrackerStatus(): Promise<TrackerStatus> {
+  const response = await request("/tracker/status");
+  return TrackerStatusResponseSchema.parse(response).tracker;
+}
+
+export async function getTrackerHealth(): Promise<TrackerHealth> {
+  const response = await request("/tracker/health");
+  return TrackerHealthResponseSchema.parse(response).tracker;
 }
 
 export async function getRuns(): Promise<Run[]> {

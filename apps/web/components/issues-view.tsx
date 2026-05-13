@@ -10,7 +10,7 @@ import { IssueStatusIcon } from "@/components/icons/issue-status-icons";
 import { PriorityIcon } from "@/components/icons/status-icons";
 import { UserAvatar } from "@/components/avatar-stack";
 import { cn } from "@/lib/utils";
-import { Filter, Plus, SlidersHorizontal, LayoutGrid, List, X } from "lucide-react";
+import { ExternalLink, Filter, Plus, RefreshCw, SlidersHorizontal, LayoutGrid, List, X } from "lucide-react";
 import {
   DAEMON_URL,
   getIssues,
@@ -19,8 +19,10 @@ import {
   getRunEvents,
   getRunPrompt,
   getRuns,
+  getTrackerStatus,
   getWorkspace,
   getWorkflowStatus,
+  refreshIssues,
   reloadWorkflow,
   respondApproval,
   retryRun,
@@ -40,6 +42,7 @@ import {
   type ProviderId,
   type Run,
   type RunStatus,
+  type TrackerStatus,
   type WorkflowStatus,
   type WorkspaceInfo,
 } from "@symphonia/types";
@@ -56,17 +59,11 @@ type Issue = {
   assignee?: User;
   labels: Array<{ id: string; name: string; color: string }>;
   team: string;
+  url: string;
+  trackerKind: string;
+  projectName: string | null;
+  lastFetchedAt: string | null;
   latestRun?: Run;
-};
-
-const ISSUE_STATUS_ORDER: IssueState[] = ["Todo", "In Progress", "Human Review", "Rework", "Done"];
-
-const ISSUE_STATUS_LABELS: Record<IssueState, string> = {
-  Todo: "Todo",
-  "In Progress": "In Progress",
-  "Human Review": "Human Review",
-  Rework: "Rework",
-  Done: "Done",
 };
 
 function IssueCard({
@@ -79,41 +76,57 @@ function IssueCard({
   onSelect: (issue: Issue) => void;
 }) {
   return (
-    <button
-      type="button"
-      onClick={() => onSelect(issue)}
-      aria-label={`Open run details for ${issue.key}: ${issue.title}`}
-      aria-pressed={selected}
+    <article
       className={cn(
         "w-full rounded-md border bg-card p-2.5 text-left text-card-foreground shadow-sm transition-colors cursor-pointer",
         selected ? "border-foreground/40" : "hover:border-foreground/20",
       )}
     >
-      <div className="flex items-center gap-2 text-[11px] text-muted-foreground tabular-nums">
-        <PriorityIcon priority={issue.priority} />
-        <span>{issue.key}</span>
-        {issue.latestRun && <span className="rounded-full border px-1.5 py-0.5 text-[10px]">{issue.latestRun.provider}</span>}
-        {issue.latestRun && <RunStatusBadge status={issue.latestRun.status} />}
-      </div>
-      <p className="mt-1.5 text-sm leading-snug line-clamp-2">{issue.title}</p>
-      {issue.labels.length > 0 && (
-        <div className="mt-2 flex flex-wrap gap-1">
-          {issue.labels.map((l) => (
-            <span
-              key={l.id}
-              className="inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] text-muted-foreground"
-            >
-              <span className={cn("h-1.5 w-1.5 rounded-full bg-current", l.color)} />
-              {l.name}
-            </span>
-          ))}
+      <button
+        type="button"
+        onClick={() => onSelect(issue)}
+        aria-label={`Open run details for ${issue.key}: ${issue.title}`}
+        aria-pressed={selected}
+        className="block w-full text-left"
+      >
+        <div className="flex items-center gap-2 text-[11px] text-muted-foreground tabular-nums">
+          <PriorityIcon priority={issue.priority} />
+          <span>{issue.key}</span>
+          <span className="rounded-full border px-1.5 py-0.5 text-[10px]">{issue.trackerKind}</span>
+          {issue.latestRun && <span className="rounded-full border px-1.5 py-0.5 text-[10px]">{issue.latestRun.provider}</span>}
+          {issue.latestRun && <RunStatusBadge status={issue.latestRun.status} />}
         </div>
+        <p className="mt-1.5 text-sm leading-snug line-clamp-2">{issue.title}</p>
+        {issue.labels.length > 0 && (
+          <div className="mt-2 flex flex-wrap gap-1">
+            {issue.labels.map((l) => (
+              <span
+                key={l.id}
+                className="inline-flex items-center gap-1 rounded-full border px-1.5 py-0.5 text-[10px] text-muted-foreground"
+              >
+                <span className={cn("h-1.5 w-1.5 rounded-full bg-current", l.color)} />
+                {l.name}
+              </span>
+            ))}
+          </div>
+        )}
+        <div className="mt-2 flex items-center justify-between">
+          <span className="text-[10px] text-muted-foreground">{issue.projectName ? `${issue.team} / ${issue.projectName}` : issue.team}</span>
+          {issue.assignee && <UserAvatar user={issue.assignee} size={18} />}
+        </div>
+      </button>
+      {issue.trackerKind === "linear" && (
+        <a
+          href={issue.url}
+          target="_blank"
+          rel="noreferrer"
+          className="mt-2 inline-flex items-center gap-1 text-[10px] font-medium text-muted-foreground hover:text-foreground"
+          aria-label={`Open ${issue.key} in Linear`}
+        >
+          Linear <ExternalLink className="h-3 w-3" />
+        </a>
       )}
-      <div className="mt-2 flex items-center justify-between">
-        <span className="text-[10px] text-muted-foreground">{issue.team}</span>
-        {issue.assignee && <UserAvatar user={issue.assignee} size={18} />}
-      </div>
-    </button>
+    </article>
   );
 }
 
@@ -177,6 +190,8 @@ export function IssuesView() {
   const [providers, setProviders] = useState<ProviderHealth[]>([]);
   const [selectedProvider, setSelectedProvider] = useState<ProviderId>("mock");
   const [workflow, setWorkflow] = useState<WorkflowStatus | null>(null);
+  const [trackerStatus, setTrackerStatus] = useState<TrackerStatus | null>(null);
+  const [refreshingIssues, setRefreshingIssues] = useState(false);
   const [workflowOpen, setWorkflowOpen] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
   const sourcesRef = useRef<Map<string, EventSource>>(new Map());
@@ -290,10 +305,12 @@ export function IssuesView() {
         getProviders(),
         getWorkflowStatus(),
       ]);
+      const loadedTrackerStatus = await getTrackerStatus();
       if (!alive) return;
       setAllIssues(mapDaemonIssues(loadedIssues, loadedRuns));
       setProviders(loadedProviders);
       setWorkflow(loadedWorkflow);
+      setTrackerStatus(loadedTrackerStatus);
       const defaultProvider = loadedWorkflow.effectiveConfigSummary?.defaultProvider;
       if (defaultProvider === "mock" || defaultProvider === "codex") {
         setSelectedProvider((current) => current ?? defaultProvider);
@@ -417,8 +434,24 @@ export function IssuesView() {
       setDetailError(null);
       setWorkflow(await reloadWorkflow());
       setProviders(await getProviders());
+      setTrackerStatus(await getTrackerStatus());
     } catch (caught) {
       setDetailError(caught instanceof Error ? caught.message : "Failed to reload workflow.");
+    }
+  }, []);
+
+  const handleRefreshIssues = useCallback(async () => {
+    try {
+      setRefreshingIssues(true);
+      setDetailError(null);
+      const [loadedIssues, loadedRuns] = await Promise.all([refreshIssues(), getRuns()]);
+      setAllIssues(mapDaemonIssues(loadedIssues, loadedRuns));
+      setTrackerStatus(await getTrackerStatus());
+    } catch (caught) {
+      setDetailError(caught instanceof Error ? caught.message : "Failed to refresh issues.");
+      setTrackerStatus(await getTrackerStatus().catch(() => null));
+    } finally {
+      setRefreshingIssues(false);
     }
   }, []);
 
@@ -443,12 +476,24 @@ export function IssuesView() {
     [allIssues, team, priority],
   );
 
+  const statusColumns = useMemo(() => {
+    const preferred = [
+      ...(workflow?.effectiveConfigSummary?.activeStates ?? ["Todo", "In Progress", "Human Review", "Rework"]),
+      ...Array.from(new Set(allIssues.map((issue) => issue.status))),
+      ...(workflow?.effectiveConfigSummary?.terminalStates ?? ["Done"]),
+    ];
+    return Array.from(new Set(preferred.filter(Boolean)));
+  }, [allIssues, workflow?.effectiveConfigSummary?.activeStates, workflow?.effectiveConfigSummary?.terminalStates]);
+
   const grouped = useMemo(() => {
     const m = {} as Record<IssueState, Issue[]>;
-    for (const s of ISSUE_STATUS_ORDER) m[s] = [];
-    for (const i of filtered) m[i.status].push(i);
+    for (const s of statusColumns) m[s] = [];
+    for (const i of filtered) {
+      m[i.status] = m[i.status] ?? [];
+      m[i.status].push(i);
+    }
     return m;
-  }, [filtered]);
+  }, [filtered, statusColumns]);
 
   const teamOptions = useMemo(() => ["all", ...Array.from(new Set(allIssues.map((i) => i.team))).sort()], [allIssues]);
 
@@ -460,6 +505,9 @@ export function IssuesView() {
           <span className="text-muted-foreground tabular-nums">{filtered.length}</span>
           <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", workflowStatusClass(workflow?.status))}>
             Workflow {workflow?.status ?? "unknown"}
+          </span>
+          <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", trackerStatusClass(trackerStatus?.status))}>
+            Tracker {trackerStatus ? `${trackerStatus.kind} ${trackerStatus.status.replaceAll("_", " ")}` : "unknown"}
           </span>
           <span className="rounded-full border px-2 py-0.5 text-[11px]">
             Codex {providerLabel(providers.find((provider) => provider.id === "codex"))}
@@ -484,6 +532,15 @@ export function IssuesView() {
             className="inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[12px] hover:bg-muted"
           >
             Workflow
+          </button>
+          <button
+            type="button"
+            onClick={() => void handleRefreshIssues()}
+            disabled={refreshingIssues}
+            className="inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[12px] hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            <RefreshCw className={cn("h-3.5 w-3.5", refreshingIssues && "animate-spin")} />
+            Refresh issues
           </button>
           <div className="flex items-center rounded-md border p-0.5">
             <button
@@ -544,6 +601,7 @@ export function IssuesView() {
         <WorkflowPanel
           onReload={handleWorkflowReload}
           providers={providers}
+          trackerStatus={trackerStatus}
           workflow={workflow}
         />
       )}
@@ -569,23 +627,23 @@ export function IssuesView() {
       {view === "board" ? (
         <div className="flex-1 overflow-auto">
           <div className="flex min-w-max gap-3 p-3">
-            {ISSUE_STATUS_ORDER.map((s) => (
+            {statusColumns.map((s) => (
               <div
                 key={s}
                 className="flex w-72 shrink-0 flex-col rounded-lg border bg-muted/30"
               >
                 <div className="flex items-center gap-2 px-3 py-2 border-b">
                   <IssueStatusIcon status={iconStatusForState(s)} />
-                  <span className="text-sm font-medium">{ISSUE_STATUS_LABELS[s]}</span>
+                  <span className="text-sm font-medium">{s}</span>
                   <span className="text-[11px] text-muted-foreground tabular-nums">
-                    {grouped[s].length}
+                    {grouped[s]?.length ?? 0}
                   </span>
                   <button className="ml-auto grid h-5 w-5 place-items-center rounded hover:bg-background text-muted-foreground">
                     <Plus className="h-3 w-3" />
                   </button>
                 </div>
                 <div className="flex flex-col gap-2 p-2">
-                  {grouped[s].map((i) => (
+                  {(grouped[s] ?? []).map((i) => (
                     <IssueCard key={i.id} issue={i} selected={i.id === selectedIssueId} onSelect={selectIssue} />
                   ))}
                 </div>
@@ -595,17 +653,17 @@ export function IssuesView() {
         </div>
       ) : (
         <div className="flex-1 overflow-auto">
-          {ISSUE_STATUS_ORDER.map((s) =>
-            grouped[s].length === 0 ? null : (
+          {statusColumns.map((s) =>
+            (grouped[s]?.length ?? 0) === 0 ? null : (
               <section key={s} className="border-b last:border-b-0">
                 <div className="flex items-center gap-2 px-4 py-2 bg-muted/30">
                   <IssueStatusIcon status={iconStatusForState(s)} />
-                  <span className="text-sm font-medium">{ISSUE_STATUS_LABELS[s]}</span>
+                  <span className="text-sm font-medium">{s}</span>
                   <span className="text-[11px] text-muted-foreground tabular-nums">
-                    {grouped[s].length}
+                    {grouped[s]?.length ?? 0}
                   </span>
                 </div>
-                {grouped[s].map((i) => (
+                {(grouped[s] ?? []).map((i) => (
                   <IssueRow key={i.id} issue={i} selected={i.id === selectedIssueId} onSelect={selectIssue} />
                 ))}
               </section>
@@ -698,6 +756,18 @@ function RunDetailsCard({
               <dd className="mt-1 font-medium">{issue.sourcePriority}</dd>
             </div>
             <div className="rounded-md border p-3">
+              <dt className="text-muted-foreground">Tracker</dt>
+              <dd className="mt-1 font-medium">{issue.trackerKind}</dd>
+            </div>
+            <div className="rounded-md border p-3">
+              <dt className="text-muted-foreground">Current issue state</dt>
+              <dd className="mt-1 font-medium">{issue.status}</dd>
+            </div>
+            <div className="rounded-md border p-3">
+              <dt className="text-muted-foreground">Last fetched</dt>
+              <dd className="mt-1 font-medium">{issue.lastFetchedAt ? formatTime(issue.lastFetchedAt) : "Not cached"}</dd>
+            </div>
+            <div className="rounded-md border p-3">
               <dt className="text-muted-foreground">Latest run</dt>
               <dd className="mt-1 font-medium">{run ? `${run.provider} ${run.status.replaceAll("_", " ")}` : `Ready with ${selectedProvider}`}</dd>
             </div>
@@ -705,6 +775,21 @@ function RunDetailsCard({
               <dt className="text-muted-foreground">Workspace</dt>
               <dd className="mt-1 break-all font-medium">
                 {workspace ? `${workspace.path} (${workspace.createdNow ? "created" : "reused"})` : "Not prepared yet"}
+              </dd>
+            </div>
+            <div className="rounded-md border p-3">
+              <dt className="text-muted-foreground">Issue URL</dt>
+              <dd className="mt-1 break-all font-medium">
+                <a
+                  href={issue.url}
+                  target="_blank"
+                  rel="noreferrer"
+                  className="inline-flex items-center gap-1 hover:underline"
+                  aria-label={`Open ${issue.key} in ${issue.trackerKind}`}
+                >
+                  {issue.url}
+                  <ExternalLink className="h-3.5 w-3.5 shrink-0" />
+                </a>
               </dd>
             </div>
             <div className="rounded-md border p-3">
@@ -824,10 +909,12 @@ function RunStatusBadge({ status }: { status: RunStatus }) {
 function WorkflowPanel({
   onReload,
   providers,
+  trackerStatus,
   workflow,
 }: {
   onReload: () => Promise<void>;
   providers: ProviderHealth[];
+  trackerStatus: TrackerStatus | null;
   workflow: WorkflowStatus | null;
 }) {
   const summary = workflow?.effectiveConfigSummary;
@@ -870,8 +957,36 @@ function WorkflowPanel({
           <dd className="mt-1 font-medium">{codex ? providerLabel(codex) : "unknown"}</dd>
         </div>
         <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">Tracker</dt>
+          <dd className="mt-1 font-medium">{trackerStatus ? `${trackerStatus.kind} ${trackerStatus.status.replaceAll("_", " ")}` : "unknown"}</dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">Tracker endpoint</dt>
+          <dd className="mt-1 break-all font-medium">{summary?.endpoint ?? "local mock"}</dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">Team/project</dt>
+          <dd className="mt-1 font-medium">{trackerScopeSummary(summary)}</dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
           <dt className="text-muted-foreground">Active states</dt>
           <dd className="mt-1 font-medium">{summary?.activeStates.join(", ") ?? "Unavailable"}</dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">Terminal states</dt>
+          <dd className="mt-1 font-medium">{summary?.terminalStates.join(", ") ?? "Unavailable"}</dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">Linear writes</dt>
+          <dd className="mt-1 font-medium">{summary ? (summary.readOnly || !summary.writeEnabled ? "disabled" : "enabled") : "Unavailable"}</dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">Last sync</dt>
+          <dd className="mt-1 font-medium">{trackerStatus?.lastSyncAt ? formatTime(trackerStatus.lastSyncAt) : "Not synced"}</dd>
+        </div>
+        <div className="rounded-md border bg-background p-2">
+          <dt className="text-muted-foreground">Cached issues</dt>
+          <dd className="mt-1 font-medium">{trackerStatus?.issueCount ?? 0}</dd>
         </div>
         <div className="rounded-md border bg-background p-2">
           <dt className="text-muted-foreground">Max agents</dt>
@@ -889,6 +1004,16 @@ function WorkflowPanel({
       {workflow?.error && (
         <p role="alert" className="mt-3 rounded-md border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-600 dark:text-red-300">
           {workflow.error}
+        </p>
+      )}
+      {trackerStatus?.error && (
+        <p role="alert" className="mt-3 rounded-md border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-600 dark:text-red-300">
+          {trackerStatus.error}
+        </p>
+      )}
+      {summary?.trackerKind === "linear" && trackerStatus?.status === "invalid_config" && (
+        <p className="mt-3 rounded-md border p-2 text-xs text-muted-foreground">
+          Set <span className="font-mono">LINEAR_API_KEY</span> in the daemon environment and reload the workflow. The frontend never receives the API key.
         </p>
       )}
     </section>
@@ -1027,6 +1152,10 @@ function eventLabel(event: AgentEvent) {
       return `${event.provider} provider started`;
     case "provider.stderr":
       return `${event.provider} stderr`;
+    case "tracker.sync":
+      return `Tracker sync ${event.status}`;
+    case "tracker.reconciled":
+      return "Tracker reconciled";
     case "codex.thread.started":
       return "Codex thread started";
     case "codex.turn.started":
@@ -1086,6 +1215,10 @@ function eventSummary(event: AgentEvent) {
       return [`pid ${event.pid ?? "unknown"}`, event.command].join("\n");
     case "provider.stderr":
       return event.message;
+    case "tracker.sync":
+      return event.error ?? event.message ?? `${event.tracker} sync ${event.status}${event.issueCount === undefined ? "" : ` (${event.issueCount} issues)`}.`;
+    case "tracker.reconciled":
+      return `${event.identifier}: ${event.previousState ?? "unknown"} -> ${event.currentState}\n${event.message}`;
     case "codex.thread.started":
       return [`thread ${event.threadId}`, event.model ? `model ${event.model}` : null, event.cwd ? `cwd ${event.cwd}` : null]
         .filter(Boolean)
@@ -1143,6 +1276,33 @@ function workflowStatusClass(status?: WorkflowStatus["status"]) {
     default:
       return "border-border bg-muted/60 text-muted-foreground";
   }
+}
+
+function trackerStatusClass(status?: TrackerStatus["status"]) {
+  switch (status) {
+    case "healthy":
+      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300";
+    case "stale":
+    case "unknown":
+      return "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300";
+    case "invalid_config":
+    case "unavailable":
+      return "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300";
+    default:
+      return "border-border bg-muted/60 text-muted-foreground";
+  }
+}
+
+function trackerScopeSummary(summary: WorkflowStatus["effectiveConfigSummary"] | undefined) {
+  if (!summary) return "Unavailable";
+  const scopes = [
+    summary.teamKey ? `team ${summary.teamKey}` : null,
+    summary.teamId ? `team id ${summary.teamId}` : null,
+    summary.projectSlug ? `project ${summary.projectSlug}` : null,
+    summary.projectId ? `project id ${summary.projectId}` : null,
+    summary.allowWorkspaceWide ? "workspace-wide" : null,
+  ].filter(Boolean);
+  return scopes.join(", ") || "local mock";
 }
 
 function decisionLabel(decision: ApprovalDecision) {
@@ -1210,7 +1370,11 @@ function mapDaemonIssues(issues: DaemonIssue[], runs: Run[]): Issue[] {
       sourcePriority: issue.priority,
       assignee: users[index % users.length],
       labels,
-      team: issue.identifier.split("-")[0] ?? "SYM",
+      team: issue.tracker?.teamKey ?? issue.identifier.split("-")[0] ?? "SYM",
+      url: issue.url,
+      trackerKind: issue.tracker?.kind ?? "mock",
+      projectName: issue.tracker?.projectName ?? null,
+      lastFetchedAt: issue.lastFetchedAt ?? null,
       latestRun: latestRunByIssue.get(issue.id),
     };
   });
@@ -1232,16 +1396,27 @@ function priorityForIssue(priority: DaemonIssue["priority"]): Priority {
 }
 
 function iconStatusForState(state: IssueState): Issue["iconStatus"] {
-  switch (state) {
-    case "Todo":
+  switch (state.toLowerCase()) {
+    case "todo":
       return "todo";
-    case "In Progress":
+    case "in progress":
+    case "started":
       return "in-progress";
-    case "Human Review":
+    case "human review":
+    case "review":
       return "in-review";
-    case "Done":
+    case "done":
+    case "closed":
+    case "completed":
       return "done";
-    case "Rework":
+    case "cancelled":
+    case "canceled":
+    case "duplicate":
+      return "cancelled";
+    case "rework":
+    case "backlog":
       return "backlog";
+    default:
+      return "todo";
   }
 }

@@ -3,6 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EventStore } from "@symphonia/db";
+import { LinearFetch } from "@symphonia/core";
 import { AgentEvent, ApprovalState, WorkflowStatus } from "@symphonia/types";
 import { createDaemonServer, SymphoniaDaemon } from "../src/daemon";
 
@@ -53,6 +54,97 @@ describe("daemon API", () => {
     daemon.refreshWorkflowStatus();
     const codex = await daemon.getProviderHealth("codex");
     expect(codex.available).toBe(false);
+  });
+
+  it("reports tracker status and refreshes mock issue cache", async () => {
+    const status = daemon.getTrackerStatus();
+
+    expect(status.kind).toBe("mock");
+    expect(status.config?.trackerKind).toBe("mock");
+    expect(JSON.stringify(status)).not.toContain("apiKey");
+
+    const issues = await daemon.refreshIssueCache();
+    expect(issues.some((issue) => issue.identifier === "SYM-1")).toBe(true);
+    expect(daemon.getTrackerStatus().issueCount).toBeGreaterThan(0);
+  });
+
+  it("reports linear setup errors without exposing secrets", () => {
+    writeLinearWorkflow({ apiKey: "$MISSING_LINEAR_API_KEY", teamKey: "ENG" });
+
+    const status = daemon.getTrackerStatus();
+
+    expect(status.status).toBe("invalid_config");
+    expect(status.error).toContain("tracker.api_key is required");
+    expect(JSON.stringify(status)).not.toContain("MISSING_LINEAR_API_KEY");
+  });
+
+  it("refreshes fake linear issues and starts a mock run from a linear card", async () => {
+    const linearFetch = fakeLinearFetch({ state: "Todo" });
+    const created = createDaemonServer(new EventStore(join(directory, "linear.sqlite")), {
+      workflowPath,
+      cwd: directory,
+      linearFetch,
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeLinearWorkflow();
+
+    const issues = await daemon.refreshIssueCache();
+    expect(issues.map((issue) => issue.identifier)).toEqual(["ENG-101"]);
+    expect(daemon.getTrackerStatus()).toMatchObject({ kind: "linear", status: "healthy", issueCount: 1 });
+
+    const run = await daemon.startRun("linear-issue-101", "mock");
+    await waitForTerminal(run.id, "succeeded");
+
+    expect(run.provider).toBe("mock");
+    expect(daemon.getRunPrompt(run.id)).toContain("Linear-backed daemon test");
+    expect(daemon.getRunPrompt(run.id)).toContain("https://linear.app/acme/issue/ENG-101");
+    const workspaceEvent = getEvents(run.id).find((event) => event.type === "workspace.ready");
+    expect(workspaceEvent?.type === "workspace.ready" ? workspaceEvent.workspace.path : "").toContain("ENG-101");
+  });
+
+  it("starts the codex provider from a fake linear issue", async () => {
+    const created = createDaemonServer(new EventStore(join(directory, "linear-codex.sqlite")), {
+      workflowPath,
+      cwd: directory,
+      linearFetch: fakeLinearFetch({ state: "Todo" }),
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeLinearWorkflow({ codexCommand: fakeCodexCommand("success") });
+    await daemon.refreshIssueCache();
+
+    const run = await daemon.startRun("linear-issue-101", "codex");
+    await waitForTerminal(run.id, "succeeded");
+
+    expect(run.provider).toBe("codex");
+    expect(getEvents(run.id).map((event) => event.type)).toEqual(
+      expect.arrayContaining(["provider.started", "codex.thread.started", "codex.turn.started"]),
+    );
+  });
+
+  it("reconciles running linear issues that become terminal", async () => {
+    let linearState = "Todo";
+    process.env.SYMPHONIA_MOCK_DELAY_MS = "50";
+    const created = createDaemonServer(new EventStore(join(directory, "linear-reconcile.sqlite")), {
+      workflowPath,
+      cwd: directory,
+      linearFetch: fakeLinearFetch({ getState: () => linearState }),
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeLinearWorkflow();
+    await daemon.refreshIssueCache();
+
+    const run = await daemon.startRun("linear-issue-101", "mock");
+    await waitForEvent(run.id, "agent.message");
+
+    linearState = "Done";
+    await daemon.refreshIssueCache({ reconcile: true });
+    await waitForTerminal(run.id, "cancelled");
+
+    const events = getEvents(run.id);
+    expect(events.some((event) => event.type === "tracker.reconciled" && event.action === "stopped_terminal")).toBe(true);
   });
 
   it("runs workflow, workspace, prompt, hook, and mock provider events", async () => {
@@ -233,6 +325,121 @@ Title:
 {{ issue.title }}
 `,
   );
+}
+
+function writeLinearWorkflow(options: { codexCommand?: string; apiKey?: string; teamKey?: string } = {}): void {
+  writeFileSync(
+    workflowPath,
+    `---
+provider: mock
+tracker:
+  kind: linear
+  endpoint: "https://api.linear.app/graphql"
+  api_key: ${JSON.stringify(options.apiKey ?? "linear-secret")}
+  team_key: ${JSON.stringify(options.teamKey ?? "ENG")}
+  active_states:
+    - "Todo"
+    - "In Progress"
+  terminal_states:
+    - "Done"
+    - "Canceled"
+  page_size: 5
+  max_pages: 2
+  read_only: true
+workspace:
+  root: "./workspaces"
+codex:
+  command: ${JSON.stringify(options.codexCommand ?? "codex app-server")}
+  model: "fake-model"
+  approval_policy: "on-request"
+  turn_sandbox_policy: "workspaceWrite"
+  turn_timeout_ms: 2000
+  read_timeout_ms: 1000
+  stall_timeout_ms: 1000
+hooks:
+  timeout_ms: 1000
+  before_run: |
+    printf "Preparing in $(pwd)\\n"
+---
+You are working on {{ issue.identifier }}.
+
+Title:
+{{ issue.title }}
+
+Description:
+{{ issue.description }}
+
+State:
+{{ issue.state }}
+
+Labels:
+{{ issue.labels }}
+
+Linear URL:
+{{ issue.url }}
+`,
+  );
+}
+
+function fakeLinearFetch(options: { state?: string; getState?: () => string }): LinearFetch {
+  return async (_input, init) => {
+    const body = JSON.parse(String(init?.body)) as { query: string };
+    const state = options.getState?.() ?? options.state ?? "Todo";
+    const node = fakeLinearIssue(state);
+
+    if (body.query.includes("SymphoniaLinearViewer")) {
+      return jsonResponse({ data: { viewer: { id: "viewer-1", name: "Linear User", email: "linear@example.com" } } });
+    }
+
+    if (body.query.includes("SymphoniaLinearIssues")) {
+      return jsonResponse({
+        data: {
+          issues: {
+            nodes: [node],
+            pageInfo: { hasNextPage: false, endCursor: null },
+          },
+        },
+      });
+    }
+
+    if (body.query.includes("SymphoniaLinearIssue")) {
+      return jsonResponse({ data: { issue: node } });
+    }
+
+    return jsonResponse({
+      data: {
+        issues: {
+          nodes: [node],
+          pageInfo: { hasNextPage: false, endCursor: null },
+        },
+      },
+    });
+  };
+}
+
+function fakeLinearIssue(state: string) {
+  return {
+    id: "linear-issue-101",
+    identifier: "ENG-101",
+    title: "Linear-backed daemon test",
+    description: "Use real Linear issue fields in the prompt.",
+    priority: 2,
+    branchName: "eng-101-linear-backed-daemon-test",
+    url: "https://linear.app/acme/issue/ENG-101",
+    createdAt: "2026-05-13T08:00:00.000Z",
+    updatedAt: "2026-05-13T08:10:00.000Z",
+    state: { id: `state-${state}`, name: state, type: state === "Done" ? "completed" : "unstarted" },
+    labels: { nodes: [{ name: "Backend" }, { name: "Linear" }] },
+    project: { id: "project-1", name: "Orchestration", slugId: "orchestration" },
+    team: { id: "team-1", key: "ENG", name: "Engineering" },
+  };
+}
+
+function jsonResponse(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), {
+    status,
+    headers: { "Content-Type": "application/json" },
+  });
 }
 
 function fakeCodexCommand(mode: string): string {
