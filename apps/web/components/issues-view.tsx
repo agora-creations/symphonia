@@ -2047,7 +2047,7 @@ function ConnectedGateway({
           label: "GitHub validation",
           status: status.github.status,
           why: "Review artifacts can validate repository access and existing PR context.",
-          guidance: status.github.repository ?? status.github.error ?? "Connect or validate GitHub from Settings.",
+          guidance: githubGatewayGuidance(status),
           actionKind: "validate_github",
         },
         {
@@ -2055,7 +2055,7 @@ function ConnectedGateway({
           label: "Linear connection",
           status: status.linear.status,
           why: "The board must be populated from real tracked issues.",
-          guidance: status.linear.error ?? `${status.linear.issueScope}; ${status.linear.issueCount} cached issues.`,
+          guidance: linearGatewayGuidance(status),
           actionKind: "connect_linear",
         },
         {
@@ -2232,6 +2232,25 @@ function readinessClass(status: string): string {
     return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300";
   }
   return "text-muted-foreground";
+}
+
+function githubGatewayGuidance(status: ConnectedGoldenPathStatus): string {
+  if (status.github.status === "disabled") {
+    return "GitHub validation is disabled in WORKFLOW.md; keep writes off and enable read-only validation when ready.";
+  }
+  if (status.github.status === "missing_auth") {
+    return "Set GITHUB_TOKEN/GITHUB_PAT or connect GitHub in Settings. No GitHub writes are enabled here.";
+  }
+  return status.github.repository ?? status.github.error ?? "Connect or validate GitHub from Settings.";
+}
+
+function linearGatewayGuidance(status: ConnectedGoldenPathStatus): string {
+  if (status.linear.status === "missing_auth") {
+    return status.linear.error
+      ? `Set LINEAR_API_KEY or connect Linear in Settings. ${status.linear.error}`
+      : "Set LINEAR_API_KEY or connect Linear in Settings; no sample issues are substituted.";
+  }
+  return status.linear.error ?? `${status.linear.issueScope}; ${status.linear.issueCount} cached issues.`;
 }
 
 function WorkflowPanel({

@@ -35,10 +35,10 @@ tracker:
     - "Duplicate"
 
 github:
-  enabled: false
+  enabled: true
   token: "$GITHUB_TOKEN"
-  owner: null
-  repo: null
+  owner: "agora-creations"
+  repo: "symphonia"
   default_base_branch: "main"
   remote_name: "origin"
   read_only: true

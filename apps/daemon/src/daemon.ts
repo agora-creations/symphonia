@@ -2954,7 +2954,11 @@ function connectedNextAction(input: ConnectedActionInput): ConnectedGoldenPathSt
 }
 
 function linearBlocker(status: ConnectedReadinessStatus, error: string | null): string {
-  if (status === "missing_auth") return "Linear is not connected.";
+  if (status === "missing_auth") {
+    return error
+      ? `Linear is not connected: ${error}`
+      : "Linear is not connected. Set LINEAR_API_KEY or connect Linear in Settings.";
+  }
   if (status === "invalid_config") return error ?? "Linear workflow configuration is invalid.";
   if (status === "unavailable") return error ?? "Linear is unavailable.";
   if (status === "stale") return error ?? "Linear issue cache is stale.";
@@ -2963,8 +2967,8 @@ function linearBlocker(status: ConnectedReadinessStatus, error: string | null): 
 }
 
 function githubBlocker(status: ConnectedReadinessStatus, error: string | null): string {
-  if (status === "disabled") return "GitHub repository validation is disabled in WORKFLOW.md.";
-  if (status === "missing_auth") return "GitHub credentials are unavailable.";
+  if (status === "disabled") return "GitHub repository validation is disabled in WORKFLOW.md; enable read-only GitHub validation to prove repository access.";
+  if (status === "missing_auth") return "GitHub credentials are unavailable. Set GITHUB_TOKEN/GITHUB_PAT or connect GitHub in Settings.";
   if (status === "invalid_config") return error ?? "GitHub workflow configuration is invalid.";
   if (status === "unavailable") return error ?? "GitHub repository is unavailable.";
   if (status === "stale") return error ?? "GitHub repository validation is stale.";
