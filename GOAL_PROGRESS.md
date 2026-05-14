@@ -160,7 +160,7 @@ Checkpoint 9, 14, and 15 validation:
   - First PR run reported checks successfully.
   - Initial `Harness scan` job failed because it ran `pnpm harness:scan --path .` before building `@symphonia/types`; the scanner imports the workspace package `dist` output in CI.
   - Fixed `.github/workflows/ci.yml` to run `pnpm build:packages` before the harness scan job.
-  - Remote rerun status pending after fix.
+  - Remote rerun on PR #12 passed: Install and cache, Test, Lint, Build, Desktop build, Harness scan, and Whitespace diff check all passed.
 
 Final implemented files/directories:
 
