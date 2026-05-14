@@ -40,6 +40,8 @@ import {
   IntegrationWritePreviewResponseSchema,
   IntegrationWriteResult,
   IntegrationWriteResultResponseSchema,
+  RunApprovalEvidence,
+  RunApprovalEvidenceResponseSchema,
   IssuesResponseSchema,
   ProviderHealth,
   ProviderHealthResponseSchema,
@@ -255,6 +257,11 @@ export async function getRunPrompt(runId: string): Promise<string | null> {
 export async function getReviewArtifacts(runId: string): Promise<ReviewArtifactSnapshot | null> {
   const response = await request(`/runs/${runId}/review-artifacts`);
   return ReviewArtifactResponseSchema.parse(response).reviewArtifacts;
+}
+
+export async function getRunApprovalEvidence(runId: string): Promise<RunApprovalEvidence> {
+  const response = await request(`/runs/${runId}/approval-evidence`);
+  return RunApprovalEvidenceResponseSchema.parse(response).approvalEvidence;
 }
 
 export async function refreshReviewArtifacts(runId: string): Promise<ReviewArtifactSnapshot | null> {
