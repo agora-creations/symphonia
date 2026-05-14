@@ -1324,6 +1324,106 @@ export const GitHubPrExecutionRequestSchema = z.object({
 });
 export type GitHubPrExecutionRequest = z.infer<typeof GitHubPrExecutionRequestSchema>;
 
+export const GitHubPrPreflightStatusSchema = z.enum(["passed", "blocked", "warning", "unavailable"]);
+export type GitHubPrPreflightStatus = z.infer<typeof GitHubPrPreflightStatusSchema>;
+
+export const GitHubPrPreflightWorkspaceSchema = z.object({
+  path: z.string().min(1).nullable(),
+  exists: z.boolean(),
+  isGitRepository: z.boolean(),
+  isIsolatedRunWorkspace: z.boolean(),
+  belongsToRun: z.boolean(),
+  isMainCheckout: z.boolean(),
+  gitTopLevel: z.string().min(1).nullable(),
+});
+export type GitHubPrPreflightWorkspace = z.infer<typeof GitHubPrPreflightWorkspaceSchema>;
+
+export const GitHubPrPreflightRepositorySchema = z.object({
+  expectedOwner: z.string().min(1).nullable(),
+  expectedName: z.string().min(1).nullable(),
+  remoteUrl: z.string().min(1).nullable(),
+  matchesTarget: z.boolean(),
+});
+export type GitHubPrPreflightRepository = z.infer<typeof GitHubPrPreflightRepositorySchema>;
+
+export const GitHubPrPreflightBranchesSchema = z.object({
+  baseBranch: z.string().min(1).nullable(),
+  headBranch: z.string().min(1).nullable(),
+  baseIsProtectedOrDefault: z.boolean(),
+  headExistsLocal: z.boolean().nullable(),
+  headExistsRemote: z.boolean().nullable(),
+  headOwnedByExecution: z.boolean(),
+  headSafe: z.boolean(),
+});
+export type GitHubPrPreflightBranches = z.infer<typeof GitHubPrPreflightBranchesSchema>;
+
+export const GitHubPrPreflightDiffSchema = z.object({
+  liveChangedFiles: z.array(ChangedFileSchema),
+  evidenceChangedFiles: z.array(ChangedFileSchema),
+  matchedFiles: z.array(z.string().min(1)),
+  missingFromLiveDiff: z.array(z.string().min(1)),
+  extraInLiveDiff: z.array(z.string().min(1)),
+  hasUnrelatedDirtyFiles: z.boolean(),
+  matchesApprovalEvidence: z.boolean(),
+});
+export type GitHubPrPreflightDiff = z.infer<typeof GitHubPrPreflightDiffSchema>;
+
+export const GitHubPrPreflightReviewArtifactSchema = z.object({
+  status: z.enum(["ready", "missing", "error", "unavailable"]),
+  identifier: z.string().min(1).nullable(),
+  path: z.string().min(1).nullable(),
+});
+export type GitHubPrPreflightReviewArtifact = z.infer<typeof GitHubPrPreflightReviewArtifactSchema>;
+
+export const GitHubPrPreflightPreviewSchema = z.object({
+  payloadHash: z.string().min(1).nullable(),
+  expectedPayloadHash: z.string().min(1).nullable(),
+  matches: z.boolean(),
+});
+export type GitHubPrPreflightPreview = z.infer<typeof GitHubPrPreflightPreviewSchema>;
+
+export const GitHubPrPreflightRemoteStateSchema = z.object({
+  existingBranch: z.boolean().nullable(),
+  existingPr: PullRequestSummarySchema.nullable(),
+  existingPrUrl: z.string().url().nullable(),
+  idempotencyMatch: z.boolean(),
+  ambiguous: z.boolean(),
+});
+export type GitHubPrPreflightRemoteState = z.infer<typeof GitHubPrPreflightRemoteStateSchema>;
+
+export const GitHubPrPreflightWriteModeSchema = z.object({
+  githubMode: z.enum(["read_only", "disabled", "manual_enabled", "enabled", "unavailable", "blocked"]),
+  allowPush: z.boolean(),
+  allowPrCreate: z.boolean(),
+});
+export type GitHubPrPreflightWriteMode = z.infer<typeof GitHubPrPreflightWriteModeSchema>;
+
+export const GitHubPrPreflightResultSchema = z.object({
+  runId: z.string().min(1),
+  previewId: z.string().min(1).nullable(),
+  actionKind: z.literal("github_pr_create"),
+  status: GitHubPrPreflightStatusSchema,
+  canExecute: z.boolean(),
+  workspace: GitHubPrPreflightWorkspaceSchema,
+  repository: GitHubPrPreflightRepositorySchema,
+  branches: GitHubPrPreflightBranchesSchema,
+  diff: GitHubPrPreflightDiffSchema,
+  reviewArtifact: GitHubPrPreflightReviewArtifactSchema,
+  preview: GitHubPrPreflightPreviewSchema,
+  remoteState: GitHubPrPreflightRemoteStateSchema,
+  writeMode: GitHubPrPreflightWriteModeSchema,
+  blockingReasons: z.array(z.string().min(1)),
+  warnings: z.array(z.string().min(1)),
+  requiredConfirmation: z.string().min(1).nullable(),
+  checkedAt: isoDateTime,
+});
+export type GitHubPrPreflightResult = z.infer<typeof GitHubPrPreflightResultSchema>;
+
+export const GitHubPrPreflightResponseSchema = z.object({
+  preflight: GitHubPrPreflightResultSchema,
+});
+export type GitHubPrPreflightResponse = z.infer<typeof GitHubPrPreflightResponseSchema>;
+
 export const WriteExecutionStatusSchema = z.enum([
   "pending",
   "in_progress",
@@ -1405,6 +1505,7 @@ export const GitHubPrExecutionResponseSchema = z.object({
   idempotency: IdempotencyResultSchema,
   approvalRecord: LocalWriteApprovalRecordSchema.nullable(),
   executionRecord: LocalWriteExecutionRecordSchema.nullable(),
+  preflight: GitHubPrPreflightResultSchema.nullable().default(null),
   createdAt: isoDateTime.nullable(),
   completedAt: isoDateTime.nullable(),
 });

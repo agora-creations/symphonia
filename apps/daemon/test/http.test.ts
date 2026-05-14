@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EventStore } from "@symphonia/db";
 import { AuthFetch, createQueuedRun, GitHubFetch, LinearFetch } from "@symphonia/core";
-import { AgentEvent, ApprovalState, GitHubPrExecutionResultResponse, IntegrationWriteActionsResponse, RunApprovalEvidenceResponse, WorkflowStatus } from "@symphonia/types";
+import { AgentEvent, ApprovalState, GitHubPrExecutionResultResponse, GitHubPrPreflightResponse, IntegrationWriteActionsResponse, RunApprovalEvidenceResponse, WorkflowStatus, WriteActionPreviewContract } from "@symphonia/types";
 import { createDaemonServer, SymphoniaDaemon } from "../src/daemon";
 
 let directory: string;
@@ -392,6 +392,7 @@ describe("daemon API", () => {
     });
     prepareGitWorkspace(join(directory, "workspaces", "ENG-101"), {
       remotePath: join(directory, "agora-creations", "symphonia.git"),
+      pushInitialBranch: false,
     });
     await daemon.refreshIssueCache();
 
@@ -403,6 +404,14 @@ describe("daemon API", () => {
     expect(githubPreview.status).toBe("preview_available");
     expect(githubPreview.targetRepository).toBe("agora-creations/symphonia");
     expectedIdempotencyKey = githubPreview.idempotencyKey;
+    const preflight = await requestJson<GitHubPrPreflightResponse>("GET", githubPreflightPath(run.id, githubPreview));
+    expect(preflight.preflight).toMatchObject({
+      status: "passed",
+      canExecute: true,
+      workspace: { isIsolatedRunWorkspace: true, isMainCheckout: false, belongsToRun: true },
+      diff: { matchesApprovalEvidence: true },
+      remoteState: { ambiguous: false },
+    });
 
     const result = await requestJson<GitHubPrExecutionResultResponse>("POST", `/runs/${run.id}/github/pr/create`, {
       runId: run.id,
@@ -464,6 +473,208 @@ describe("daemon API", () => {
     expect(mismatch.result.status).toBe("blocked");
     expect(mismatch.result.idempotency.status).toBe("conflict");
     expect(githubPrCreateCalls).toBe(1);
+  });
+
+  it("blocks GitHub PR preflight for main checkout workspaces before audit or transport calls", async () => {
+    process.env.GITHUB_TOKEN = "ghu_write_secret";
+    process.env.LINEAR_API_KEY = "lin_write_secret";
+    let githubPrCreateCalls = 0;
+    const githubBaseFetch = fakeGitHubWriteFetch();
+    const githubFetch: GitHubFetch = async (input, init) => {
+      const url = new URL(input);
+      if (url.pathname === "/repos/agora-creations/symphonia/pulls" && init?.method === "POST") githubPrCreateCalls += 1;
+      return githubBaseFetch(input, init);
+    };
+    const store = new EventStore(join(directory, "main-checkout-preflight.sqlite"));
+    const created = createDaemonServer(store, {
+      workflowPath,
+      cwd: directory,
+      githubFetch,
+      linearFetch: fakeLinearFetch({ state: "Todo" }),
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeWorkflow({
+      codexCommand: fakeCodexCommand("success"),
+      githubEnabled: true,
+      githubReadOnly: false,
+      githubWriteEnabled: true,
+      githubAllowCreatePr: true,
+      githubAllowPush: true,
+    });
+    execFileSync("git", ["init"], { cwd: directory, stdio: "ignore" });
+    execFileSync("git", ["config", "user.email", "symphonia@example.com"], { cwd: directory, stdio: "ignore" });
+    execFileSync("git", ["config", "user.name", "Symphonia Test"], { cwd: directory, stdio: "ignore" });
+    execFileSync("git", ["remote", "add", "origin", join(directory, "agora-creations", "symphonia.git")], { cwd: directory, stdio: "ignore" });
+    writeFileSync(join(directory, "README.md"), "# Main checkout\n");
+    execFileSync("git", ["add", "README.md"], { cwd: directory, stdio: "ignore" });
+    execFileSync("git", ["commit", "-m", "Initial main checkout"], { cwd: directory, stdio: "ignore" });
+    execFileSync("git", ["checkout", "-b", "feature/main-checkout"], { cwd: directory, stdio: "ignore" });
+    mkdirSync(join(directory, "agora-creations", "symphonia.git"), { recursive: true });
+    execFileSync("git", ["init", "--bare"], { cwd: join(directory, "agora-creations", "symphonia.git"), stdio: "ignore" });
+    await daemon.refreshIssueCache();
+
+    const run = await daemon.startRun("linear-issue-101", "codex");
+    await waitForTerminal(run.id, "succeeded");
+    const workspacePath = daemon.requireRun(run.id).workspacePath!;
+    writeFileSync(join(workspacePath, "main-checkout-change.txt"), "not isolated\n");
+    await requestJson("POST", `/runs/${run.id}/review-artifacts/refresh`);
+    const actions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
+    const githubPreview = actions.previews.find((preview) => preview.kind === "github_pr_create")!;
+
+    const preflight = await requestJson<GitHubPrPreflightResponse>("GET", githubPreflightPath(run.id, githubPreview));
+    expect(preflight.preflight.canExecute).toBe(false);
+    expect(preflight.preflight.workspace).toMatchObject({ isMainCheckout: true, isIsolatedRunWorkspace: false });
+    expect(preflight.preflight.blockingReasons).toEqual(
+      expect.arrayContaining([
+        "Run workspace resolves to the main Symphonia checkout, which is not eligible for PR writes.",
+        "Run workspace is not an isolated git repository rooted at the workspace path.",
+      ]),
+    );
+
+    const blocked = await requestJson<GitHubPrExecutionResultResponse>("POST", `/runs/${run.id}/github/pr/create`, githubExecutionBody(run.id, githubPreview));
+    expect(blocked.result.status).toBe("blocked");
+    expect(blocked.result.preflight?.workspace.isMainCheckout).toBe(true);
+    expect(store.findLocalWriteExecutionByIdempotencyKey(githubPreview.idempotencyKey)).toBeNull();
+    expect(githubPrCreateCalls).toBe(0);
+  });
+
+  it("blocks PR preflight when live diff no longer matches approval evidence", async () => {
+    process.env.GITHUB_TOKEN = "ghu_write_secret";
+    process.env.LINEAR_API_KEY = "lin_write_secret";
+    const created = createDaemonServer(new EventStore(join(directory, "diff-mismatch-preflight.sqlite")), {
+      workflowPath,
+      cwd: directory,
+      githubFetch: fakeGitHubWriteFetch(),
+      linearFetch: fakeLinearFetch({ state: "Todo" }),
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeWorkflow({
+      codexCommand: fakeCodexCommand("success"),
+      githubEnabled: true,
+      githubReadOnly: false,
+      githubWriteEnabled: true,
+      githubAllowCreatePr: true,
+      githubAllowPush: true,
+    });
+    prepareGitWorkspace(join(directory, "workspaces", "ENG-101"), {
+      remotePath: join(directory, "agora-creations", "symphonia.git"),
+      pushInitialBranch: false,
+    });
+    await daemon.refreshIssueCache();
+
+    const run = await daemon.startRun("linear-issue-101", "codex");
+    await waitForTerminal(run.id, "succeeded");
+    await requestJson("POST", `/runs/${run.id}/review-artifacts/refresh`);
+    const workspacePath = daemon.requireRun(run.id).workspacePath!;
+    rmSync(join(workspacePath, "change.txt"), { force: true });
+    writeFileSync(join(workspacePath, "other-change.txt"), "same count different path\n");
+    const actions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
+    const githubPreview = actions.previews.find((preview) => preview.kind === "github_pr_create")!;
+
+    const preflight = await requestJson<GitHubPrPreflightResponse>("GET", githubPreflightPath(run.id, githubPreview));
+    expect(preflight.preflight.canExecute).toBe(false);
+    expect(preflight.preflight.diff.liveChangedFiles).toHaveLength(1);
+    expect(preflight.preflight.diff.evidenceChangedFiles).toHaveLength(1);
+    expect(preflight.preflight.diff.matchesApprovalEvidence).toBe(false);
+    expect(preflight.preflight.diff.missingFromLiveDiff).toContain("change.txt");
+    expect(preflight.preflight.diff.extraInLiveDiff).toContain("other-change.txt");
+    expect(preflight.preflight.blockingReasons).toEqual(
+      expect.arrayContaining(["Live workspace diff does not match approval evidence."]),
+    );
+  });
+
+  it("blocks PR preflight for existing branch or PR state without matching idempotency", async () => {
+    process.env.GITHUB_TOKEN = "ghu_write_secret";
+    process.env.LINEAR_API_KEY = "lin_write_secret";
+    const githubFetch: GitHubFetch = async (input, init) => {
+      const url = new URL(input);
+      if (url.pathname === "/repos/agora-creations/symphonia/pulls" && (init?.method ?? "GET") === "GET") {
+        return jsonResponse([fakePullRequest()]);
+      }
+      return fakeGitHubWriteFetch()(input, init);
+    };
+    const created = createDaemonServer(new EventStore(join(directory, "branch-ambiguity-preflight.sqlite")), {
+      workflowPath,
+      cwd: directory,
+      githubFetch,
+      linearFetch: fakeLinearFetch({ state: "Todo" }),
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeWorkflow({
+      codexCommand: fakeCodexCommand("success"),
+      githubEnabled: true,
+      githubReadOnly: false,
+      githubWriteEnabled: true,
+      githubAllowCreatePr: true,
+      githubAllowPush: true,
+    });
+    prepareGitWorkspace(join(directory, "workspaces", "ENG-101"), {
+      remotePath: join(directory, "agora-creations", "symphonia.git"),
+    });
+    await daemon.refreshIssueCache();
+
+    const run = await daemon.startRun("linear-issue-101", "codex");
+    await waitForTerminal(run.id, "succeeded");
+    await requestJson("POST", `/runs/${run.id}/review-artifacts/refresh`);
+    const actions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
+    const githubPreview = actions.previews.find((preview) => preview.kind === "github_pr_create")!;
+    const preflight = await requestJson<GitHubPrPreflightResponse>("GET", githubPreflightPath(run.id, githubPreview));
+
+    expect(preflight.preflight.canExecute).toBe(false);
+    expect(preflight.preflight.remoteState.ambiguous).toBe(true);
+    expect(preflight.preflight.remoteState.existingBranch).toBe(true);
+    expect(preflight.preflight.remoteState.existingPr?.number).toBe(42);
+    expect(preflight.preflight.blockingReasons).toEqual(
+      expect.arrayContaining([
+        "Remote branch feature/eng-101-write-test already exists and is not tied to this execution idempotency record.",
+        "Existing PR #42 already exists for feature/eng-101-write-test and is not tied to this execution idempotency record.",
+      ]),
+    );
+  });
+
+  it("blocks PR preflight when the supplied preview payload hash is stale", async () => {
+    process.env.GITHUB_TOKEN = "ghu_write_secret";
+    process.env.LINEAR_API_KEY = "lin_write_secret";
+    const created = createDaemonServer(new EventStore(join(directory, "payload-mismatch-preflight.sqlite")), {
+      workflowPath,
+      cwd: directory,
+      githubFetch: fakeGitHubWriteFetch(),
+      linearFetch: fakeLinearFetch({ state: "Todo" }),
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeWorkflow({
+      codexCommand: fakeCodexCommand("success"),
+      githubEnabled: true,
+      githubReadOnly: false,
+      githubWriteEnabled: true,
+      githubAllowCreatePr: true,
+      githubAllowPush: true,
+    });
+    prepareGitWorkspace(join(directory, "workspaces", "ENG-101"), {
+      remotePath: join(directory, "agora-creations", "symphonia.git"),
+      pushInitialBranch: false,
+    });
+    await daemon.refreshIssueCache();
+
+    const run = await daemon.startRun("linear-issue-101", "codex");
+    await waitForTerminal(run.id, "succeeded");
+    await requestJson("POST", `/runs/${run.id}/review-artifacts/refresh`);
+    const actions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
+    const githubPreview = actions.previews.find((preview) => preview.kind === "github_pr_create")!;
+    const preflight = await requestJson<GitHubPrPreflightResponse>(
+      "GET",
+      githubPreflightPath(run.id, githubPreview, { payloadHash: "stale-payload-hash" }),
+    );
+
+    expect(preflight.preflight.canExecute).toBe(false);
+    expect(preflight.preflight.preview.matches).toBe(false);
+    expect(preflight.preflight.blockingReasons).toEqual(
+      expect.arrayContaining(["Preview payload hash does not match the current GitHub PR preview."]),
+    );
   });
 
   it("serves harness scan, preview, dry-run apply, confirmed apply, and stale preview errors", async () => {
@@ -1569,7 +1780,7 @@ function fakePullRequest() {
   };
 }
 
-function prepareGitWorkspace(workspacePath: string, options: { remotePath?: string } = {}): void {
+function prepareGitWorkspace(workspacePath: string, options: { remotePath?: string; pushInitialBranch?: boolean } = {}): void {
   if (options.remotePath) {
     mkdirSync(options.remotePath, { recursive: true });
     execFileSync("git", ["init", "--bare"], { cwd: options.remotePath, stdio: "ignore" });
@@ -1585,10 +1796,48 @@ function prepareGitWorkspace(workspacePath: string, options: { remotePath?: stri
   }
   execFileSync("git", ["add", "README.md"], { cwd: workspacePath, stdio: "ignore" });
   execFileSync("git", ["commit", "-m", "Initial workspace commit"], { cwd: workspacePath, stdio: "ignore" });
-  if (options.remotePath) {
+  if (options.remotePath && options.pushInitialBranch !== false) {
     execFileSync("git", ["push", "origin", "HEAD:refs/heads/feature/eng-101-write-test"], { cwd: workspacePath, stdio: "ignore" });
   }
   writeFileSync(join(workspacePath, "change.txt"), "write-action validation\n");
+}
+
+function githubPreflightPath(
+  runId: string,
+  preview: WriteActionPreviewContract,
+  overrides: Partial<{
+    previewId: string;
+    payloadHash: string;
+    idempotencyKey: string;
+    targetRepository: string;
+    baseBranch: string;
+    headBranch: string;
+  }> = {},
+): string {
+  const params = new URLSearchParams({
+    previewId: overrides.previewId ?? preview.id,
+    payloadHash: overrides.payloadHash ?? preview.payloadHash,
+    idempotencyKey: overrides.idempotencyKey ?? preview.idempotencyKey,
+    targetRepository: overrides.targetRepository ?? preview.targetRepository ?? "agora-creations/symphonia",
+    baseBranch: overrides.baseBranch ?? preview.baseBranch ?? "main",
+    headBranch: overrides.headBranch ?? preview.targetBranch ?? "feature/eng-101-write-test",
+  });
+  return `/runs/${runId}/github/pr/preflight?${params.toString()}`;
+}
+
+function githubExecutionBody(runId: string, preview: WriteActionPreviewContract) {
+  return {
+    runId,
+    previewId: preview.id,
+    actionKind: "github_pr_create" as const,
+    payloadHash: preview.payloadHash,
+    idempotencyKey: preview.idempotencyKey,
+    confirmationText: preview.confirmationPhrase,
+    targetRepository: preview.targetRepository ?? "agora-creations/symphonia",
+    baseBranch: preview.baseBranch ?? "main",
+    headBranch: preview.targetBranch ?? "feature/eng-101-write-test",
+    draft: true,
+  };
 }
 
 function authorizationHeader(init?: RequestInit): string {
