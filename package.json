@@ -1,5 +1,6 @@
 {
   "name": "symphonia",
+  "version": "0.1.0",
   "private": true,
   "type": "module",
   "packageManager": "pnpm@10.20.0",
@@ -14,7 +15,16 @@
     "desktop:dev": "pnpm --filter @symphonia/desktop dev",
     "desktop:build": "pnpm --filter @symphonia/desktop build",
     "desktop:package": "pnpm --filter @symphonia/desktop package",
-    "desktop:smoke": "pnpm --filter @symphonia/desktop test"
+    "desktop:inspect-artifact": "pnpm --filter @symphonia/desktop inspect-artifact",
+    "desktop:smoke": "pnpm --filter @symphonia/desktop test",
+    "validate": "pnpm test && pnpm lint && pnpm build && pnpm desktop:build && git diff --check && pnpm harness:scan --path .",
+    "validate:packages": "pnpm build:packages && pnpm -r --filter './packages/**' test",
+    "validate:web": "pnpm --filter @symphonia/web lint && pnpm --filter @symphonia/web build",
+    "validate:daemon": "pnpm --filter @symphonia/daemon lint && pnpm --filter @symphonia/daemon test && pnpm --filter @symphonia/daemon build",
+    "validate:desktop": "pnpm desktop:build && pnpm desktop:smoke",
+    "validate:harness": "pnpm harness:scan --path .",
+    "validate:packaging": "pnpm desktop:package && pnpm desktop:inspect-artifact",
+    "validate:ci": "pnpm test && pnpm lint && pnpm build && pnpm desktop:build && pnpm harness:scan --path . && git diff --check"
   },
   "devDependencies": {
     "@eslint/js": "^9.32.0",

@@ -44,6 +44,7 @@ export class ManagedProcess {
         spawn(command, args, {
           cwd: spawnOptions.cwd,
           env: spawnOptions.env,
+          detached: process.platform !== "win32",
           stdio: ["ignore", "pipe", "pipe"],
         }));
     this.fetchFn =
@@ -158,10 +159,10 @@ export class ManagedProcess {
 
     this.stopping = true;
     this.status = { ...this.status, state: "stopping" };
-    this.child.kill("SIGTERM");
+    this.killChild("SIGTERM");
     await delay(500);
     if (this.child) {
-      this.child.kill("SIGKILL");
+      this.killChild("SIGKILL");
     }
     return this.getStatus();
   }
@@ -194,5 +195,21 @@ export class ManagedProcess {
 
   private getCwd(): string {
     return typeof this.options.cwd === "function" ? this.options.cwd() : this.options.cwd;
+  }
+
+  private killChild(signal: NodeJS.Signals): void {
+    const child = this.child;
+    if (!child) return;
+
+    if (process.platform !== "win32" && typeof child.pid === "number") {
+      try {
+        process.kill(-child.pid, signal);
+        return;
+      } catch {
+        // Fall through to direct child kill if the process group is already gone.
+      }
+    }
+
+    child.kill(signal);
   }
 }

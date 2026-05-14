@@ -1,0 +1,18 @@
+changelog:
+  categories:
+    - title: Product changes
+      labels:
+        - feature
+        - enhancement
+    - title: Fixes
+      labels:
+        - bug
+        - fix
+    - title: CI, packaging, and docs
+      labels:
+        - ci
+        - packaging
+        - documentation
+    - title: Other changes
+      labels:
+        - "*"

@@ -23,6 +23,35 @@ If SQLite native bindings are stale after a Node version change:
 pnpm --filter @symphonia/db rebuild better-sqlite3
 ```
 
+## Validate
+
+Milestone 12 adds a shared validation surface for local contributors and CI:
+
+```bash
+pnpm validate
+```
+
+Focused commands:
+
+```bash
+pnpm validate:packages
+pnpm validate:web
+pnpm validate:daemon
+pnpm validate:desktop
+pnpm validate:harness
+pnpm validate:packaging
+```
+
+`pnpm validate` runs tests, lint, build, desktop build, whitespace diff checks, and the deterministic harness scan. `pnpm validate:packaging` runs desktop packaging plus artifact inspection.
+
+See:
+
+- [CONTRIBUTING.md](CONTRIBUTING.md)
+- [docs/CI.md](docs/CI.md)
+- [docs/PACKAGING.md](docs/PACKAGING.md)
+- [docs/RELEASE.md](docs/RELEASE.md)
+- [docs/SECURITY.md](docs/SECURITY.md)
+
 ## Real Configuration
 
 `WORKFLOW.md` is the runtime contract. The committed starter is configured for Linear plus Codex:
@@ -84,9 +113,18 @@ Useful environment variables:
 pnpm desktop:dev
 pnpm desktop:build
 pnpm desktop:package
+pnpm desktop:inspect-artifact
 ```
 
 Desktop first-run setup stores repository, workspace, database, provider, tracker, GitHub, Linear, and cleanup settings outside the repository. It does not store raw API keys. The renderer still cannot write arbitrary files directly; file writes go through validated daemon/IPC paths.
+
+Desktop packaging uses Electron Packager and a staged package under `apps/desktop/.desktop-package`. The artifact inspector rejects runtime data, local settings, auth token stores, SQLite databases, logs, coverage, tests, fixtures, package-manager cache, and `.env` files before an artifact can be uploaded by CI.
+
+Current packaging limitations:
+
+- macOS host packaging is the validated path.
+- Fully bundled daemon/web runtime is deferred; desktop development still starts managed processes from the configured checkout.
+- Code signing, notarization, Windows signing, and auto-update are deferred.
 
 ## Harness Builder
 
@@ -203,6 +241,30 @@ Troubleshooting:
 - `token lacks permission`: use a token/app installation with repo PR write access or Linear comment permission.
 - `GraphQL error`: inspect the redacted daemon response; token values are intentionally omitted.
 - `rate limit`: wait for the reported GitHub reset window or reduce refresh frequency.
+
+## CI And Release Automation
+
+GitHub Actions workflows live in `.github/workflows`:
+
+- `ci.yml` runs on pull requests, pushes to `main`, and manual dispatch.
+- `package-desktop.yml` builds and inspects a desktop package, then uploads a workflow artifact.
+- `release-dry-run.yml` validates release prep without publishing.
+- `release.yml` creates a draft release only after a manual dispatch, an existing tag, and the exact confirmation phrase `CREATE DRAFT RELEASE`.
+
+CI uses least-privilege defaults. Normal jobs have `contents: read`; only the gated draft-release job receives `contents: write`. CI does not use real provider, GitHub, or Linear credentials, and it does not run external write actions.
+
+Release notes preview:
+
+```bash
+node scripts/release-notes-preview.mjs v0.1.0
+```
+
+Known release limitations:
+
+- Public release publishing is manual after draft review.
+- Code signing and notarization are not implemented.
+- Auto-update is not implemented.
+- Cross-platform packages are partial.
 
 ## APIs
 

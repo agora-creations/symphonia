@@ -1,0 +1,89 @@
+name: Release Dry Run
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_version:
+        description: "Version to preview, for example v0.1.0"
+        required: false
+        type: string
+
+permissions:
+  contents: read
+
+concurrency:
+  group: release-dry-run-${{ github.ref }}
+  cancel-in-progress: false
+
+env:
+  CI: "true"
+  NODE_VERSION: "22"
+  PNPM_VERSION: "10.20.0"
+
+jobs:
+  release-dry-run:
+    name: Validate release without publishing
+    runs-on: macos-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Set up pnpm
+        uses: pnpm/action-setup@v4
+        with:
+          version: ${{ env.PNPM_VERSION }}
+
+      - name: Set up Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+          cache-dependency-path: pnpm-lock.yaml
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Validate release version input
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
+        run: |
+          if [ -n "$RELEASE_VERSION" ] && ! printf '%s' "$RELEASE_VERSION" | grep -Eq '^v[0-9]+[.][0-9]+[.][0-9]+([.-][0-9A-Za-z.-]+)?$'; then
+            echo "release_version must look like v0.1.0"
+            exit 1
+          fi
+
+      - name: Run validation
+        run: pnpm validate
+
+      - name: Build package artifact
+        run: pnpm validate:packaging
+
+      - name: Generate release notes preview
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
+        run: node scripts/release-notes-preview.mjs "$RELEASE_VERSION" > release-notes-preview.md
+
+      - name: Archive package
+        env:
+          RELEASE_VERSION: ${{ inputs.release_version }}
+        run: |
+          mkdir -p artifacts
+          version="$RELEASE_VERSION"
+          if [ -z "$version" ]; then
+            version="$(node -p "'v' + require('./package.json').version")"
+          fi
+          artifact_name="Symphonia-${version}-${RUNNER_OS}-${RUNNER_ARCH}.tar.gz"
+          tar -czf "artifacts/${artifact_name}" -C apps/desktop/out .
+          cp release-notes-preview.md artifacts/
+          ls -lh artifacts
+
+      - name: Upload dry-run artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: symphonia-release-dry-run-${{ runner.os }}-${{ runner.arch }}
+          path: artifacts/*
+          if-no-files-found: error
+          retention-days: 14
+          include-hidden-files: false

@@ -1,5 +1,202 @@
 # Goal Progress
 
+## Milestone 12 Starting State — 2026-05-14
+
+Objective:
+
+- Add CI workflows, release automation, production packaging hardening, contributor quality gates, and artifact inspection while preserving Milestones 1 through 11 behavior.
+
+Starting repo state:
+
+- Current branch at start: `milestone-11-safe-writes`.
+- New working branch: `milestone-12-ci-release`.
+- Base commit: `d7367e9` (`Fix write-action audit edge cases`), clean working tree before edits.
+- No `.github/workflows` directory existed at start, so pull requests currently have no repository-defined CI checks.
+- Milestone 11 safe write actions are committed on the branch; GitHub/Linear writes remain disabled by default and must stay that way in CI.
+
+Verified CI and packaging documentation:
+
+- GitHub Actions workflow syntax: https://docs.github.com/en/actions/reference/workflows-and-actions/workflow-syntax
+  - Workflows are YAML files with triggers, jobs, steps, and `workflow_dispatch` inputs.
+  - `permissions` can be set at workflow and job level.
+- GitHub `GITHUB_TOKEN` permissions: https://docs.github.com/en/actions/security-guides/automatic-token-authentication
+  - Least privilege should be enforced by limiting token permissions to the minimum required.
+- GitHub Actions `setup-node`: https://github.com/actions/setup-node
+  - pnpm caching must be configured explicitly with `cache: pnpm` and a dependency path.
+- GitHub artifact upload: https://github.com/marketplace/actions/upload-a-build-artifact
+  - Uploaded artifacts must be deliberately scoped and validated before upload.
+- Electron Packager options: https://electron.github.io/packager/main/interfaces/Options.html
+  - `ignore` patterns control files copied into the app bundle.
+
+Planned checkpoints:
+
+1. Add root validation scripts that local contributors and CI can share.
+2. Add deterministic desktop artifact inspection and package exclusion tests.
+3. Add least-privilege PR/push CI, packaging, release dry-run, and gated draft-release workflows.
+4. Add contributor, CI, release, packaging, security, changelog, and version metadata docs.
+5. Keep review artifacts check-state copy clear for “no checks” and check result states.
+6. Run focused validation after tooling changes and full validation before publish.
+
+CI strategy:
+
+- PR/push CI should require no external credentials, no real provider CLIs, no real GitHub/Linear writes, and no network beyond dependency install.
+- Default workflow permissions should be `contents: read`.
+- Release workflow permissions should elevate to `contents: write` only in the gated release job.
+- CI should run the same deterministic surface as local validation: tests, lint, build, desktop build, harness scan, and whitespace diff check.
+
+Release strategy:
+
+- Add package artifact and release dry-run workflows with `workflow_dispatch`.
+- Add a gated draft-release workflow only with explicit inputs and draft release creation.
+- Do not publish public releases, auto-update feeds, signed/notarized artifacts, or automatic releases in this milestone.
+
+Packaging hardening strategy:
+
+- Inspect packaged desktop output after `pnpm desktop:package`.
+- Fail if package artifacts contain `.env` files, SQLite DBs, `.symphonia` workspaces, settings/auth files, logs, coverage, or test fixtures.
+- Record package size and app metadata.
+- Preserve the current staged Electron Packager approach while documenting that fully bundled runtime, signing, notarization, and auto-update remain deferred.
+
+Validation commands:
+
+- Focused: `pnpm desktop:inspect-artifact`, `pnpm --filter @symphonia/desktop test`, and package/tooling builds.
+- Final: `pnpm validate`, `pnpm test`, `pnpm lint`, `pnpm build`, `pnpm desktop:build`, `pnpm desktop:package`, `pnpm desktop:inspect-artifact`, `pnpm harness:scan --path .`, `git diff --check`, web smoke, and desktop smoke.
+
+Known release limitations:
+
+- Code signing, notarization, Windows signing, and auto-update are not implemented.
+- Cross-platform packaging is expected to begin with the currently realistic macOS packaging path.
+- Real remote GitHub Actions validation depends on pushing this branch/PR; local validation cannot prove remote runner behavior.
+
+Checkpoint 1, 6, 10, and 13 progress:
+
+- Added root validation scripts: `validate`, `validate:packages`, `validate:web`, `validate:daemon`, `validate:desktop`, `validate:harness`, `validate:packaging`, and `validate:ci`.
+- Added `pnpm desktop:inspect-artifact` backed by `apps/desktop/scripts/inspect-artifact.mjs`.
+- Artifact inspection checks physical package files and `app.asar` contents for `.env`, `.symphonia`, `.data`, SQLite DBs, settings/auth token JSON, logs, coverage, tests, fixtures, package-manager cache, and desktop staging output.
+- Hardened desktop packaging by deriving the package version from root `package.json`, expanding Electron Packager ignore patterns, and pruning dependency source/test material from staged `zod`.
+- Added desktop tests for package inspection success, environment-file rejection, and `app.asar` test-file rejection.
+- Focused validation:
+  - `pnpm --filter @symphonia/desktop test`: passed.
+  - `pnpm --filter @symphonia/daemon build`: passed.
+  - `pnpm --filter @symphonia/web lint`: passed.
+  - `pnpm --filter @symphonia/desktop build`: passed.
+  - `pnpm validate:packaging`: passed; artifact inspection reported 275 physical files, 389 `app.asar` files, 436.9 MiB, and package exclusions passed.
+
+Checkpoint 2 through 5 and 12 progress:
+
+- Added `.github/workflows/ci.yml` with PR, push-to-main, and manual triggers.
+- CI jobs cover install/cache, test, lint, build, desktop build, harness scan, and whitespace diff check.
+- Normal CI permissions are `contents: read`.
+- Added `.github/workflows/package-desktop.yml` for manual/tag desktop packaging on the current macOS host runner with artifact upload after package inspection.
+- Added `.github/workflows/release-dry-run.yml` for manual validation, packaging, release-notes preview, and safe artifact upload without publishing.
+- Added `.github/workflows/release.yml` as a manual gated draft-release workflow. It requires an existing tag and the exact confirmation phrase `CREATE DRAFT RELEASE`; only that job has `contents: write`.
+- Release workflow inputs are validated and passed through step environment variables before shell use.
+- Added `.github/dependabot.yml` with monthly npm and GitHub Actions update PRs and no auto-merge.
+- Added `.github/release.yml` release-note categories.
+- Added `scripts/release-notes-preview.mjs`.
+- Workflow YAML parsing smoke passed using the repo `yaml` dependency.
+
+Checkpoint 7 and 11 progress:
+
+- Daemon `/healthz` now includes the root package version.
+- Desktop package metadata is derived from the root package version.
+- Review artifacts UI now renders a clear no-checks state: “No GitHub checks are currently reported” plus refresh guidance.
+
+Checkpoint 8 and documentation progress:
+
+- Added `CONTRIBUTING.md`.
+- Added `docs/CI.md`.
+- Added `docs/RELEASE.md`.
+- Added `docs/PACKAGING.md`.
+- Added `docs/SECURITY.md`.
+- Added `CHANGELOG.md`.
+- Updated `README.md` with validation commands, CI workflows, packaging inspection, release paths, least-privilege permissions, and known release limitations.
+- Focused validation:
+  - `pnpm lint`: passed.
+
+Checkpoint 9, 14, and 15 validation:
+
+- CI-safe test audit:
+  - Existing automated tests continue to use fake GitHub/Linear transports, fake provider CLIs, temporary repositories, temporary DBs, and temporary workspaces.
+  - No tests require real provider CLIs or real GitHub/Linear credentials.
+  - Desktop managed-process cleanup was hardened after smoke testing exposed an orphan daemon process when stopping Electron dev with SIGINT.
+  - `ManagedProcess` now starts non-Windows children in a process group and stops the process group to clean up nested pnpm/tsx/Next children.
+- Full local validation:
+  - `pnpm test`: passed.
+  - `pnpm lint`: passed.
+  - `pnpm build`: passed.
+  - `pnpm desktop:build`: passed.
+  - `pnpm validate`: passed after escalated rerun because sandboxed `tsx` cannot create its IPC pipe.
+  - `pnpm validate:packaging`: passed.
+  - `pnpm desktop:package`: passed.
+  - `pnpm desktop:inspect-artifact`: passed.
+  - `pnpm harness:scan --path .`: passed after escalated rerun because sandboxed `tsx` cannot create its IPC pipe.
+  - `git diff --check`: passed.
+- Harness scan:
+  - Result: 68% (`D`).
+  - Strong: Workflow Contract, Validation Loop, Provider Readiness, Review Readiness, Symphonia Compatibility.
+  - Partial/missing/risky: Repository Map, Documentation System, Safety And Secrets, Observability And Debuggability, Accessibility And UX.
+  - Warning: skipped large file content for `symphonia/public/banner.png`.
+- Packaging artifact:
+  - Current package: `apps/desktop/out/Symphonia-darwin-arm64`.
+  - Inspection result: 275 physical files, 389 `app.asar` files, 436.9 MiB, metadata present, app binary present, `app.asar` present, package exclusions passed.
+- Web/daemon smoke:
+  - Escalated `SYMPHONIA_DAEMON_PORT=4112 PORT=3012 NEXT_PUBLIC_DAEMON_URL=http://127.0.0.1:4112 pnpm dev`.
+  - Daemon `GET /healthz`: 200.
+  - Daemon `GET /auth/status`: 200.
+  - Daemon `GET /writes/status`: 200.
+  - Web `GET /issues`: 200.
+  - Web `GET /harness`: 200.
+  - Web `GET /settings`: 200.
+  - Dev processes stopped with SIGINT.
+- Desktop smoke:
+  - Escalated `SYMPHONIA_DESKTOP_SETTINGS_DIR=/private/tmp/symphonia-m12-desktop-settings-2 pnpm desktop:dev`.
+  - Daemon `GET /healthz`: 200.
+  - Daemon `GET /auth/status`: 200.
+  - Daemon `GET /writes/status`: 200.
+  - Web `GET /settings`: 200.
+  - After shutdown, `:4100` and `:3000` no longer had listeners.
+- Remote CI validation:
+  - First PR run reported checks successfully.
+  - Initial `Harness scan` job failed because it ran `pnpm harness:scan --path .` before building `@symphonia/types`; the scanner imports the workspace package `dist` output in CI.
+  - Fixed `.github/workflows/ci.yml` to run `pnpm build:packages` before the harness scan job.
+  - Remote rerun status pending after fix.
+
+Final implemented files/directories:
+
+- `.github/workflows/ci.yml`
+- `.github/workflows/package-desktop.yml`
+- `.github/workflows/release-dry-run.yml`
+- `.github/workflows/release.yml`
+- `.github/dependabot.yml`
+- `.github/release.yml`
+- `scripts/release-notes-preview.mjs`
+- `apps/desktop/scripts/inspect-artifact.mjs`
+- `apps/desktop/test/artifact-inspector.test.ts`
+- `CONTRIBUTING.md`
+- `docs/CI.md`
+- `docs/RELEASE.md`
+- `docs/PACKAGING.md`
+- `docs/SECURITY.md`
+- `CHANGELOG.md`
+- Updates to `README.md`, `package.json`, `apps/desktop/package.json`, `apps/desktop/scripts/package.mjs`, `apps/desktop/src/main/process-manager.ts`, `apps/daemon/src/daemon.ts`, and `apps/web/components/issues-view.tsx`.
+
+Known Milestone 12 limitations:
+
+- Code signing is not implemented.
+- macOS notarization is not implemented.
+- Windows signing is not implemented.
+- Auto-update is not implemented.
+- Fully bundled daemon/web runtime remains deferred; desktop development still starts managed processes from the configured checkout.
+- Cross-platform packaging is partial; current artifact validation covers the macOS host package.
+- Real GitHub Actions validation depends on pushing the branch/PR.
+- Release workflow creates a draft release only and requires an existing tag plus manual confirmation.
+- External GitHub/Linear write actions remain explicit and disabled by default.
+
+Recommended next milestone:
+
+`Milestone 13 — Bundle the daemon/web runtime inside the desktop package and add signing/notarization preparation.`
+
 ## Milestone 11 Starting State — 2026-05-14
 
 Objective:

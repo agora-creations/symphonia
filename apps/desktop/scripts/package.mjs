@@ -1,5 +1,5 @@
 import packager from "@electron/packager";
-import { cpSync, existsSync, mkdirSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { homedir, platform } from "node:os";
 import { dirname, resolve } from "node:path";
 import { createRequire } from "node:module";
@@ -7,22 +7,26 @@ import { fileURLToPath } from "node:url";
 import electronPackage from "electron/package.json" with { type: "json" };
 
 const appRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
+const repoRoot = resolve(appRoot, "../..");
 const require = createRequire(import.meta.url);
 const electronVersion = electronPackage.version;
 const electronZipDir = process.env.ELECTRON_ZIP_DIR ?? findElectronZipDir(electronVersion);
 const stageDir = resolve(appRoot, ".desktop-package");
+const rootPackage = JSON.parse(readFileSync(resolve(repoRoot, "package.json"), "utf8"));
+const appVersion = typeof rootPackage.version === "string" ? rootPackage.version : "0.1.0";
 
 rmSync(stageDir, { recursive: true, force: true });
 mkdirSync(resolve(stageDir, "node_modules"), { recursive: true });
 cpSync(resolve(appRoot, "dist"), resolve(stageDir, "dist"), { recursive: true });
 copyDependency("zod");
+pruneDependencyArtifacts("zod");
 writeFileSync(
   resolve(stageDir, "package.json"),
   `${JSON.stringify(
     {
       name: "symphonia-desktop",
       productName: "Symphonia",
-      version: "0.1.0",
+      version: appVersion,
       type: "module",
       main: "./dist/main/index.js",
       dependencies: {
@@ -44,7 +48,15 @@ await packager({
   prune: false,
   electronVersion,
   ...(electronZipDir ? { electronZipDir } : {}),
-  ignore: [/^\/\.data($|\/)/u, /^\/\.symphonia($|\/)/u],
+  ignore: [
+    /^\/\.data($|\/)/u,
+    /^\/\.symphonia($|\/)/u,
+    /^\/logs?($|\/)/u,
+    /^\/coverage($|\/)/u,
+    /^\/.*\.sqlite(?:-shm|-wal)?$/u,
+    /^\/.*\.env(?:\.|$)/u,
+    /^\/.*(?:auth|token|settings).*\.json(?:\.key)?$/iu,
+  ],
 });
 
 function copyDependency(name) {
@@ -53,6 +65,11 @@ function copyDependency(name) {
     recursive: true,
     dereference: true,
   });
+}
+
+function pruneDependencyArtifacts(name) {
+  const dependencyRoot = resolve(stageDir, "node_modules", name);
+  rmSync(resolve(dependencyRoot, "src"), { recursive: true, force: true });
 }
 
 function findElectronZipDir(version) {

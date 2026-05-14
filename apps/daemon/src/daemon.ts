@@ -3,6 +3,7 @@ import { existsSync, lstatSync, realpathSync, rmSync } from "node:fs";
 import { createServer, IncomingMessage, Server, ServerResponse } from "node:http";
 import { basename, dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import rootPackage from "../../../package.json" with { type: "json" };
 import {
   applyRunEvent,
   applyHarnessArtifacts,
@@ -122,6 +123,7 @@ type ApprovalRecord = ApprovalState & {
 type JsonValue = Record<string, unknown> | unknown[] | string | number | boolean | null;
 
 const defaultPort = 4100;
+const daemonVersion = typeof rootPackage.version === "string" ? rootPackage.version : "0.1.0";
 
 export type SymphoniaDaemonOptions = {
   workflowPath?: string;
@@ -360,7 +362,7 @@ export class SymphoniaDaemon {
 
     try {
       if (request.method === "GET" && path === "/healthz") {
-        return sendJson(response, 200, { ok: true, service: "symphonia-daemon", timestamp: nowIso() });
+        return sendJson(response, 200, { ok: true, service: "symphonia-daemon", version: daemonVersion, timestamp: nowIso() });
       }
 
       if (request.method === "GET" && path === "/workflow/status") {
