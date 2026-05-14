@@ -5,10 +5,27 @@ import { IssueStatusIcon } from "@/components/icons/issue-status-icons";
 import { PriorityIcon } from "@/components/icons/status-icons";
 import { UserAvatar } from "@/components/avatar-stack";
 import { cn } from "@/lib/utils";
-import { CheckCircle2, ExternalLink, FileDiff, Filter, GitBranch, GitPullRequest, LayoutGrid, List, Plus, RefreshCw, SlidersHorizontal, X } from "lucide-react";
+import {
+  AlertTriangle,
+  ArrowRight,
+  CheckCircle2,
+  ExternalLink,
+  FileDiff,
+  Filter,
+  GitBranch,
+  GitPullRequest,
+  LayoutGrid,
+  List,
+  Play,
+  Plus,
+  RefreshCw,
+  SlidersHorizontal,
+  X,
+} from "lucide-react";
 import {
   createGithubPr,
   createLinearComment,
+  getConnectedStatus,
   executeWorkspaceCleanup,
   getDaemonStatus,
   getGithubStatus,
@@ -42,6 +59,7 @@ import {
   ApprovalDecision,
   ApprovalState,
   AgentEventSchema,
+  type ConnectedGoldenPathStatus,
   type DaemonStatus,
   isTerminalRunStatus,
   type AgentEvent,
@@ -86,14 +104,20 @@ type Issue = {
 };
 
 function IssueCard({
+  canRun,
   issue,
+  onRun,
   selected,
   onSelect,
 }: {
+  canRun: boolean;
   issue: Issue;
+  onRun: (issue: Issue) => void;
   selected: boolean;
   onSelect: (issue: Issue) => void;
 }) {
+  const runDisabled = !canRun || (issue.latestRun ? !isTerminalRunStatus(issue.latestRun.status) : false);
+
   return (
     <article
       className={cn(
@@ -134,47 +158,70 @@ function IssueCard({
           {issue.assignee && <UserAvatar user={issue.assignee} size={18} />}
         </div>
       </button>
-      {issue.trackerKind === "linear" && (
-        <a
-          href={issue.url}
-          target="_blank"
-          rel="noreferrer"
-          className="mt-2 inline-flex items-center gap-1 text-[10px] font-medium text-muted-foreground hover:text-foreground"
-          aria-label={`Open ${issue.key} in Linear`}
+      <div className="mt-2 flex items-center justify-between gap-2">
+        {issue.trackerKind === "linear" ? (
+          <a
+            href={issue.url}
+            target="_blank"
+            rel="noreferrer"
+            className="inline-flex items-center gap-1 text-[10px] font-medium text-muted-foreground hover:text-foreground"
+            aria-label={`Open ${issue.key} in Linear`}
+          >
+            Linear <ExternalLink className="h-3 w-3" />
+          </a>
+        ) : (
+          <span />
+        )}
+        <button
+          type="button"
+          onClick={() => onRun(issue)}
+          disabled={runDisabled}
+          className="inline-flex shrink-0 items-center gap-1 rounded-md bg-primary px-2 py-1 text-[11px] font-medium text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
         >
-          Linear <ExternalLink className="h-3 w-3" />
-        </a>
-      )}
+          <Play className="h-3 w-3" />
+          Run with Codex
+        </button>
+      </div>
     </article>
   );
 }
 
 function IssueRow({
+  canRun,
   issue,
+  onRun,
   selected,
   onSelect,
 }: {
+  canRun: boolean;
   issue: Issue;
+  onRun: (issue: Issue) => void;
   selected: boolean;
   onSelect: (issue: Issue) => void;
 }) {
+  const runDisabled = !canRun || (issue.latestRun ? !isTerminalRunStatus(issue.latestRun.status) : false);
+
   return (
-    <button
-      type="button"
-      onClick={() => onSelect(issue)}
-      aria-label={`Open run details for ${issue.key}: ${issue.title}`}
-      aria-pressed={selected}
+    <div
       className={cn(
-        "grid w-full grid-cols-[1.5rem_4.5rem_1fr_auto] items-center gap-3 px-4 py-2 border-b last:border-b-0 hover:bg-muted/40 cursor-pointer text-left",
+        "grid w-full grid-cols-[1.5rem_4.5rem_1fr_auto_auto] items-center gap-3 border-b px-4 py-2 text-left last:border-b-0 hover:bg-muted/40",
         selected && "bg-muted/50",
       )}
     >
-      <IssueStatusIcon status={issue.iconStatus} />
-      <span className="text-[11px] tabular-nums text-muted-foreground">{issue.key}</span>
-      <div className="min-w-0 flex items-center gap-2">
-        <PriorityIcon priority={issue.priority} />
-        <span className="text-sm truncate">{issue.title}</span>
-      </div>
+      <button
+        type="button"
+        onClick={() => onSelect(issue)}
+        aria-label={`Open run details for ${issue.key}: ${issue.title}`}
+        aria-pressed={selected}
+        className="contents cursor-pointer"
+      >
+        <IssueStatusIcon status={issue.iconStatus} />
+        <span className="text-[11px] tabular-nums text-muted-foreground">{issue.key}</span>
+        <div className="min-w-0 flex items-center gap-2">
+          <PriorityIcon priority={issue.priority} />
+          <span className="truncate text-sm">{issue.title}</span>
+        </div>
+      </button>
       <div className="flex items-center gap-2">
         {issue.labels.slice(0, 2).map((l) => (
           <span
@@ -189,7 +236,16 @@ function IssueRow({
         {issue.latestRun && <RunStatusBadge status={issue.latestRun.status} />}
         {issue.assignee && <UserAvatar user={issue.assignee} size={20} />}
       </div>
-    </button>
+      <button
+        type="button"
+        onClick={() => onRun(issue)}
+        disabled={runDisabled}
+        className="inline-flex items-center gap-1 rounded-md bg-primary px-2 py-1 text-[11px] font-medium text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+      >
+        <Play className="h-3 w-3" />
+        Run with Codex
+      </button>
+    </div>
   );
 }
 
@@ -208,6 +264,8 @@ export function IssuesView() {
   const [selectedWorkspace, setSelectedWorkspace] = useState<WorkspaceInfo | null>(null);
   const [selectedReviewArtifacts, setSelectedReviewArtifacts] = useState<ReviewArtifactSnapshot | null>(null);
   const [selectedApprovals, setSelectedApprovals] = useState<ApprovalState[]>([]);
+  const [connectedStatus, setConnectedStatus] = useState<ConnectedGoldenPathStatus | null>(null);
+  const [connectedError, setConnectedError] = useState<string | null>(null);
   const [providers, setProviders] = useState<ProviderHealth[]>([]);
   const [selectedProvider, setSelectedProvider] = useState<ProviderId>("codex");
   const [workflow, setWorkflow] = useState<WorkflowStatus | null>(null);
@@ -224,6 +282,7 @@ export function IssuesView() {
   const [executingCleanup, setExecutingCleanup] = useState(false);
   const [workflowOpen, setWorkflowOpen] = useState(false);
   const [detailError, setDetailError] = useState<string | null>(null);
+  const [boardError, setBoardError] = useState<string | null>(null);
   const sourcesRef = useRef<Map<string, EventSource>>(new Map());
   const selectedRunIdRef = useRef<string | null>(null);
 
@@ -325,6 +384,9 @@ export function IssuesView() {
           source.onerror = () => {
             source.close();
             sourcesRef.current.delete(runId);
+            if (runId === selectedRunIdRef.current) {
+              setDetailError("Event stream disconnected. Persisted events remain visible; reopen or refresh the run to reconnect.");
+            }
           };
           sourcesRef.current.set(runId, source);
         })
@@ -340,7 +402,18 @@ export function IssuesView() {
     const sources = sourcesRef.current;
 
     async function loadIssues() {
-      const [loadedIssues, loadedRuns, loadedProviders, loadedWorkflow, loadedGithubStatus, loadedDaemonStatus, loadedWorkspaceInventory] = await Promise.all([
+      const [
+        loadedConnected,
+        loadedIssues,
+        loadedRuns,
+        loadedProviders,
+        loadedWorkflow,
+        loadedGithubStatus,
+        loadedDaemonStatus,
+        loadedWorkspaceInventory,
+        loadedTrackerStatus,
+      ] = await Promise.allSettled([
+        getConnectedStatus(),
         getIssues(),
         getRuns(),
         getProviders(),
@@ -348,17 +421,33 @@ export function IssuesView() {
         getGithubStatus().catch(() => null),
         getDaemonStatus().catch(() => null),
         getWorkspaceInventory().catch(() => null),
+        getTrackerStatus(),
       ]);
-      const loadedTrackerStatus = await getTrackerStatus();
       if (!alive) return;
-      setAllIssues(mapDaemonIssues(loadedIssues, loadedRuns));
-      setProviders(loadedProviders);
-      setWorkflow(loadedWorkflow);
-      setTrackerStatus(loadedTrackerStatus);
-      setGithubStatus(loadedGithubStatus);
-      setDaemonStatus(loadedDaemonStatus);
-      setWorkspaceInventory(loadedWorkspaceInventory);
-      const defaultProvider = loadedWorkflow.effectiveConfigSummary?.defaultProvider;
+
+      if (loadedConnected.status === "fulfilled") {
+        setConnectedStatus(loadedConnected.value);
+        setConnectedError(null);
+      } else {
+        setConnectedStatus(null);
+        setConnectedError(errorMessage(loadedConnected.reason, "Connected status is unavailable."));
+      }
+
+      if (loadedIssues.status === "fulfilled" && loadedRuns.status === "fulfilled") {
+        setAllIssues(mapDaemonIssues(loadedIssues.value, loadedRuns.value));
+        setBoardError(null);
+      } else {
+        setBoardError(errorMessage(loadedIssues.status === "rejected" ? loadedIssues.reason : loadedRuns.status === "rejected" ? loadedRuns.reason : null, "Failed to load issues."));
+      }
+
+      if (loadedProviders.status === "fulfilled") setProviders(loadedProviders.value);
+      if (loadedWorkflow.status === "fulfilled") setWorkflow(loadedWorkflow.value);
+      if (loadedTrackerStatus.status === "fulfilled") setTrackerStatus(loadedTrackerStatus.value);
+      if (loadedGithubStatus.status === "fulfilled") setGithubStatus(loadedGithubStatus.value);
+      if (loadedDaemonStatus.status === "fulfilled") setDaemonStatus(loadedDaemonStatus.value);
+      if (loadedWorkspaceInventory.status === "fulfilled") setWorkspaceInventory(loadedWorkspaceInventory.value);
+
+      const defaultProvider = loadedWorkflow.status === "fulfilled" ? loadedWorkflow.value.effectiveConfigSummary?.defaultProvider : null;
       if (defaultProvider === "codex" || defaultProvider === "claude" || defaultProvider === "cursor") {
         setSelectedProvider((current) => current || defaultProvider);
       }
@@ -434,7 +523,13 @@ export function IssuesView() {
     async (issue: Issue) => {
       try {
         setDetailError(null);
-        const run = await startRun(issue.id, selectedProvider);
+        const status = await getConnectedStatus();
+        setConnectedStatus(status);
+        setConnectedError(null);
+        if (!canRunWithCodex(issue, status)) {
+          throw new Error(status.blockingReasons[0] ?? "Connected prerequisites are not ready.");
+        }
+        const run = await startRun(issue.id, "codex");
         updateIssueRun(run);
         setSelectedIssueId(issue.id);
         setSelectedRunId(run.id);
@@ -448,7 +543,7 @@ export function IssuesView() {
         setDetailError(caught instanceof Error ? caught.message : "Failed to start run.");
       }
     },
-    [selectedProvider, subscribeRun, updateIssueRun],
+    [subscribeRun, updateIssueRun],
   );
 
   const handleStop = useCallback(
@@ -490,10 +585,11 @@ export function IssuesView() {
       setProviders(await getProviders());
       setTrackerStatus(await getTrackerStatus());
       setGithubStatus(await getGithubStatus().catch(() => null));
+      setConnectedStatus(await getConnectedStatus().catch(() => connectedStatus));
     } catch (caught) {
       setDetailError(caught instanceof Error ? caught.message : "Failed to reload workflow.");
     }
-  }, []);
+  }, [connectedStatus]);
 
   const handleRefreshIssues = useCallback(async () => {
     try {
@@ -503,13 +599,16 @@ export function IssuesView() {
       setAllIssues(mapDaemonIssues(loadedIssues, loadedRuns));
       setTrackerStatus(await getTrackerStatus());
       setGithubStatus(await getGithubStatus().catch(() => null));
+      setConnectedStatus(await getConnectedStatus().catch(() => connectedStatus));
+      setBoardError(null);
     } catch (caught) {
       setDetailError(caught instanceof Error ? caught.message : "Failed to refresh issues.");
+      setBoardError(caught instanceof Error ? caught.message : "Failed to refresh issues.");
       setTrackerStatus(await getTrackerStatus().catch(() => null));
     } finally {
       setRefreshingIssues(false);
     }
-  }, []);
+  }, [connectedStatus]);
 
   const handleRefreshReviewArtifacts = useCallback(async (run: Run) => {
     try {
@@ -613,10 +712,21 @@ export function IssuesView() {
   }, [filtered, statusColumns]);
 
   const teamOptions = useMemo(() => ["all", ...Array.from(new Set(allIssues.map((i) => i.team))).sort()], [allIssues]);
+  const canRunIssueWithCodex = useCallback(
+    (issue: Issue) => canRunWithCodex(issue, connectedStatus),
+    [connectedStatus],
+  );
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex flex-wrap items-center justify-end gap-3 border-b px-4 py-2.5">
+      <header className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-2.5">
+        <div className="min-w-0">
+          <p className="text-sm font-semibold">Connected issue board</p>
+          <p className="mt-0.5 truncate text-[11px] text-muted-foreground">
+            {connectedStatus?.board.issueScope ?? trackerScopeSummary(workflow?.effectiveConfigSummary)} ·{" "}
+            {connectedStatus?.board.issueCount ?? allIssues.length} real issues
+          </p>
+        </div>
         <div className="flex items-center gap-1">
           <button
             type="button"
@@ -683,11 +793,31 @@ export function IssuesView() {
           <button className="inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[12px] hover:bg-muted">
             <SlidersHorizontal className="h-3.5 w-3.5" /> Display
           </button>
-          <button className="inline-flex items-center gap-1.5 rounded-md bg-primary text-primary-foreground px-2 py-1 text-[12px] hover:opacity-90">
+          <button
+            type="button"
+            disabled
+            title="Issue creation is deferred; refresh Linear to import real issues."
+            className="inline-flex items-center gap-1.5 rounded-md bg-primary px-2 py-1 text-[12px] text-primary-foreground opacity-50"
+          >
             <Plus className="h-3.5 w-3.5" /> New issue
           </button>
         </div>
       </header>
+
+      {(connectedError || !connectedStatus || connectedStatus.board.status !== "ready") && (
+        <ConnectedGateway
+          error={connectedError}
+          onRefreshIssues={handleRefreshIssues}
+          refreshingIssues={refreshingIssues}
+          status={connectedStatus}
+        />
+      )}
+
+      {boardError && (
+        <p role="alert" className="m-3 rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-600 dark:text-red-300">
+          {boardError}
+        </p>
+      )}
 
       {workflowOpen && (
         <WorkflowPanel
@@ -731,7 +861,18 @@ export function IssuesView() {
         />
       )}
 
-      {view === "board" ? (
+      {filtered.length === 0 ? (
+        <StateMessage
+          title={allIssues.length === 0 ? "No real issues loaded" : "No issues match the current filters"}
+          message={
+            allIssues.length === 0
+              ? "Connect Linear, confirm the issue scope, then refresh issues. Symphonia does not show sample issues."
+              : "Clear filters or refresh Linear to update the board."
+          }
+          actionLabel={allIssues.length === 0 ? "Refresh issues" : undefined}
+          onAction={allIssues.length === 0 ? () => void handleRefreshIssues() : undefined}
+        />
+      ) : view === "board" ? (
         <div className="flex-1 overflow-auto">
           <div className="flex min-w-max gap-3 p-3">
             {statusColumns.map((s) => (
@@ -745,13 +886,25 @@ export function IssuesView() {
                   <span className="text-[11px] text-muted-foreground tabular-nums">
                     {grouped[s]?.length ?? 0}
                   </span>
-                  <button className="ml-auto grid h-5 w-5 place-items-center rounded hover:bg-background text-muted-foreground">
+                  <button
+                    type="button"
+                    disabled
+                    title="Issue creation is deferred."
+                    className="ml-auto grid h-5 w-5 place-items-center rounded text-muted-foreground opacity-50"
+                  >
                     <Plus className="h-3 w-3" />
                   </button>
                 </div>
                 <div className="flex flex-col gap-2 p-2">
                   {(grouped[s] ?? []).map((i) => (
-                    <IssueCard key={i.id} issue={i} selected={i.id === selectedIssueId} onSelect={selectIssue} />
+                    <IssueCard
+                      key={i.id}
+                      canRun={canRunIssueWithCodex(i)}
+                      issue={i}
+                      onRun={(item) => void handleStart(item)}
+                      selected={i.id === selectedIssueId}
+                      onSelect={selectIssue}
+                    />
                   ))}
                 </div>
               </div>
@@ -771,7 +924,14 @@ export function IssuesView() {
                   </span>
                 </div>
                 {(grouped[s] ?? []).map((i) => (
-                  <IssueRow key={i.id} issue={i} selected={i.id === selectedIssueId} onSelect={selectIssue} />
+                  <IssueRow
+                    key={i.id}
+                    canRun={canRunIssueWithCodex(i)}
+                    issue={i}
+                    onRun={(item) => void handleStart(item)}
+                    selected={i.id === selectedIssueId}
+                    onSelect={selectIssue}
+                  />
                 ))}
               </section>
             ),
@@ -870,6 +1030,8 @@ function RunDetailsCard({
             ))}
           </div>
 
+          <ProofStateBanner events={events} reviewArtifacts={reviewArtifacts} run={run ?? null} />
+
           <dl className="mt-4 grid gap-3 text-sm sm:grid-cols-2">
             <div className="rounded-md border p-3">
               <dt className="text-muted-foreground">Priority</dt>
@@ -889,7 +1051,7 @@ function RunDetailsCard({
             </div>
             <div className="rounded-md border p-3">
               <dt className="text-muted-foreground">Latest run</dt>
-              <dd className="mt-1 font-medium">{run ? `${run.provider} ${run.status.replaceAll("_", " ")}` : `Ready with ${selectedProvider}`}</dd>
+              <dd className="mt-1 font-medium">{run ? `${run.provider} ${run.status.replaceAll("_", " ")}` : "Ready for Codex"}</dd>
             </div>
             {run && (
               <div className="rounded-md border p-3">
@@ -957,7 +1119,8 @@ function RunDetailsCard({
                 onClick={() => void onStart(issue)}
                 className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90"
               >
-                Start {providerDisplayName(selectedProvider)} run
+                <Play className="mr-1.5 h-3.5 w-3.5" />
+                Run with Codex
               </button>
             )}
           </div>
@@ -967,6 +1130,8 @@ function RunDetailsCard({
               {error}
             </p>
           )}
+
+          <EvidenceSummaryPanel events={events} run={run ?? null} />
 
           <ReviewArtifactsPanel
             onRefresh={onRefreshReviewArtifacts}
@@ -1047,6 +1212,116 @@ function RunDetailsCard({
   );
 }
 
+function ProofStateBanner({
+  events,
+  reviewArtifacts,
+  run,
+}: {
+  events: AgentEvent[];
+  reviewArtifacts: ReviewArtifactSnapshot | null;
+  run: Run | null;
+}) {
+  const providerEvents = events.filter((event) => event.type.startsWith("codex.") || event.type === "provider.started");
+  const tone = !run
+    ? "neutral"
+    : run.status === "failed" || run.status === "timed_out" || run.status === "stalled"
+      ? "danger"
+      : isTerminalRunStatus(run.status) && reviewArtifacts
+        ? "success"
+        : isTerminalRunStatus(run.status)
+          ? "warning"
+          : "active";
+  const title = !run
+    ? "No run started"
+    : run.status === "failed" || run.status === "timed_out" || run.status === "stalled"
+      ? "Run failed"
+      : isTerminalRunStatus(run.status) && reviewArtifacts
+        ? "Review artifact ready"
+        : isTerminalRunStatus(run.status)
+          ? "Run complete; review artifact missing"
+          : "Run in progress";
+  const message = !run
+    ? "Open a real issue and run it with Codex to create the proof timeline."
+    : `${run.provider} ${run.status.replaceAll("_", " ")} · ${events.length} persisted events · ${providerEvents.length} provider events`;
+
+  return (
+    <div className={cn("mt-4 rounded-md border p-3 text-sm", proofToneClass(tone))}>
+      <div className="flex flex-wrap items-center justify-between gap-2">
+        <p className="font-medium">{title}</p>
+        {run && <RunStatusBadge status={run.status} />}
+      </div>
+      <p className="mt-1 text-xs">{message}</p>
+      {reviewArtifacts && (
+        <p className="mt-1 break-all text-xs">
+          Artifact refreshed {formatTime(reviewArtifacts.lastRefreshedAt)} for {reviewArtifacts.issueIdentifier} in {reviewArtifacts.workspace?.path ?? "workspace unavailable"}.
+        </p>
+      )}
+    </div>
+  );
+}
+
+function EvidenceSummaryPanel({ events, run }: { events: AgentEvent[]; run: Run | null }) {
+  const hookEvents = events.filter((event) => event.type === "hook.succeeded" || event.type === "hook.failed" || event.type === "hook.timed_out");
+  const providerErrors = events.filter((event) => event.type.endsWith(".error") || event.type === "provider.stderr");
+  const assistantMessages = events.filter((event) => event.type === "codex.assistant.delta" || event.type === "agent.message");
+  const latestHook = hookEvents.at(-1);
+  const latestHookOutput =
+    latestHook && "hook" in latestHook
+      ? [latestHook.hook.stdout.trim(), latestHook.hook.stderr.trim()].filter(Boolean).join("\n")
+      : "";
+
+  return (
+    <section aria-labelledby="evidence-summary-heading" className="mt-6">
+      <h3 id="evidence-summary-heading" className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+        Evidence summary
+      </h3>
+      {!run ? (
+        <p className="mt-3 rounded-md border p-3 text-sm text-muted-foreground">Run evidence appears here after Codex starts.</p>
+      ) : (
+        <div className="mt-3 grid gap-3 text-sm sm:grid-cols-3">
+          <div className="rounded-md border p-3">
+            <dt className="text-muted-foreground">Timeline events</dt>
+            <dd className="mt-1 font-medium">{events.length}</dd>
+          </div>
+          <div className="rounded-md border p-3">
+            <dt className="text-muted-foreground">Provider output</dt>
+            <dd className="mt-1 font-medium">{assistantMessages.length} streamed messages</dd>
+          </div>
+          <div className="rounded-md border p-3">
+            <dt className="text-muted-foreground">Provider errors</dt>
+            <dd className="mt-1 font-medium">{providerErrors.length}</dd>
+          </div>
+          <div className="rounded-md border p-3 sm:col-span-3">
+            <dt className="text-muted-foreground">Test or hook output</dt>
+            <dd className="mt-2">
+              {latestHookOutput ? (
+                <pre className="max-h-36 overflow-auto whitespace-pre-wrap rounded-md border bg-background p-2 text-xs text-muted-foreground">{latestHookOutput}</pre>
+              ) : (
+                <span className="text-sm text-muted-foreground">No hook or test output has been reported yet.</span>
+              )}
+            </dd>
+          </div>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function proofToneClass(tone: "active" | "danger" | "neutral" | "success" | "warning") {
+  switch (tone) {
+    case "success":
+      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300";
+    case "danger":
+      return "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300";
+    case "warning":
+      return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300";
+    case "active":
+      return "border-blue-500/30 bg-blue-500/10 text-blue-700 dark:text-blue-300";
+    case "neutral":
+      return "text-muted-foreground";
+  }
+}
+
 function ReviewArtifactsPanel({
   onRefresh,
   refreshing,
@@ -1096,6 +1371,17 @@ function ReviewArtifactsPanel({
               {reviewArtifacts.error}
             </p>
           )}
+
+          <div className="rounded-md border bg-muted/20 p-3 text-xs">
+            <div className="grid gap-2 sm:grid-cols-2">
+              <ArtifactKeyValue label="Issue" value={reviewArtifacts.issueIdentifier} />
+              <ArtifactKeyValue label="Run" value={reviewArtifacts.runId} />
+              <ArtifactKeyValue label="Provider" value={reviewArtifacts.provider} />
+              <ArtifactKeyValue label="Workspace" value={reviewArtifacts.workspace?.path ?? "Unavailable"} />
+              <ArtifactKeyValue label="Status" value={reviewArtifacts.error ? "needs attention" : "ready for human review"} />
+              <ArtifactKeyValue label="Next action" value="Review local diff, run output, and gated future write actions." />
+            </div>
+          </div>
 
           <dl className="grid gap-3 text-sm sm:grid-cols-2">
             <div className="rounded-md border p-3">
@@ -1208,6 +1494,15 @@ function ReviewArtifactsPanel({
         </div>
       )}
     </section>
+  );
+}
+
+function ArtifactKeyValue({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="grid gap-1 sm:grid-cols-[6rem_1fr]">
+      <span className="text-muted-foreground">{label}</span>
+      <span className="break-all font-medium">{value}</span>
+    </div>
   );
 }
 
@@ -1677,6 +1972,33 @@ function ArtifactStatusList({
   );
 }
 
+function StateMessage({
+  actionLabel,
+  message,
+  onAction,
+  title,
+}: {
+  actionLabel?: string;
+  message: string;
+  onAction?: () => void;
+  title: string;
+}) {
+  return (
+    <div className="flex flex-1 items-center justify-center px-6 py-12 text-center">
+      <div>
+        <p className="text-sm font-medium">{title}</p>
+        <p className="mt-1 max-w-md text-sm text-muted-foreground">{message}</p>
+        {actionLabel && onAction && (
+          <button type="button" onClick={onAction} className="mt-3 inline-flex items-center gap-2 rounded-md border px-3 py-1.5 text-sm hover:bg-muted">
+            <RefreshCw className="h-3.5 w-3.5" />
+            {actionLabel}
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
 function RunStatusBadge({ status }: { status: RunStatus }) {
   return (
     <span
@@ -1688,6 +2010,228 @@ function RunStatusBadge({ status }: { status: RunStatus }) {
       {status.replaceAll("_", " ")}
     </span>
   );
+}
+
+function ConnectedGateway({
+  error,
+  onRefreshIssues,
+  refreshingIssues,
+  status,
+}: {
+  error: string | null;
+  onRefreshIssues: () => Promise<void>;
+  refreshingIssues: boolean;
+  status: ConnectedGoldenPathStatus | null;
+}) {
+  const next = status?.nextAction ?? { kind: "start_daemon" as const, label: "Start daemon", href: null };
+  const rows = status
+    ? [
+        {
+          key: "daemon",
+          label: "Daemon/runtime",
+          status: status.daemon.status,
+          why: "Required for issues, runs, events, and local artifacts.",
+          guidance: `${status.daemon.activeRunsCount} active runs, ${status.daemon.recoveredRunsCount} recovered.`,
+          actionKind: "start_daemon",
+        },
+        {
+          key: "repo",
+          label: "Repository/workspace",
+          status: status.repository.status === "ready" && status.workspace.status === "ready" ? "ready" : status.repository.status,
+          why: "Codex runs execute inside a selected local repository workspace.",
+          guidance: status.workspace.path ?? status.repository.error ?? "Choose a repository with WORKFLOW.md.",
+          actionKind: status.repository.status === "missing" ? "choose_repo" : "configure_workflow",
+        },
+        {
+          key: "github",
+          label: "GitHub validation",
+          status: status.github.status,
+          why: "Review artifacts can validate repository access and existing PR context.",
+          guidance: status.github.repository ?? status.github.error ?? "Connect or validate GitHub from Settings.",
+          actionKind: "validate_github",
+        },
+        {
+          key: "linear",
+          label: "Linear connection",
+          status: status.linear.status,
+          why: "The board must be populated from real tracked issues.",
+          guidance: status.linear.error ?? `${status.linear.issueScope}; ${status.linear.issueCount} cached issues.`,
+          actionKind: "connect_linear",
+        },
+        {
+          key: "provider",
+          label: "Codex provider",
+          status: status.provider.status,
+          why: "The first run uses the configured Codex app-server provider.",
+          guidance: status.provider.error ?? status.provider.hint ?? status.provider.command ?? "Check Codex availability.",
+          actionKind: "check_provider",
+        },
+        {
+          key: "board",
+          label: "Issue board",
+          status: status.board.status,
+          why: "A connected-ready user should land on real runnable issue cards.",
+          guidance: `${status.board.issueScope}; last sync ${status.board.lastSyncAt ? formatTime(status.board.lastSyncAt) : "never"}.`,
+          actionKind: status.board.issueCount === 0 ? "refresh_issues" : "open_board",
+        },
+        {
+          key: "writes",
+          label: "Write safety",
+          status: status.writes.github === "enabled" || status.writes.linear === "enabled" ? "gated" : "ready",
+          why: "GitHub and Linear writes must stay disabled or explicitly confirmation-gated.",
+          guidance: `GitHub ${status.writes.github.replaceAll("_", " ")}; Linear ${status.writes.linear.replaceAll("_", " ")}.`,
+          actionKind: "review_write_permissions",
+        },
+      ]
+    : [
+        {
+          key: "daemon",
+          label: "Daemon/runtime",
+          status: "unavailable",
+          why: "Required for issues, runs, events, and local artifacts.",
+          guidance: error ?? "The daemon could not be reached at the configured URL.",
+          actionKind: "start_daemon",
+        },
+      ];
+
+  return (
+    <section className="border-b bg-muted/20 px-4 py-3" aria-labelledby="connected-gateway-heading">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <h2 id="connected-gateway-heading" className="text-sm font-semibold">
+            Connected setup
+          </h2>
+          <p className="mt-1 max-w-3xl text-xs text-muted-foreground">
+            Symphonia uses real local runtime checks, real Linear issues, and the configured Codex provider. It does not seed sample issues or offer Demo Mode.
+          </p>
+        </div>
+        <GatewayAction action={next} onRefreshIssues={onRefreshIssues} refreshingIssues={refreshingIssues} />
+      </div>
+      {error && (
+        <p role="alert" className="mt-3 rounded-md border border-red-500/30 bg-red-500/10 p-2 text-xs text-red-600 dark:text-red-300">
+          {error}
+        </p>
+      )}
+      <div className="mt-3 grid gap-2 md:grid-cols-2 xl:grid-cols-4">
+        {rows.map((row) => (
+          <GatewayRow
+            key={row.key}
+            action={next.kind === row.actionKind ? next : null}
+            guidance={row.guidance}
+            label={row.label}
+            onRefreshIssues={onRefreshIssues}
+            refreshingIssues={refreshingIssues}
+            status={row.status}
+            why={row.why}
+          />
+        ))}
+      </div>
+      {status && status.blockingReasons.length > 0 && (
+        <div className="mt-3 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-xs text-amber-700 dark:text-amber-300">
+          <div className="flex items-center gap-2 font-medium">
+            <AlertTriangle className="h-3.5 w-3.5" />
+            Blocking reasons
+          </div>
+          <ul className="mt-2 list-disc space-y-1 pl-4">
+            {status.blockingReasons.slice(0, 5).map((reason) => (
+              <li key={reason}>{reason}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+    </section>
+  );
+}
+
+function GatewayRow({
+  action,
+  guidance,
+  label,
+  onRefreshIssues,
+  refreshingIssues,
+  status,
+  why,
+}: {
+  action: ConnectedGoldenPathStatus["nextAction"] | null;
+  guidance: string;
+  label: string;
+  onRefreshIssues: () => Promise<void>;
+  refreshingIssues: boolean;
+  status: string;
+  why: string;
+}) {
+  return (
+    <div className="rounded-md border bg-background p-3">
+      <div className="flex items-start justify-between gap-2">
+        <div>
+          <p className="text-sm font-medium">{label}</p>
+          <p className="mt-1 text-xs text-muted-foreground">{why}</p>
+        </div>
+        <span className={cn("shrink-0 rounded-full border px-2 py-0.5 text-[11px]", readinessClass(status))}>
+          {readinessLabel(status)}
+        </span>
+      </div>
+      <p className="mt-2 break-words text-xs text-muted-foreground">{guidance}</p>
+      {action && (
+        <div className="mt-3">
+          <GatewayAction action={action} compact onRefreshIssues={onRefreshIssues} refreshingIssues={refreshingIssues} />
+        </div>
+      )}
+    </div>
+  );
+}
+
+function GatewayAction({
+  action,
+  compact = false,
+  onRefreshIssues,
+  refreshingIssues,
+}: {
+  action: ConnectedGoldenPathStatus["nextAction"];
+  compact?: boolean;
+  onRefreshIssues: () => Promise<void>;
+  refreshingIssues: boolean;
+}) {
+  const className = compact
+    ? "inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium hover:bg-muted"
+    : "inline-flex items-center gap-2 rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90";
+
+  if (action.kind === "refresh_issues") {
+    return (
+      <button type="button" onClick={() => void onRefreshIssues()} disabled={refreshingIssues} className={cn(className, "disabled:cursor-not-allowed disabled:opacity-60")}>
+        <RefreshCw className={cn("h-3.5 w-3.5", refreshingIssues && "animate-spin")} />
+        {action.label}
+      </button>
+    );
+  }
+
+  if (action.href) {
+    return (
+      <a href={action.href} className={className}>
+        {action.label}
+        <ArrowRight className="h-3.5 w-3.5" />
+      </a>
+    );
+  }
+
+  return <span className={className}>{action.label}</span>;
+}
+
+function readinessLabel(status: string): string {
+  return status.replaceAll("_", " ");
+}
+
+function readinessClass(status: string): string {
+  if (status === "ready" || status === "healthy") {
+    return "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300";
+  }
+  if (status === "missing" || status === "missing_auth" || status === "unavailable" || status === "invalid" || status === "invalid_config" || status === "blocked") {
+    return "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300";
+  }
+  if (status === "empty" || status === "stale" || status === "unknown" || status === "disabled" || status === "gated") {
+    return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300";
+  }
+  return "text-muted-foreground";
 }
 
 function WorkflowPanel({
@@ -2663,6 +3207,23 @@ function formatTime(timestamp: string) {
     minute: "2-digit",
     second: "2-digit",
   }).format(new Date(timestamp));
+}
+
+function errorMessage(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
+}
+
+function canRunWithCodex(issue: Issue, status: ConnectedGoldenPathStatus | null): boolean {
+  if (issue.latestRun && !isTerminalRunStatus(issue.latestRun.status)) return false;
+  if (!status) return false;
+  return (
+    status.board.status === "ready" &&
+    status.workspace.status === "ready" &&
+    status.linear.status === "ready" &&
+    status.github.status === "ready" &&
+    status.provider.kind === "codex" &&
+    status.provider.status === "ready"
+  );
 }
 
 function mapDaemonIssues(issues: DaemonIssue[], runs: Run[]): Issue[] {

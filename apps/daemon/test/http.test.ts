@@ -504,6 +504,102 @@ describe("daemon API", () => {
     expect(workspaceEvent?.type === "workspace.ready" ? workspaceEvent.workspace.path : "").toContain("ENG-101");
   });
 
+  it("proves the connected golden path with internal fixtures and no user-facing Demo Mode", async () => {
+    const created = createDaemonServer(new EventStore(join(directory, "connected-golden-path.sqlite")), {
+      workflowPath,
+      cwd: directory,
+      githubFetch: fakeGitHubFetch(),
+      linearFetch: fakeLinearFetch({ state: "Todo" }),
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeWorkflow({
+      codexCommand: fakeCodexCommand("success"),
+      githubEnabled: true,
+      githubToken: "github-secret",
+    });
+
+    const initial = await requestJson<{
+      connected: {
+        mode: string;
+        nextAction: { kind: string };
+        board: { status: string; issueCount: number };
+        blockingReasons: string[];
+      };
+    }>("GET", "/connected/status");
+    expect(initial.connected.mode).toBe("connected");
+    expect(initial.connected.nextAction.kind).toBe("refresh_issues");
+    expect(initial.connected.board).toMatchObject({ status: "empty", issueCount: 0 });
+    expect(JSON.stringify(initial)).not.toMatch(/Demo Mode|Start Demo Workspace|Run Demo Agent/u);
+
+    const refreshed = await requestJson<{ issues: Array<{ id: string; identifier: string }> }>("POST", "/issues/refresh");
+    expect(refreshed.issues.map((issue) => issue.identifier)).toEqual(["ENG-101"]);
+
+    const ready = await requestJson<{
+      connected: {
+        onboardingState: string;
+        board: { status: string; issueCount: number };
+        github: { status: string };
+        linear: { status: string };
+        provider: { kind: string; status: string };
+        writes: { github: string; linear: string };
+      };
+    }>("GET", "/connected/status");
+    expect(ready.connected).toMatchObject({
+      onboardingState: "board_ready",
+      board: { status: "ready", issueCount: 1 },
+      github: { status: "ready" },
+      linear: { status: "ready" },
+      provider: { kind: "codex", status: "ready" },
+      writes: { github: "read_only", linear: "read_only" },
+    });
+
+    const started = await requestJson<{ run: { id: string; provider: string; issueIdentifier: string } }>("POST", "/runs", {
+      issueId: refreshed.issues[0]!.id,
+      provider: "codex",
+    });
+    expect(started.run).toMatchObject({ provider: "codex", issueIdentifier: "ENG-101" });
+
+    await waitForTerminal(started.run.id, "succeeded");
+    const events = await requestJson<{ events: AgentEvent[] }>("GET", `/runs/${started.run.id}/events`);
+    const artifacts = await requestJson<{ reviewArtifacts: { runId: string; issueIdentifier: string; provider: string } | null }>(
+      "GET",
+      `/runs/${started.run.id}/review-artifacts`,
+    );
+    const final = await requestJson<{
+      connected: {
+        onboardingState: string;
+        activeRun: unknown;
+        reviewArtifact: { status: string; runId: string | null };
+        nextAction: { kind: string };
+      };
+    }>("GET", "/connected/status");
+
+    expect(events.events.map((event) => event.type)).toEqual(
+      expect.arrayContaining([
+        "workflow.loaded",
+        "workspace.ready",
+        "prompt.rendered",
+        "provider.started",
+        "codex.thread.started",
+        "codex.turn.started",
+        "codex.assistant.delta",
+        "github.review_artifacts.refreshed",
+      ]),
+    );
+    expect(artifacts.reviewArtifacts).toMatchObject({
+      runId: started.run.id,
+      issueIdentifier: "ENG-101",
+      provider: "codex",
+    });
+    expect(final.connected).toMatchObject({
+      onboardingState: "completed",
+      activeRun: null,
+      reviewArtifact: { status: "ready", runId: started.run.id },
+      nextAction: { kind: "review_artifact" },
+    });
+  });
+
   it("starts the codex provider from a fake linear issue", async () => {
     const created = createDaemonServer(new EventStore(join(directory, "linear-codex.sqlite")), {
       workflowPath,
@@ -1324,6 +1420,11 @@ function fakeServerSource(): string {
 import readline from "node:readline";
 
 const mode = process.argv[2] ?? "success";
+if (process.argv.includes("--help")) {
+  process.stdout.write("fake-codex app-server\\n");
+  process.exit(0);
+}
+
 const rl = readline.createInterface({ input: process.stdin });
 let activeTurn = false;
 

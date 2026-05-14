@@ -2236,6 +2236,158 @@ export const DaemonStatusResponseSchema = z.object({
 });
 export type DaemonStatusResponse = z.infer<typeof DaemonStatusResponseSchema>;
 
+export const ConnectedOnboardingStateSchema = z.enum([
+  "daemon_unavailable",
+  "daemon_ready",
+  "needs_repo",
+  "repo_ready",
+  "needs_linear",
+  "linear_ready",
+  "needs_github",
+  "github_ready",
+  "needs_provider",
+  "provider_ready",
+  "needs_issue_scope",
+  "board_ready",
+  "issue_selected",
+  "workspace_preparing",
+  "workspace_ready",
+  "run_starting",
+  "run_active",
+  "evidence_streaming",
+  "review_ready",
+  "completed",
+  "failed",
+  "needs_attention",
+]);
+export type ConnectedOnboardingState = z.infer<typeof ConnectedOnboardingStateSchema>;
+
+const ConnectedReadinessStatusSchema = z.enum([
+  "ready",
+  "healthy",
+  "missing",
+  "missing_auth",
+  "invalid",
+  "invalid_config",
+  "disabled",
+  "unavailable",
+  "stale",
+  "unknown",
+  "empty",
+  "blocked",
+]);
+
+export const ConnectedNextActionSchema = z.object({
+  kind: z.enum([
+    "start_daemon",
+    "choose_repo",
+    "configure_workflow",
+    "connect_linear",
+    "refresh_issues",
+    "validate_github",
+    "check_provider",
+    "review_write_permissions",
+    "open_board",
+    "select_issue",
+    "run_with_codex",
+    "watch_run",
+    "review_artifact",
+    "completed",
+    "needs_attention",
+  ]),
+  label: z.string().min(1),
+  href: z.string().min(1).nullable().default(null),
+});
+export type ConnectedNextAction = z.infer<typeof ConnectedNextActionSchema>;
+
+export const ConnectedGoldenPathStatusSchema = z.object({
+  mode: z.literal("connected"),
+  generatedAt: isoDateTime,
+  onboardingState: ConnectedOnboardingStateSchema,
+  daemon: z.object({
+    status: z.literal("healthy"),
+    instanceId: z.string().min(1),
+    startedAt: isoDateTime,
+    activeRunsCount: z.number().int().nonnegative(),
+    recoveredRunsCount: z.number().int().nonnegative(),
+  }),
+  repository: z.object({
+    status: ConnectedReadinessStatusSchema,
+    path: z.string().min(1).nullable(),
+    workflowPath: z.string().min(1).nullable(),
+    workflowStatus: WorkflowStatusSchema.shape.status,
+    error: z.string().nullable(),
+  }),
+  workspace: z.object({
+    status: ConnectedReadinessStatusSchema,
+    path: z.string().min(1).nullable(),
+    exists: z.boolean().nullable(),
+  }),
+  linear: z.object({
+    status: ConnectedReadinessStatusSchema,
+    authStatus: AuthConnectionStatusSchema,
+    credentialSource: AuthCredentialSourceSchema,
+    issueCount: z.number().int().nonnegative(),
+    issueScope: z.string().min(1),
+    lastSyncAt: isoDateTime.nullable(),
+    error: z.string().nullable(),
+  }),
+  github: z.object({
+    status: ConnectedReadinessStatusSchema,
+    authStatus: AuthConnectionStatusSchema,
+    credentialSource: AuthCredentialSourceSchema,
+    enabled: z.boolean(),
+    repository: z.string().min(1).nullable(),
+    lastCheckedAt: isoDateTime.nullable(),
+    error: z.string().nullable(),
+  }),
+  provider: z.object({
+    kind: ProviderIdSchema,
+    status: ConnectedReadinessStatusSchema,
+    command: z.string().min(1).nullable(),
+    available: z.boolean(),
+    error: z.string().nullable(),
+    hint: z.string().nullable(),
+  }),
+  eventStore: z.object({
+    status: z.literal("ready"),
+    databasePath: z.string().min(1),
+  }),
+  board: z.object({
+    status: ConnectedReadinessStatusSchema,
+    issueCount: z.number().int().nonnegative(),
+    issueScope: z.string().min(1),
+    lastSyncAt: isoDateTime.nullable(),
+  }),
+  activeRun: z
+    .object({
+      id: z.string().min(1),
+      issueIdentifier: z.string().min(1),
+      provider: ProviderIdSchema,
+      status: RunStatusSchema,
+    })
+    .nullable(),
+  reviewArtifact: z.object({
+    status: ConnectedReadinessStatusSchema,
+    runId: z.string().min(1).nullable(),
+    issueIdentifier: z.string().min(1).nullable(),
+    lastRefreshedAt: isoDateTime.nullable(),
+    error: z.string().nullable(),
+  }),
+  writes: z.object({
+    github: z.enum(["disabled", "read_only", "gated", "enabled"]),
+    linear: z.enum(["disabled", "read_only", "gated", "enabled"]),
+  }),
+  nextAction: ConnectedNextActionSchema,
+  blockingReasons: z.array(z.string().min(1)),
+});
+export type ConnectedGoldenPathStatus = z.infer<typeof ConnectedGoldenPathStatusSchema>;
+
+export const ConnectedGoldenPathStatusResponseSchema = z.object({
+  connected: ConnectedGoldenPathStatusSchema,
+});
+export type ConnectedGoldenPathStatusResponse = z.infer<typeof ConnectedGoldenPathStatusResponseSchema>;
+
 export const ApprovalStateSchema = z.object({
   approvalId: z.string().min(1),
   runId: z.string().min(1),
