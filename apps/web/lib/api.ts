@@ -350,6 +350,11 @@ export async function getWorkspace(issueIdentifier: string): Promise<WorkspaceIn
         path: workspace.path,
         createdNow: false,
         exists: workspace.exists,
+        workspaceId: null,
+        workspaceKind: "directory",
+        isolationStatus: "legacy_directory",
+        prEligibility: "blocked",
+        ownership: null,
       };
 }
 

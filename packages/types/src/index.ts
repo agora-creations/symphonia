@@ -700,12 +700,75 @@ export const WorkflowStatusSchema = z.object({
 });
 export type WorkflowStatus = z.infer<typeof WorkflowStatusSchema>;
 
+export const WorkspaceKindSchema = z.enum(["directory", "git_worktree", "git_clone"]);
+export type WorkspaceKind = z.infer<typeof WorkspaceKindSchema>;
+
+export const WorkspaceIsolationStatusSchema = z.enum(["isolated", "legacy_directory", "invalid", "missing", "ambiguous"]);
+export type WorkspaceIsolationStatus = z.infer<typeof WorkspaceIsolationStatusSchema>;
+
+export const WorkspacePrEligibilitySchema = z.enum(["eligible", "blocked"]);
+export type WorkspacePrEligibility = z.infer<typeof WorkspacePrEligibilitySchema>;
+
+export const RunWorkspaceOwnershipSchema = z.object({
+  workspaceId: z.string().min(1),
+  runId: z.string().min(1),
+  issueId: z.string().min(1),
+  issueKey: z.string().min(1),
+  sourceRepoPath: z.string().min(1).nullable(),
+  sourceRepoGitRoot: z.string().min(1).nullable(),
+  workspacePath: z.string().min(1),
+  workspaceGitRoot: z.string().min(1).nullable(),
+  workspaceKind: WorkspaceKindSchema,
+  isolationStatus: WorkspaceIsolationStatusSchema,
+  prEligibility: WorkspacePrEligibilitySchema,
+  baseBranch: z.string().min(1).nullable(),
+  headBranch: z.string().min(1).nullable(),
+  baseCommit: z.string().min(1).nullable(),
+  remoteName: z.string().min(1).nullable(),
+  remoteUrl: z.string().min(1).nullable(),
+  targetRepository: z.string().min(1).nullable(),
+  createdAt: isoDateTime,
+  preparedAt: isoDateTime,
+  owner: z.literal("run"),
+  metadataVersion: z.literal(1),
+  blockingReasons: z.array(z.string().min(1)),
+  warnings: z.array(z.string().min(1)),
+});
+export type RunWorkspaceOwnership = z.infer<typeof RunWorkspaceOwnershipSchema>;
+
+export const WorkspaceValidationResultSchema = z.object({
+  workspaceId: z.string().min(1).nullable(),
+  runId: z.string().min(1).nullable(),
+  workspacePath: z.string().min(1).nullable(),
+  exists: z.boolean(),
+  isGitRepository: z.boolean(),
+  gitTopLevel: z.string().min(1).nullable(),
+  resolvesToMainCheckout: z.boolean(),
+  isInsideSourceCheckout: z.boolean(),
+  belongsToRun: z.boolean(),
+  matchesExpectedRepo: z.boolean(),
+  hasOwnershipMetadata: z.boolean(),
+  canBeUsedForProviderRun: z.boolean(),
+  canBeUsedForPrWrite: z.boolean(),
+  workspaceKind: WorkspaceKindSchema.nullable(),
+  isolationStatus: WorkspaceIsolationStatusSchema,
+  prEligibility: WorkspacePrEligibilitySchema,
+  blockingReasons: z.array(z.string().min(1)),
+  warnings: z.array(z.string().min(1)),
+});
+export type WorkspaceValidationResult = z.infer<typeof WorkspaceValidationResultSchema>;
+
 export const WorkspaceInfoSchema = z.object({
   issueIdentifier: z.string().min(1),
   workspaceKey: z.string().min(1),
   path: z.string().min(1),
   createdNow: z.boolean(),
   exists: z.boolean(),
+  workspaceId: z.string().min(1).nullable().default(null),
+  workspaceKind: WorkspaceKindSchema.default("directory"),
+  isolationStatus: WorkspaceIsolationStatusSchema.default("legacy_directory"),
+  prEligibility: WorkspacePrEligibilitySchema.default("blocked"),
+  ownership: RunWorkspaceOwnershipSchema.nullable().default(null),
 });
 export type WorkspaceInfo = z.infer<typeof WorkspaceInfoSchema>;
 
@@ -812,6 +875,11 @@ export const WorkflowInvalidEventSchema = BaseAgentEventSchema.extend({
 export const WorkspaceReadyEventSchema = BaseAgentEventSchema.extend({
   type: z.literal("workspace.ready"),
   workspace: WorkspaceInfoSchema,
+});
+
+export const WorkspaceOwnershipRecordedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("workspace.ownership.recorded"),
+  ownership: RunWorkspaceOwnershipSchema,
 });
 
 export const WorkspaceCleanupPlannedEventSchema = BaseAgentEventSchema.extend({
@@ -1335,6 +1403,12 @@ export const GitHubPrPreflightWorkspaceSchema = z.object({
   belongsToRun: z.boolean(),
   isMainCheckout: z.boolean(),
   gitTopLevel: z.string().min(1).nullable(),
+  workspaceKind: WorkspaceKindSchema.nullable().default(null),
+  isolationStatus: WorkspaceIsolationStatusSchema.default("missing"),
+  prEligibility: WorkspacePrEligibilitySchema.default("blocked"),
+  hasOwnershipMetadata: z.boolean().default(false),
+  ownershipMetadataVersion: z.number().int().positive().nullable().default(null),
+  workspaceId: z.string().min(1).nullable().default(null),
 });
 export type GitHubPrPreflightWorkspace = z.infer<typeof GitHubPrPreflightWorkspaceSchema>;
 
@@ -2242,6 +2316,7 @@ export const AgentEventSchema = z.discriminatedUnion("type", [
   WorkflowLoadedEventSchema,
   WorkflowInvalidEventSchema,
   WorkspaceReadyEventSchema,
+  WorkspaceOwnershipRecordedEventSchema,
   WorkspaceCleanupPlannedEventSchema,
   WorkspaceCleanupStartedEventSchema,
   WorkspaceCleanupSkippedEventSchema,

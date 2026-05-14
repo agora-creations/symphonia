@@ -18,6 +18,8 @@ import {
   LocalWriteExecutionRecordSchema,
   ReviewArtifactSnapshot,
   ReviewArtifactSnapshotSchema,
+  RunWorkspaceOwnership,
+  RunWorkspaceOwnershipSchema,
   Run,
   RunSchema,
   TrackerKind,
@@ -51,6 +53,10 @@ type HarnessApplyRow = {
 };
 
 type WriteActionRow = {
+  payload_json: string;
+};
+
+type WorkspaceOwnershipRow = {
   payload_json: string;
 };
 
@@ -848,6 +854,92 @@ export class EventStore {
       : null;
   }
 
+  saveRunWorkspaceOwnership(ownership: RunWorkspaceOwnership): void {
+    const parsed = RunWorkspaceOwnershipSchema.parse(ownership);
+    this.db
+      .prepare(
+        `
+          insert into run_workspace_ownership (
+            run_id,
+            workspace_id,
+            issue_id,
+            issue_key,
+            workspace_path,
+            workspace_kind,
+            isolation_status,
+            pr_eligibility,
+            created_at,
+            prepared_at,
+            payload_json
+          )
+          values (
+            @runId,
+            @workspaceId,
+            @issueId,
+            @issueKey,
+            @workspacePath,
+            @workspaceKind,
+            @isolationStatus,
+            @prEligibility,
+            @createdAt,
+            @preparedAt,
+            @payloadJson
+          )
+          on conflict(run_id) do update set
+            workspace_id = excluded.workspace_id,
+            issue_id = excluded.issue_id,
+            issue_key = excluded.issue_key,
+            workspace_path = excluded.workspace_path,
+            workspace_kind = excluded.workspace_kind,
+            isolation_status = excluded.isolation_status,
+            pr_eligibility = excluded.pr_eligibility,
+            prepared_at = excluded.prepared_at,
+            payload_json = excluded.payload_json
+        `,
+      )
+      .run({
+        runId: parsed.runId,
+        workspaceId: parsed.workspaceId,
+        issueId: parsed.issueId,
+        issueKey: parsed.issueKey,
+        workspacePath: parsed.workspacePath,
+        workspaceKind: parsed.workspaceKind,
+        isolationStatus: parsed.isolationStatus,
+        prEligibility: parsed.prEligibility,
+        createdAt: parsed.createdAt,
+        preparedAt: parsed.preparedAt,
+        payloadJson: JSON.stringify(parsed),
+      });
+  }
+
+  getRunWorkspaceOwnership(runId: string): RunWorkspaceOwnership | null {
+    const row = this.db
+      .prepare(
+        `
+          select payload_json
+          from run_workspace_ownership
+          where run_id = ?
+        `,
+      )
+      .get(runId) as WorkspaceOwnershipRow | undefined;
+
+    return row ? RunWorkspaceOwnershipSchema.parse(JSON.parse(row.payload_json)) : null;
+  }
+
+  listRunWorkspaceOwnership(): RunWorkspaceOwnership[] {
+    const rows = this.db
+      .prepare(
+        `
+          select payload_json
+          from run_workspace_ownership
+          order by prepared_at desc, run_id asc
+        `,
+      )
+      .all() as WorkspaceOwnershipRow[];
+
+    return rows.map((row) => RunWorkspaceOwnershipSchema.parse(JSON.parse(row.payload_json)));
+  }
+
   close(): void {
     this.db.close();
   }
@@ -973,6 +1065,26 @@ export class EventStore {
       create unique index if not exists idx_integration_write_actions_idempotency
       on integration_write_actions (idempotency_key)
       where idempotency_key is not null;
+
+      create table if not exists run_workspace_ownership (
+        run_id text primary key,
+        workspace_id text not null,
+        issue_id text not null,
+        issue_key text not null,
+        workspace_path text not null,
+        workspace_kind text not null,
+        isolation_status text not null,
+        pr_eligibility text not null,
+        created_at text not null,
+        prepared_at text not null,
+        payload_json text not null
+      );
+
+      create index if not exists idx_run_workspace_ownership_issue
+      on run_workspace_ownership (issue_id, prepared_at);
+
+      create index if not exists idx_run_workspace_ownership_workspace
+      on run_workspace_ownership (workspace_path);
     `);
   }
 }

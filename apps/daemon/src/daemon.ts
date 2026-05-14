@@ -104,6 +104,7 @@ import {
   ReviewArtifactSnapshot,
   Run,
   RunApprovalEvidence,
+  RunWorkspaceOwnership,
   RunSchema,
   StartRunRequestSchema,
   TrackerHealth,
@@ -135,6 +136,7 @@ type RunRecord = {
   attempt: number;
   prompt: string | null;
   workspace: WorkspaceInfo | null;
+  workspaceOwnership: RunWorkspaceOwnership | null;
   workflowSummary: WorkflowConfigSummary | null;
   providerStarted: boolean;
 };
@@ -286,12 +288,18 @@ export class SymphoniaDaemon {
       const record = this.recordFromPersistedRun(run);
       this.runs.set(run.id, record);
       if (run.workspacePath) {
+        const ownership = this.eventStore.getRunWorkspaceOwnership(run.id);
         this.workspaces.set(run.issueIdentifier, {
           issueIdentifier: run.issueIdentifier,
           workspaceKey: basename(run.workspacePath),
           path: run.workspacePath,
           createdNow: false,
           exists: true,
+          workspaceId: ownership?.workspaceId ?? null,
+          workspaceKind: ownership?.workspaceKind ?? "directory",
+          isolationStatus: ownership?.isolationStatus ?? "legacy_directory",
+          prEligibility: ownership?.prEligibility ?? "blocked",
+          ownership,
         });
       }
     }
@@ -304,6 +312,7 @@ export class SymphoniaDaemon {
   }
 
   private recordFromPersistedRun(run: Run): RunRecord {
+    const ownership = this.eventStore.getRunWorkspaceOwnership(run.id);
     return {
       run,
       issue: this.issueForRun(run),
@@ -317,8 +326,14 @@ export class SymphoniaDaemon {
             path: run.workspacePath,
             createdNow: false,
             exists: true,
+            workspaceId: ownership?.workspaceId ?? null,
+            workspaceKind: ownership?.workspaceKind ?? "directory",
+            isolationStatus: ownership?.isolationStatus ?? "legacy_directory",
+            prEligibility: ownership?.prEligibility ?? "blocked",
+            ownership,
           }
         : null,
+      workspaceOwnership: ownership,
       workflowSummary: null,
       providerStarted: false,
     };
@@ -791,6 +806,7 @@ export class SymphoniaDaemon {
       attempt,
       prompt: null,
       workspace: null,
+      workspaceOwnership: null,
       workflowSummary: null,
       providerStarted: false,
     };
@@ -847,6 +863,7 @@ export class SymphoniaDaemon {
       attempt: this.countRunsForIssue(issue.id) + 1,
       prompt: null,
       workspace: null,
+      workspaceOwnership: null,
       workflowSummary: null,
       providerStarted: false,
     };
@@ -914,9 +931,29 @@ export class SymphoniaDaemon {
       });
 
       const workspaceManager = new WorkspaceManager(runtime.config.workspace.root);
-      const workspace = workspaceManager.prepareIssueWorkspace(issue);
+      const workspace = workspaceManager.prepareIssueWorkspace(issue, {
+        runId: record.run.id,
+        sourceRepoPath: this.getCurrentRepositoryPath(),
+        remoteName: runtime.config.github.remoteName,
+        baseBranch: runtime.config.github.defaultBaseBranch,
+        targetRepository:
+          runtime.config.github.owner && runtime.config.github.repo
+            ? `${runtime.config.github.owner}/${runtime.config.github.repo}`
+            : null,
+      });
       record.workspace = workspace;
+      record.workspaceOwnership = workspace.ownership;
       this.workspaces.set(issue.identifier, workspace);
+      if (workspace.ownership) {
+        this.eventStore.saveRunWorkspaceOwnership(workspace.ownership);
+        await this.emit(record, {
+          id: randomUUID(),
+          runId: record.run.id,
+          type: "workspace.ownership.recorded",
+          timestamp: nowIso(),
+          ownership: workspace.ownership,
+        });
+      }
       if (record.controller.signal.aborted) return;
 
       await this.emit(record, {
@@ -1701,7 +1738,7 @@ export class SymphoniaDaemon {
   async refreshReviewArtifactsForRun(runId: string): Promise<ReviewArtifactSnapshot | null> {
     const record = this.requireRecord(runId);
     const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
-    return this.refreshReviewArtifactsForRecord(record, runtime);
+    return this.refreshReviewArtifactsForRecord(record, runtime, { force: true });
   }
 
   getWritesStatus() {
@@ -2015,14 +2052,27 @@ export class SymphoniaDaemon {
     const expectedPayloadHash = previewContract?.payloadHash ?? null;
     const idempotencyKey = requestedIdempotencyKey ?? previewContract?.idempotencyKey ?? null;
     const existingExecution = idempotencyKey ? this.eventStore.findLocalWriteExecutionByIdempotencyKey(idempotencyKey) : null;
-    const workspacePath = evidence.workspacePath ?? record.run.workspacePath;
+    const ownership = this.eventStore.getRunWorkspaceOwnership(runId) ?? record.workspaceOwnership ?? null;
+    const workspacePath = evidence.workspacePath ?? ownership?.workspacePath ?? record.run.workspacePath;
     const workspaceRealPath = workspacePath ? this.normalizeRepositoryPath(workspacePath) : null;
     const workspaceRootRealPath = this.normalizeRepositoryPath(runtime.config.workspace.root);
     const workspaceExists = Boolean(workspacePath && existsSync(workspacePath));
     const mainCheckoutPath = this.getCurrentRepositoryPath();
-    const expectedWorkspacePath = this.normalizeRepositoryPath(new WorkspaceManager(runtime.config.workspace.root).getIssueWorkspace(record.issue.identifier).path);
-    const belongsToRun = Boolean(workspaceRealPath && workspaceRealPath === expectedWorkspacePath);
-    const workspaceInsideRoot = Boolean(workspaceRealPath && isInsideWorkspaceRoot(workspaceRootRealPath, workspaceRealPath));
+    const ownershipWorkspacePath = ownership?.workspacePath ? this.normalizeRepositoryPath(ownership.workspacePath) : null;
+    const ownershipSourceRoot = ownership?.sourceRepoGitRoot ? this.normalizeRepositoryPath(ownership.sourceRepoGitRoot) : null;
+    const hasOwnershipMetadata = Boolean(ownership);
+    const belongsToRun = Boolean(
+      ownership &&
+        ownership.runId === runId &&
+        workspaceRealPath &&
+        ownershipWorkspacePath &&
+        workspaceRealPath === ownershipWorkspacePath,
+    );
+    const workspaceInsideRoot = Boolean(
+      workspaceRealPath &&
+        (isInsideWorkspaceRoot(workspaceRootRealPath, workspaceRealPath) ||
+          (ownershipWorkspacePath && workspaceRealPath === ownershipWorkspacePath)),
+    );
     const inspection =
       workspacePath && workspaceExists
         ? await inspectGitRepository(workspacePath, {
@@ -2034,9 +2084,24 @@ export class SymphoniaDaemon {
     const gitTopLevelRealPath = gitTopLevel ? this.normalizeRepositoryPath(gitTopLevel) : null;
     const isGitRepository = Boolean(inspection?.git.isGitRepo && gitTopLevelRealPath);
     const isMainCheckout = Boolean(
-      workspaceRealPath && (workspaceRealPath === mainCheckoutPath || gitTopLevelRealPath === mainCheckoutPath),
+      workspaceRealPath &&
+        (workspaceRealPath === mainCheckoutPath ||
+          gitTopLevelRealPath === mainCheckoutPath ||
+          (ownershipSourceRoot && gitTopLevelRealPath === ownershipSourceRoot)),
     );
-    const isIsolatedRunWorkspace = Boolean(workspaceRealPath && gitTopLevelRealPath && workspaceRealPath === gitTopLevelRealPath && !isMainCheckout);
+    const workspaceMetadataAllowsIsolation = Boolean(
+      ownership &&
+        (ownership.workspaceKind === "git_worktree" || ownership.workspaceKind === "git_clone") &&
+        ownership.isolationStatus === "isolated" &&
+        ownership.prEligibility === "eligible",
+    );
+    const isIsolatedRunWorkspace = Boolean(
+      workspaceMetadataAllowsIsolation &&
+        workspaceRealPath &&
+        gitTopLevelRealPath &&
+        workspaceRealPath === gitTopLevelRealPath &&
+        !isMainCheckout,
+    );
     const remoteUrlRaw = workspacePath && isGitRepository ? await preflightGitValue(workspacePath, ["remote", "get-url", runtime.config.github.remoteName]) : null;
     const targetRepository =
       requestedTargetRepository ??
@@ -2049,8 +2114,8 @@ export class SymphoniaDaemon {
         targetRepository === `${runtime.config.github.owner}/${runtime.config.github.repo}` &&
         preflightRemoteUrlMatchesRepository(remoteUrlRaw, runtime.config.github.owner, runtime.config.github.repo),
     );
-    const baseBranch = requestedBaseBranch ?? previewContract?.baseBranch ?? runtime.config.github.defaultBaseBranch;
-    const headBranch = requestedHeadBranch ?? previewContract?.targetBranch ?? inspection?.git.currentBranch ?? null;
+    const baseBranch = requestedBaseBranch ?? previewContract?.baseBranch ?? ownership?.baseBranch ?? runtime.config.github.defaultBaseBranch;
+    const headBranch = requestedHeadBranch ?? previewContract?.targetBranch ?? ownership?.headBranch ?? inspection?.git.currentBranch ?? null;
     const currentBranch = inspection?.git.currentBranch ?? null;
     const headExistsLocal =
       workspacePath && isGitRepository && headBranch
@@ -2125,11 +2190,33 @@ export class SymphoniaDaemon {
     if (evidence.reviewArtifactStatus !== "ready") blockers.push("Review artifact must be ready before creating a PR.");
     if (!workspacePath) blockers.push("Run workspace path is unavailable.");
     if (workspacePath && !workspaceExists) blockers.push("Run workspace path does not exist.");
-    if (workspacePath && !workspaceInsideRoot) blockers.push("Run workspace path is outside the configured workspace root.");
-    if (workspacePath && !belongsToRun) blockers.push("Run workspace path does not match the selected run issue workspace.");
+    if (!hasOwnershipMetadata) {
+      blockers.push("Workspace ownership metadata is missing; legacy directory workspaces are not eligible for PR writes.");
+    }
+    if (ownership?.workspaceKind === "directory") {
+      blockers.push("Workspace ownership metadata marks this as a legacy directory workspace, not a PR-eligible git worktree or clone.");
+    }
+    if (ownership && ownership.isolationStatus !== "isolated") {
+      blockers.push(`Workspace isolation status is ${ownership.isolationStatus}.`);
+    }
+    if (ownership && ownership.prEligibility !== "eligible") {
+      blockers.push("Workspace ownership metadata blocks PR eligibility.");
+    }
+    if (ownership?.blockingReasons.length) blockers.push(...ownership.blockingReasons);
+    if (workspacePath && !workspaceInsideRoot) blockers.push("Run workspace path is outside the configured or owned workspace root.");
+    if (workspacePath && !belongsToRun) blockers.push("Run workspace path does not match persisted ownership metadata for this run.");
     if (workspacePath && !isGitRepository) blockers.push(inspection?.git.error ?? "Run workspace is not a git repository.");
     if (workspacePath && isMainCheckout) blockers.push("Run workspace resolves to the main Symphonia checkout, which is not eligible for PR writes.");
     if (workspacePath && !isIsolatedRunWorkspace) blockers.push("Run workspace is not an isolated git repository rooted at the workspace path.");
+    if (ownership?.targetRepository && targetRepository && ownership.targetRepository !== targetRepository) {
+      blockers.push("Workspace ownership target repository does not match the current PR preview target.");
+    }
+    if (ownership?.baseBranch && baseBranch && ownership.baseBranch !== baseBranch) {
+      blockers.push("Workspace ownership base branch does not match the current PR preview base branch.");
+    }
+    if (ownership?.headBranch && headBranch && ownership.headBranch !== headBranch) {
+      blockers.push("Workspace ownership head branch does not match the current PR preview head branch.");
+    }
     if (!remoteUrlRaw) blockers.push(`Git remote ${runtime.config.github.remoteName} is unavailable.`);
     if (remoteUrlRaw && !repositoryMatchesTarget) blockers.push("Workspace git remote does not match the target GitHub repository.");
     if (!baseBranch) blockers.push("Base branch is unavailable.");
@@ -2205,6 +2292,12 @@ export class SymphoniaDaemon {
         belongsToRun,
         isMainCheckout,
         gitTopLevel: gitTopLevelRealPath,
+        workspaceKind: ownership?.workspaceKind ?? (workspacePath ? "directory" : null),
+        isolationStatus: ownership?.isolationStatus ?? (workspacePath ? "legacy_directory" : "missing"),
+        prEligibility: ownership?.prEligibility ?? "blocked",
+        hasOwnershipMetadata,
+        ownershipMetadataVersion: ownership?.metadataVersion ?? null,
+        workspaceId: ownership?.workspaceId ?? null,
       },
       repository: {
         expectedOwner: runtime.config.github.owner,
@@ -2683,6 +2776,11 @@ export class SymphoniaDaemon {
         path: workspace.path,
         createdNow: false,
         exists: workspace.exists,
+        workspaceId: null,
+        workspaceKind: "directory",
+        isolationStatus: "legacy_directory",
+        prEligibility: "blocked",
+        ownership: null,
       });
     }
 
@@ -3149,8 +3247,9 @@ export class SymphoniaDaemon {
   private async refreshReviewArtifactsForRecord(
     record: RunRecord,
     runtime: WorkflowRuntime,
+    options: { force?: boolean } = {},
   ): Promise<ReviewArtifactSnapshot | null> {
-    if (this.artifactRefreshes.has(record.run.id)) {
+    if (!options.force && this.artifactRefreshes.has(record.run.id)) {
       return this.eventStore.getReviewArtifactSnapshot(record.run.id);
     }
 

@@ -76,7 +76,9 @@ polling:
   interval_ms: 30000
 
 workspace:
-  root: ".symphonia/workspaces"
+  # Keep PR-capable run workspaces outside the app/source checkout so git
+  # worktrees cannot inherit unrelated dirty state from the main repository.
+  root: "~/.symphonia/workspaces"
   cleanup:
     enabled: false
     dry_run: true
