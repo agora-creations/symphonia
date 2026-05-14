@@ -66,11 +66,13 @@ import {
   AuthProviderId,
   AuthProviderIdSchema,
   AuthValidationResult,
+  ConnectedGoldenPathStatus,
   DaemonStatus,
   HookName,
   HookRun,
   Issue,
   isTerminalRunStatus,
+  IntegrationWritePolicy,
   ProviderHealth,
   ProviderId,
   GitHubHealth,
@@ -486,6 +488,10 @@ export class SymphoniaDaemon {
 
       if (request.method === "GET" && (path === "/daemon/status" || path === "/recovery/status")) {
         return sendJson(response, 200, { daemon: await this.getDaemonStatus() });
+      }
+
+      if (request.method === "GET" && (path === "/connected/status" || path === "/golden-path/status")) {
+        return sendJson(response, 200, { connected: await this.getConnectedStatus() });
       }
 
       if (request.method === "GET" && path === "/harness/status") {
@@ -1254,6 +1260,193 @@ export class SymphoniaDaemon {
         status: provider.status,
       })),
     };
+  }
+
+  async getConnectedStatus(): Promise<ConnectedGoldenPathStatus> {
+    const generatedAt = nowIso();
+    const workflow = this.refreshWorkflowStatus();
+    const repositoryPath = this.getCurrentRepositoryPath();
+    const summary = workflow.effectiveConfigSummary;
+    const workspacePath = summary?.workspaceRoot ?? null;
+    const tracker = this.getTrackerStatus();
+    let github = this.getGithubStatus();
+    const providers = await this.listProviderHealth();
+    const providerKind = summary?.defaultProvider ?? this.getDefaultProvider();
+    const provider = providers.find((item) => item.id === providerKind) ?? (await this.getProviderHealth(providerKind));
+    const linearConnection = this.authManager.getConnection("linear");
+    const githubConnection = this.authManager.getConnection("github");
+    const linearCredential = this.authManager.resolveCredential("linear");
+    const githubCredential = this.authManager.resolveCredential("github");
+    const hasLinearCredential = Boolean(linearCredential || this.workflowRuntime?.config.tracker.apiKey);
+    const hasGithubCredential = Boolean(githubCredential || this.workflowRuntime?.config.github.token);
+    if (github.enabled && hasGithubCredential) {
+      await this.getGithubHealth();
+      github = this.getGithubStatus();
+    }
+    const writes = this.tryGetWritesStatus();
+    const runs = this.listRuns();
+    const activeRun = runs.find((run) => !isTerminalRunStatus(run.status)) ?? null;
+    const latestRun = activeRun ?? runs[0] ?? null;
+    const reviewArtifact = latestRun ? this.eventStore.getReviewArtifactSnapshot(latestRun.id) : null;
+    const issueScope = this.issueScopeLabel(summary);
+    const repositoryStatus =
+      workflow.status === "healthy" ? "ready" : workflow.status === "missing" ? "missing" : "invalid";
+    const workspaceStatus = workspacePath ? "ready" : workflow.status === "healthy" ? "missing" : "unknown";
+    const linearStatus = connectedLinearStatus(workflow.status, tracker.status, tracker.issueCount, hasLinearCredential);
+    const githubStatus = connectedGithubStatus(github, hasGithubCredential);
+    const providerStatus = provider.available ? "ready" : provider.status === "invalid_config" ? "invalid_config" : "unavailable";
+    const blockers: string[] = [];
+
+    if (repositoryStatus !== "ready") {
+      blockers.push(workflow.error ?? "No healthy WORKFLOW.md is loaded for a local repository.");
+    }
+    if (workspaceStatus !== "ready") {
+      blockers.push("No workspace root is configured.");
+    }
+    if (linearStatus !== "ready") {
+      blockers.push(linearBlocker(linearStatus, tracker.error));
+    }
+    if (githubStatus !== "ready") {
+      blockers.push(githubBlocker(githubStatus, github.error));
+    }
+    if (providerStatus !== "ready") {
+      blockers.push(provider.error ?? provider.hint ?? "Codex provider is not available.");
+    }
+    if (tracker.issueCount === 0) {
+      blockers.push("No real Linear issues are cached for the current issue scope.");
+    }
+
+    const boardReady =
+      repositoryStatus === "ready" &&
+      workspaceStatus === "ready" &&
+      linearStatus === "ready" &&
+      githubStatus === "ready" &&
+      providerStatus === "ready" &&
+      tracker.issueCount > 0;
+    const boardStatus = boardReady ? "ready" : tracker.issueCount === 0 ? "empty" : "blocked";
+    const onboardingState = connectedOnboardingState({
+      repositoryStatus,
+      workspaceStatus,
+      linearStatus,
+      githubStatus,
+      providerStatus,
+      boardReady,
+      activeRun,
+      latestRun,
+      reviewArtifactReady: Boolean(reviewArtifact),
+      issueCount: tracker.issueCount,
+    });
+
+    return {
+      mode: "connected",
+      generatedAt,
+      onboardingState,
+      daemon: {
+        status: "healthy",
+        instanceId: this.daemonInstanceId,
+        startedAt: this.startedAt,
+        activeRunsCount: runs.filter((run) => !isTerminalRunStatus(run.status)).length,
+        recoveredRunsCount: this.recoveredRunsCount,
+      },
+      repository: {
+        status: repositoryStatus,
+        path: repositoryPath,
+        workflowPath: workflow.workflowPath,
+        workflowStatus: workflow.status,
+        error: workflow.error,
+      },
+      workspace: {
+        status: workspaceStatus,
+        path: workspacePath,
+        exists: workspacePath ? existsSync(workspacePath) : null,
+      },
+      linear: {
+        status: linearStatus,
+        authStatus: linearConnection.status,
+        credentialSource: linearConnection.credentialSource,
+        issueCount: tracker.issueCount,
+        issueScope,
+        lastSyncAt: tracker.lastSyncAt,
+        error: tracker.error,
+      },
+      github: {
+        status: githubStatus,
+        authStatus: githubConnection.status,
+        credentialSource: githubConnection.credentialSource,
+        enabled: github.enabled,
+        repository: github.config?.owner && github.config.repo ? `${github.config.owner}/${github.config.repo}` : null,
+        lastCheckedAt: github.lastCheckedAt,
+        error: github.error,
+      },
+      provider: {
+        kind: providerKind,
+        status: providerStatus,
+        command: provider.command,
+        available: provider.available,
+        error: provider.error,
+        hint: provider.hint,
+      },
+      eventStore: {
+        status: "ready",
+        databasePath: this.eventStore.getDatabasePath(),
+      },
+      board: {
+        status: boardStatus,
+        issueCount: tracker.issueCount,
+        issueScope,
+        lastSyncAt: tracker.lastSyncAt,
+      },
+      activeRun: activeRun
+        ? {
+            id: activeRun.id,
+            issueIdentifier: activeRun.issueIdentifier,
+            provider: activeRun.provider,
+            status: activeRun.status,
+          }
+        : null,
+      reviewArtifact: {
+        status: reviewArtifact ? "ready" : latestRun ? "missing" : "unavailable",
+        runId: reviewArtifact?.runId ?? latestRun?.id ?? null,
+        issueIdentifier: reviewArtifact?.issueIdentifier ?? latestRun?.issueIdentifier ?? null,
+        lastRefreshedAt: reviewArtifact?.lastRefreshedAt ?? null,
+        error: reviewArtifact?.error ?? null,
+      },
+      writes: {
+        github: writePosture(writes?.github ?? null),
+        linear: writePosture(writes?.linear ?? null),
+      },
+      nextAction: connectedNextAction({
+        repositoryStatus,
+        workspaceStatus,
+        linearStatus,
+        githubStatus,
+        providerStatus,
+        boardReady,
+        issueCount: tracker.issueCount,
+        activeRun,
+        latestRun,
+        reviewArtifactReady: Boolean(reviewArtifact),
+      }),
+      blockingReasons: [...new Set(blockers.filter(Boolean))],
+    };
+  }
+
+  private tryGetWritesStatus(): { github: IntegrationWritePolicy; linear: IntegrationWritePolicy } | null {
+    try {
+      return this.getWritesStatus();
+    } catch {
+      return null;
+    }
+  }
+
+  private issueScopeLabel(summary: WorkflowConfigSummary | null): string {
+    if (!summary) return "No Linear issue scope loaded";
+    if (summary.teamKey) return `Linear team ${summary.teamKey}`;
+    if (summary.teamId) return `Linear team id ${summary.teamId}`;
+    if (summary.projectSlug) return `Linear project ${summary.projectSlug}`;
+    if (summary.projectId) return `Linear project id ${summary.projectId}`;
+    if (summary.allowWorkspaceWide) return "Linear workspace-wide read-only scope";
+    return "Linear issue scope missing";
   }
 
   getHarnessStatus(): HarnessStatus {
@@ -2655,6 +2848,136 @@ export function startDaemon(port = Number(process.env.SYMPHONIA_DAEMON_PORT ?? d
 
 export function isDaemonEntrypoint(metaUrl: string): boolean {
   return metaUrl === pathToFileURL(process.argv[1] ?? "").href;
+}
+
+type ConnectedReadinessStatus = ConnectedGoldenPathStatus["linear"]["status"];
+type ConnectedActionInput = {
+  repositoryStatus: ConnectedReadinessStatus;
+  workspaceStatus: ConnectedReadinessStatus;
+  linearStatus: ConnectedReadinessStatus;
+  githubStatus: ConnectedReadinessStatus;
+  providerStatus: ConnectedReadinessStatus;
+  boardReady: boolean;
+  issueCount: number;
+  activeRun: Run | null;
+  latestRun: Run | null;
+  reviewArtifactReady: boolean;
+};
+
+function connectedLinearStatus(
+  workflowStatus: WorkflowStatus["status"],
+  trackerStatus: TrackerStatus["status"],
+  issueCount: number,
+  hasCredential: boolean,
+): ConnectedReadinessStatus {
+  if (workflowStatus !== "healthy") return "invalid_config";
+  if (!hasCredential) return "missing_auth";
+  if (trackerStatus === "invalid_config") return "invalid_config";
+  if (trackerStatus === "unavailable") return "unavailable";
+  if (trackerStatus === "stale") return issueCount > 0 ? "stale" : "unavailable";
+  if (issueCount > 0) return "ready";
+  if (trackerStatus === "healthy" || trackerStatus === "unknown") return "ready";
+  return "unknown";
+}
+
+function connectedGithubStatus(
+  github: GitHubStatus,
+  hasCredential: boolean,
+): ConnectedReadinessStatus {
+  if (!github.enabled) return "disabled";
+  if (github.status === "invalid_config") return "invalid_config";
+  if (!hasCredential) return "missing_auth";
+  if (github.status === "healthy") return "ready";
+  if (github.status === "stale") return "stale";
+  if (github.status === "unavailable") return "unavailable";
+  return "unknown";
+}
+
+function connectedOnboardingState(input: ConnectedActionInput): ConnectedGoldenPathStatus["onboardingState"] {
+  if (input.repositoryStatus !== "ready") return "needs_repo";
+  if (input.workspaceStatus !== "ready") return "needs_repo";
+  if (input.linearStatus !== "ready") return "needs_linear";
+  if (input.githubStatus !== "ready") return "needs_github";
+  if (input.providerStatus !== "ready") return "needs_provider";
+  if (input.issueCount === 0 || !input.boardReady) return "needs_issue_scope";
+
+  if (input.activeRun) {
+    if (input.activeRun.status === "preparing_workspace") return "workspace_preparing";
+    if (input.activeRun.status === "building_prompt") return "workspace_ready";
+    if (input.activeRun.status === "queued" || input.activeRun.status === "launching_agent") return "run_starting";
+    if (input.activeRun.status === "running" || input.activeRun.status === "streaming") return "evidence_streaming";
+    return "run_active";
+  }
+
+  if (input.latestRun && isTerminalRunStatus(input.latestRun.status)) {
+    if (input.latestRun.status === "failed" || input.latestRun.status === "timed_out" || input.latestRun.status === "stalled") {
+      return "failed";
+    }
+    if (input.reviewArtifactReady) return input.latestRun.status === "succeeded" ? "completed" : "review_ready";
+    return "review_ready";
+  }
+
+  return "board_ready";
+}
+
+function connectedNextAction(input: ConnectedActionInput): ConnectedGoldenPathStatus["nextAction"] {
+  if (input.repositoryStatus === "missing") {
+    return { kind: "choose_repo", label: "Choose local repository", href: "/settings" };
+  }
+  if (input.repositoryStatus !== "ready" || input.workspaceStatus !== "ready") {
+    return { kind: "configure_workflow", label: "Fix WORKFLOW.md", href: "/settings" };
+  }
+  if (input.linearStatus !== "ready") {
+    return { kind: "connect_linear", label: "Connect Linear", href: "/settings" };
+  }
+  if (input.githubStatus !== "ready") {
+    return { kind: "validate_github", label: "Validate GitHub", href: "/settings" };
+  }
+  if (input.providerStatus !== "ready") {
+    return { kind: "check_provider", label: "Check Codex", href: "/settings" };
+  }
+  if (input.issueCount === 0 || !input.boardReady) {
+    return { kind: "refresh_issues", label: "Refresh real issues", href: null };
+  }
+  if (input.activeRun) {
+    return { kind: "watch_run", label: "Watch run evidence", href: null };
+  }
+  if (input.latestRun && isTerminalRunStatus(input.latestRun.status)) {
+    if (input.latestRun.status === "succeeded" && input.reviewArtifactReady) {
+      return { kind: "review_artifact", label: "Review artifact ready", href: null };
+    }
+    if (input.latestRun.status === "failed") {
+      return { kind: "needs_attention", label: "Inspect failed run", href: null };
+    }
+  }
+  return { kind: "open_board", label: "Open issue board", href: "/issues" };
+}
+
+function linearBlocker(status: ConnectedReadinessStatus, error: string | null): string {
+  if (status === "missing_auth") return "Linear is not connected.";
+  if (status === "invalid_config") return error ?? "Linear workflow configuration is invalid.";
+  if (status === "unavailable") return error ?? "Linear is unavailable.";
+  if (status === "stale") return error ?? "Linear issue cache is stale.";
+  if (status === "unknown") return "Linear has not been validated or refreshed.";
+  return "Linear is not ready.";
+}
+
+function githubBlocker(status: ConnectedReadinessStatus, error: string | null): string {
+  if (status === "disabled") return "GitHub repository validation is disabled in WORKFLOW.md.";
+  if (status === "missing_auth") return "GitHub credentials are unavailable.";
+  if (status === "invalid_config") return error ?? "GitHub workflow configuration is invalid.";
+  if (status === "unavailable") return error ?? "GitHub repository is unavailable.";
+  if (status === "stale") return error ?? "GitHub repository validation is stale.";
+  if (status === "unknown") return "GitHub has not been validated.";
+  return "GitHub is not ready.";
+}
+
+function writePosture(policy: IntegrationWritePolicy | null): ConnectedGoldenPathStatus["writes"]["github"] {
+  if (!policy) return "disabled";
+  if (policy.readOnly) return "read_only";
+  if (!policy.enabled) return "disabled";
+  if (policy.requireConfirmation) return "gated";
+  return "enabled";
 }
 
 class ApiError extends Error {

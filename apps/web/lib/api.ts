@@ -14,6 +14,8 @@ import {
   AuthStatus,
   AuthStatusResponseSchema,
   AuthValidationResponseSchema,
+  ConnectedGoldenPathStatus,
+  ConnectedGoldenPathStatusResponseSchema,
   DaemonStatus,
   DaemonStatusResponseSchema,
   EventsResponseSchema,
@@ -190,6 +192,11 @@ export async function getRuns(): Promise<Run[]> {
 export async function getDaemonStatus(): Promise<DaemonStatus> {
   const response = await request("/daemon/status");
   return DaemonStatusResponseSchema.parse(response).daemon;
+}
+
+export async function getConnectedStatus(): Promise<ConnectedGoldenPathStatus> {
+  const response = await request("/connected/status");
+  return ConnectedGoldenPathStatusResponseSchema.parse(response).connected;
 }
 
 export async function getHarnessStatus(): Promise<HarnessStatus> {
