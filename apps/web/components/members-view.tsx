@@ -27,12 +27,7 @@ export function MembersView() {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-2.5">
-        <div className="flex items-center gap-2 text-sm">
-          <span className="font-semibold">Members</span>
-          <span className="text-muted-foreground tabular-nums">{list.length}</span>
-          <span className="text-[11px] text-muted-foreground">from Linear assignees</span>
-        </div>
+      <header className="flex flex-wrap items-center justify-end gap-3 border-b px-4 py-2.5">
         <div className="flex flex-wrap items-center gap-1">
           <div className="relative">
             <Search className="pointer-events-none absolute left-2 top-1/2 h-3.5 w-3.5 -translate-y-1/2 text-muted-foreground" />

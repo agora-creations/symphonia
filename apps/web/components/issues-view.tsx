@@ -616,44 +616,8 @@ export function IssuesView() {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-2.5">
-        <div className="flex flex-wrap items-center gap-2 text-sm">
-          <span className="font-semibold">Issues</span>
-          <span className="text-muted-foreground tabular-nums">{filtered.length}</span>
-          <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", workflowStatusClass(workflow?.status))}>
-            Workflow {workflow?.status ?? "unknown"}
-          </span>
-          <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", trackerStatusClass(trackerStatus?.status))}>
-            Tracker {trackerStatus ? `${trackerStatus.kind} ${trackerStatus.status.replaceAll("_", " ")}` : "unknown"}
-          </span>
-          <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", githubStatusClass(githubStatus?.status))}>
-            GitHub {githubStatus ? githubStatus.status.replaceAll("_", " ") : "unknown"}
-          </span>
-          <span className="rounded-full border px-2 py-0.5 text-[11px]">
-            Providers {providers.filter((provider) => provider.available).length}/{providers.length || 3} available
-          </span>
-          <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", daemonStatus?.recoveredRunsCount ? "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300" : "border-border bg-muted/60 text-muted-foreground")}>
-            Recovery {daemonStatus ? `${daemonStatus.recoveredRunsCount} recovered` : "unknown"}
-          </span>
-        </div>
+      <header className="flex flex-wrap items-center justify-end gap-3 border-b px-4 py-2.5">
         <div className="flex items-center gap-1">
-          <label className="inline-flex items-center gap-1.5 text-[12px] text-muted-foreground">
-            Provider
-            <select
-              value={selectedProvider}
-              onChange={(e) => setSelectedProvider(e.target.value as ProviderId)}
-              className="rounded-md border bg-background px-2 py-1 text-[12px] text-foreground"
-              aria-label="Provider mode"
-            >
-              <option value="codex">Codex {providerOptionSuffix(providers.find((provider) => provider.id === "codex"))}</option>
-              <option value="claude" disabled={providerDisabled(providers.find((provider) => provider.id === "claude"))}>
-                Claude Code {providerOptionSuffix(providers.find((provider) => provider.id === "claude"))}
-              </option>
-              <option value="cursor" disabled={providerDisabled(providers.find((provider) => provider.id === "cursor"))}>
-                Cursor Agent {providerOptionSuffix(providers.find((provider) => provider.id === "cursor"))}
-              </option>
-            </select>
-          </label>
           <button
             type="button"
             onClick={() => setWorkflowOpen((open) => !open)}
@@ -2578,16 +2542,6 @@ function providerLabel(provider?: ProviderHealth) {
   return provider.available ? "available" : "unavailable";
 }
 
-function providerOptionSuffix(provider?: ProviderHealth) {
-  if (!provider) return "(unknown)";
-  if (provider.status === "disabled" || provider.enabled === false) return "(disabled)";
-  return provider.available ? "(available)" : "(unavailable)";
-}
-
-function providerDisabled(provider?: ProviderHealth) {
-  return provider?.status === "disabled" || provider?.enabled === false;
-}
-
 function providerDisplayName(provider: ProviderId) {
   switch (provider) {
     case "codex":
@@ -2596,49 +2550,6 @@ function providerDisplayName(provider: ProviderId) {
       return "Claude Code";
     case "cursor":
       return "Cursor Agent";
-  }
-}
-
-function workflowStatusClass(status?: WorkflowStatus["status"]) {
-  switch (status) {
-    case "healthy":
-      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300";
-    case "invalid":
-    case "missing":
-      return "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300";
-    default:
-      return "border-border bg-muted/60 text-muted-foreground";
-  }
-}
-
-function trackerStatusClass(status?: TrackerStatus["status"]) {
-  switch (status) {
-    case "healthy":
-      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300";
-    case "stale":
-    case "unknown":
-      return "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300";
-    case "invalid_config":
-    case "unavailable":
-      return "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300";
-    default:
-      return "border-border bg-muted/60 text-muted-foreground";
-  }
-}
-
-function githubStatusClass(status?: GitHubStatus["status"]) {
-  switch (status) {
-    case "healthy":
-      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300";
-    case "stale":
-    case "unknown":
-      return "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300";
-    case "invalid_config":
-    case "unavailable":
-      return "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300";
-    case "disabled":
-    default:
-      return "border-border bg-muted/60 text-muted-foreground";
   }
 }
 
