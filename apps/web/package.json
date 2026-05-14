@@ -6,11 +6,12 @@
   "scripts": {
     "dev": "next dev",
     "build": "next build",
-    "lint": "tsc -p tsconfig.json --noEmit"
+    "lint": "pnpm -w build:packages && next typegen && tsc -p tsconfig.json --noEmit"
   },
   "dependencies": {
     "@kayron013/lexorank": "^2.0.0",
     "@symphonia/types": "workspace:*",
+    "agentation": "^3.0.2",
     "clsx": "^2.1.1",
     "lucide-react": "^1.14.0",
     "next": "^15.5.6",

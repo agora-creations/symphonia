@@ -11,12 +11,7 @@ export function TeamsView() {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex items-center justify-between gap-3 border-b px-4 py-2.5">
-        <div className="flex items-center gap-2 text-sm">
-          <span className="font-semibold">Teams</span>
-          <span className="text-muted-foreground tabular-nums">{insights.teams.length}</span>
-          <span className="text-[11px] text-muted-foreground">from Linear issue metadata</span>
-        </div>
+      <header className="flex items-center justify-end gap-3 border-b px-4 py-2.5">
         <div className="flex items-center gap-1">
           <button type="button" onClick={() => void refresh()} disabled={refreshing} className="inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-[12px] hover:bg-muted disabled:opacity-50">
             <RefreshCw className={cn("h-3.5 w-3.5", refreshing && "animate-spin")} /> Refresh

@@ -22,7 +22,7 @@ const PRIORITIES: Priority[] = ["urgent", "high", "medium", "low", "no-priority"
 const HEALTHS: Health[] = ["on-track", "at-risk", "off-track", "no-update"];
 
 export function ProjectsView() {
-  const { insights, issues, loading, refreshing, error, refresh } = useWorkspaceInsights();
+  const { insights, loading, refreshing, error, refresh } = useWorkspaceInsights();
   const [groupBy, setGroupBy] = useState<GroupBy>("status");
   const [team, setTeam] = useState<string>("all");
   const [priority, setPriority] = useState<Priority | "all">("all");
@@ -88,12 +88,7 @@ export function ProjectsView() {
 
   return (
     <div className="flex h-full flex-col">
-      <header className="flex flex-wrap items-center justify-between gap-3 border-b px-4 py-2.5">
-        <div className="flex items-center gap-2 text-sm">
-          <span className="font-semibold">Projects</span>
-          <span className="text-muted-foreground tabular-nums">{filtered.length}</span>
-          <span className="text-[11px] text-muted-foreground">from {issues.length} synced issues</span>
-        </div>
+      <header className="flex flex-wrap items-center justify-end gap-3 border-b px-4 py-2.5">
         <div className="flex flex-wrap items-center gap-1">
           <select value={team} onChange={(event) => setTeam(event.target.value)} className="rounded-md border bg-background px-2 py-1 text-[12px]">
             <option value="all">All teams</option>
