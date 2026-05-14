@@ -10,6 +10,7 @@
     "test": "pnpm build:packages && pnpm -r --filter './packages/**' --filter @symphonia/daemon --filter @symphonia/desktop test",
     "lint": "eslint apps packages --max-warnings=0",
     "format": "prettier --write apps packages README.md GOAL_PROGRESS.md",
+    "harness:scan": "tsx packages/core/src/harness-cli.ts",
     "desktop:dev": "pnpm --filter @symphonia/desktop dev",
     "desktop:build": "pnpm --filter @symphonia/desktop build",
     "desktop:package": "pnpm --filter @symphonia/desktop package",

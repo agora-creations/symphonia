@@ -1,5 +1,229 @@
 # Symphonia Goal Progress
 
+## Milestone 9 Objective
+
+Add a guided Harness Builder and deterministic agent-readiness scoring system that helps users make selected repositories easier for coding agents to understand, modify, test, review, and recover from while preserving Mock/Codex/Claude/Cursor providers, Mock/Linear trackers, GitHub review artifacts, `WORKFLOW.md` runtime, recovery, cleanup, SQLite/SSE, browser mode, and desktop mode.
+
+## Milestone 9 Starting Repo State
+
+- Branch at start: `milestone-9-harness-builder`, created from `origin/main`.
+- `origin/main` includes Milestone 8 via merge commit `24e8b80` (`Merge pull request #6 from agora-creations/milestone-8-desktop-app`).
+- Milestone 8 implementation commit present on main history: `1d9ccf8` (`Add desktop app shell`).
+- Working tree was clean before Milestone 9 changes.
+- Root `WORKFLOW.md` remains mock tracker/provider mode by default with cleanup disabled/dry-run.
+- Existing browser workflow remains `pnpm dev`; desktop mode remains additive.
+
+## Milestone 9 Planned Checkpoints
+
+1. Add shared zod schemas and TypeScript types for harness scans, scores, categories, findings, recommendations, artifact previews, apply requests/results, responses, and harness events.
+2. Add deterministic repository scanner with bounded traversal, ignored generated folders, language/framework/package-manager detection, validation command detection, git status detection, large-file skipping, symlink escape protection, and secret-name redaction.
+3. Add deterministic scoring engine with evidence-backed categories for repository map, workflow contract, validation loop, documentation, safety/secrets, provider readiness, review readiness, observability, frontend accessibility, and Symphonia compatibility.
+4. Add preview-only artifact generator for short map-like `AGENTS.md`, safe mock-first `WORKFLOW.md`, starter docs, safe scripts, skills README, and `.env.example` when appropriate.
+5. Add safe apply engine with dry-run default, explicit confirmation, repository containment, path traversal and symlink protections, hash checks, backups on update, executable script permissions, and re-scan suggestion.
+6. Add daemon APIs for harness status, scan, scan fetch/history, preview generation, and apply.
+7. Persist scan history, preview metadata, and apply history in SQLite with bounded payloads.
+8. Add Harness Builder UI with repository selector/status, scan button, scorecard, categories, findings, recommendations, artifact diff previews, dry-run/apply controls, and scan history.
+9. Integrate Harness Builder into desktop first-run setup and Settings.
+10. Add `pnpm harness:scan --path <repo>` CLI/script usage with optional JSON output.
+11. Update README with Harness Builder usage, scoring categories, safety policy, troubleshooting, limitations, and next milestone.
+12. Add deterministic tests that require no real provider, Linear, GitHub, OpenAI, Anthropic, or Cursor credentials.
+13. Perform local mock/manual validation for web, daemon, preview/apply, desktop, and regressions where feasible.
+14. Run final validation: `pnpm test`, `pnpm lint`, `pnpm build`, `pnpm desktop:build`, `pnpm desktop:package`, `git diff --check`, web/daemon smoke, desktop smoke, and `pnpm harness:scan --path .`.
+
+## Milestone 9 Validation Commands
+
+- `pnpm --filter @symphonia/types test`
+- `pnpm --filter @symphonia/core test`
+- `pnpm --filter @symphonia/db test`
+- `pnpm --filter @symphonia/daemon test`
+- `pnpm --filter @symphonia/web lint`
+- `pnpm --filter @symphonia/desktop test`
+- `pnpm test`
+- `pnpm lint`
+- `pnpm build`
+- `pnpm desktop:build`
+- `pnpm desktop:package`
+- `git diff --check`
+- `pnpm harness:scan --path .`
+- `pnpm dev` smoke check
+- `pnpm desktop:dev` smoke check
+
+## Milestone 9 Harness Scoring Assumptions
+
+- Scoring is deterministic and heuristic, not a guarantee of agent success.
+- Every category must cite evidence from files, metadata, command discovery, git status, or bounded scanner observations.
+- Missing information reduces score but does not fail the scan.
+- Unknown is distinct from missing.
+- Risky findings are visible and explain why they affect readiness.
+- Generated docs are starter/inferred templates and must say so.
+- The system should support general repositories, not just Symphonia.
+
+## Milestone 9 File-Writing Safety Policy
+
+- Scans and previews write nothing.
+- Apply is dry-run by default.
+- File writes require the exact confirmation string `APPLY HARNESS CHANGES`.
+- Writes are allowed only inside the selected repository path.
+- Path traversal and symlink escape writes are rejected.
+- Existing files are not overwritten unless the user previews the diff, selects the artifact, confirms apply, and the existing content hash still matches the preview.
+- Updates create a backup before writing.
+- Scripts are safe and non-destructive; executable bits are set only for generated scripts.
+- Scans, logs, events, diagnostics, and persistence must not expose secret values.
+
+## Milestone 9 Checkpoint Progress
+
+### Baseline And Progress Log
+
+- Confirmed local branch `milestone-8-desktop-app` was clean at `1d9ccf8`.
+- Confirmed `origin/main` contains Milestone 8 via merge commit `24e8b80`.
+- Created `milestone-9-harness-builder` from `origin/main`.
+- Read `README.md`, `GOAL_PROGRESS.md`, `WORKFLOW.md`, root package metadata, and the web, daemon, desktop, types, core, and db module layout.
+
+## Milestone 9 Final Status
+
+Milestone 9 is implemented and validated. Symphonia now has a deterministic Harness Builder that can scan a selected repository, score agent readiness with evidence, show existing and missing harness capabilities, generate preview-only starter artifacts, safely dry-run or apply selected artifacts after explicit confirmation, persist scan/apply history, expose daemon APIs, render a browser/desktop UI, and offer the scan from desktop first-run setup.
+
+The existing Mock/Codex/Claude/Cursor providers, Mock/Linear trackers, GitHub review artifacts, `WORKFLOW.md` runtime, recovery, workspace cleanup, SQLite persistence, SSE events, browser mode, and desktop mode were kept stable in tests and smoke validation.
+
+## Milestone 9 Implemented Files and Directories
+
+- `README.md`
+- `GOAL_PROGRESS.md`
+- `package.json`
+- `packages/types/src/index.ts`
+- `packages/types/test/schemas.test.ts`
+- `packages/core/src/index.ts`
+- `packages/core/src/harness-scanner.ts`
+- `packages/core/src/harness-scoring.ts`
+- `packages/core/src/harness-generator.ts`
+- `packages/core/src/harness-apply.ts`
+- `packages/core/src/harness-cli.ts`
+- `packages/core/test/harness.test.ts`
+- `packages/db/src/event-store.ts`
+- `packages/db/test/event-store.test.ts`
+- `apps/daemon/src/daemon.ts`
+- `apps/daemon/test/http.test.ts`
+- `apps/web/app/harness/page.tsx`
+- `apps/web/components/harness-builder.tsx`
+- `apps/web/components/app-sidebar.tsx`
+- `apps/web/components/desktop-setup.tsx`
+- `apps/web/app/settings/page.tsx`
+- `apps/web/lib/api.ts`
+
+## Milestone 9 Harness Domain Result
+
+- Added shared zod schemas and TypeScript types for scan requests/results, scores, categories, findings, recommendations, artifact previews, apply requests/results, harness status/history responses, preview requests, and harness event variants.
+- Added harness event variants for scan lifecycle, recommendation generation, artifact preview, apply, skip, and failure.
+- Existing agent event schemas still validate.
+- Invalid scan/apply payloads are rejected by schema tests.
+
+## Milestone 9 Scanner, Scoring, Generator, And Apply Result
+
+- Added a bounded deterministic scanner with repository path validation, directory checks, git detection, generated-folder ignores, large-file skips, binary-file skips, symlink escape protection, package/language/framework detection, metadata detection, validation command detection, CI detection, harness file detection, secret-looking path detection without reading secret values, and optional dirty git status detection.
+- Added deterministic scoring categories for repository map, workflow contract, validation loop, documentation, safety/secrets, provider readiness, review readiness, observability/debuggability, frontend accessibility/UX, and Symphonia compatibility.
+- Findings cite evidence and connect to recommendations. Missing, weak, risky, and unknown states are distinct.
+- Added preview-only generation for `AGENTS.md`, `WORKFLOW.md`, starter docs, safe scripts, `skills/README.md`, and `.env.example` when missing and safe.
+- Generated `AGENTS.md` is short and map-like. Generated `WORKFLOW.md` is mock-first with writes disabled. Generated docs are explicitly marked starter/inferred and include verification sections.
+- Added a safe apply engine with dry-run default, exact confirmation string `APPLY HARNESS CHANGES`, path traversal rejection, symlink escape rejection, existing hash checks, backups for updates, safe create permissions, executable script mode for generated scripts, and re-scan suggestions.
+
+## Milestone 9 Daemon, Persistence, CLI, And UI Result
+
+- Added daemon APIs: `GET /harness/status`, `GET /harness/scans`, `POST /harness/scan`, `GET /harness/scans/:scanId`, `POST /harness/previews`, `POST /harness/apply`, and `GET /harness/recommendations/:scanId`.
+- Added SQLite persistence for scan history, latest scan fetch, preview metadata, applied artifact history, and bounded payload storage.
+- Added `pnpm harness:scan --path <repo>` with optional JSON output and report writing.
+- Added `/harness` web route with repository selector/status, scan button, scorecard, category cards, findings, recommendations, artifact diff previews, selection controls, dry-run/apply confirmation, re-scan, and scan history.
+- Added Harness Builder navigation from the sidebar and Settings.
+- Added desktop first-run integration that offers readiness scan after repository selection, shows starter artifact previews when `AGENTS.md` or `WORKFLOW.md` is missing, allows skipping generation, and keeps mock tracker/provider defaults.
+
+## Milestone 9 Final Command Results
+
+- `pnpm --filter @symphonia/types test` - passed; 10 tests.
+- `pnpm --filter @symphonia/core test` - passed; 114 tests.
+- `pnpm --filter @symphonia/db test` - passed; 7 tests.
+- `pnpm --filter @symphonia/daemon test` - passed; 29 tests.
+- `pnpm --filter @symphonia/web lint` - passed.
+- `pnpm test` - passed across types, core, db, daemon, and desktop tests.
+- `pnpm lint` - passed.
+- `pnpm build` - passed. Next.js still prints the existing warning that the Next.js ESLint plugin was not detected.
+- `pnpm desktop:build` - passed.
+- `pnpm desktop:package` - passed.
+- `git diff --check` - passed.
+- `pnpm harness:scan --path .` - passed after running outside the restricted sandbox because the sandbox blocked the `tsx` IPC pipe.
+
+## Milestone 9 Harness Scan Validation Result
+
+- Symphonia repository scan completed with score `58%`, grade `D`.
+- Category results:
+  - Repository Map: `30%`, missing.
+  - Workflow Contract: `100%`, strong.
+  - Validation Loop: `80%`, strong.
+  - Documentation System: `0%`, missing.
+  - Safety And Secrets: `60%`, risky.
+  - Provider Readiness: `100%`, strong.
+  - Review Readiness: `30%`, missing.
+  - Observability And Debuggability: `40%`, partial.
+  - Accessibility And UX: `40%`, partial.
+  - Symphonia Compatibility: `100%`, strong.
+- Scan generated 14 artifact previews for missing or weak harness capabilities.
+- The scan score is heuristic and deterministic; it is not a guarantee of agent success.
+
+## Milestone 9 Artifact Preview And Apply Validation Result
+
+- Daemon preview generation returned create/manual previews without writing files.
+- Dry-run apply against a temporary repository applied 0 files and did not create `AGENTS.md`.
+- Confirmed apply with `APPLY HARNESS CHANGES` wrote only the selected `AGENTS.md` preview inside the temporary repository.
+- Re-scan of the temporary repository improved the score from `16` to `26`.
+- Temporary apply validation repository was removed after the smoke test.
+- Tests cover dry-run, confirmed create/update, hash mismatch, path traversal rejection, symlink escape rejection, executable script mode, and safe failure behavior.
+
+## Milestone 9 Web/Daemon Smoke Result
+
+- `pnpm dev` smoke passed on `SYMPHONIA_DAEMON_PORT=4119`, `PORT=3019`, and `NEXT_PUBLIC_DAEMON_URL=http://127.0.0.1:4119`.
+- `GET /healthz` returned OK.
+- `GET /issues` returned mock tracker issues.
+- Web `/harness` returned HTTP 200.
+- `GET /harness/status` returned the Symphonia repository root as the current target.
+- `POST /harness/scan` returned score `58`, grade `D`, and 14 previews.
+- A mock provider run reached `succeeded`.
+- `POST /runs/:runId/review-artifacts/refresh` returned local GitHub review artifacts.
+
+## Milestone 9 Desktop Smoke Result
+
+- `pnpm desktop:dev` smoke passed with `SYMPHONIA_DESKTOP_SETTINGS_DIR=/private/tmp/symphonia-desktop-settings-m9-smoke` and `SYMPHONIA_REPO_ROOT=/Users/diegomarono/symphonía`.
+- Desktop-managed daemon responded on `http://127.0.0.1:4100/healthz`.
+- Desktop-managed web `/harness` returned HTTP 200 on `http://127.0.0.1:3000/harness`.
+- Desktop-managed `/harness/status` returned the Symphonia repository root and latest scan grade `D`.
+- Desktop-managed `/issues` returned mock tracker issues.
+- Desktop-managed harness scan returned score `58`, grade `D`, and 14 previews.
+- Desktop settings persisted at `/private/tmp/symphonia-desktop-settings-m9-smoke/settings.json`.
+- During manual interrupt of the pnpm-wrapped Electron smoke process, a desktop-managed daemon remained listening on port 4100. It was explicitly killed and the port was verified closed. Automated desktop lifecycle cleanup tests still pass.
+
+## Milestone 9 Packaging Result
+
+- `pnpm desktop:build` passed.
+- `pnpm desktop:package` passed.
+- Package artifact remains `apps/desktop/out/Symphonia-darwin-arm64/Symphonia.app`.
+
+## Milestone 9 Known Limitations
+
+- Scoring is deterministic and heuristic, not a guarantee of agent success.
+- Generated docs are starter/inferred and must be reviewed.
+- Harness Builder does not use an LLM to deeply understand architecture.
+- Generated `AGENTS.md` may need human refinement.
+- Generated scripts may require project-specific adjustment.
+- No automatic PR creation.
+- GitHub and Linear writes remain disabled/deferred.
+- No cloud/team harness sharing.
+- No benchmark/eval scoring yet.
+- No automated documentation freshness bot yet.
+- No production-grade doc cross-link linter yet.
+- Tauri remains deferred.
+- Code signing, notarization, and auto-update remain deferred.
+
+## Milestone 9 Recommended Next Milestone
+
+Milestone 10 - Add evals, doc freshness checks, and automated harness quality regression tests.
+
 ## Milestone 8 Objective
 
 Package Symphonia as a local desktop app with first-run setup and persistent settings while preserving Mock/Codex/Claude/Cursor providers, Mock/Linear trackers, GitHub review artifacts, `WORKFLOW.md` runtime, restart recovery, workspace cleanup, SQLite/SSE, and the browser web+daemon workflow.

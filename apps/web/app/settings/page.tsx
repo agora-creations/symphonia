@@ -2,7 +2,7 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { Copy, FolderOpen, RefreshCw, RotateCcw } from "lucide-react";
+import { Copy, FolderOpen, RefreshCw, RotateCcw, ScanSearch } from "lucide-react";
 import { MainLayout } from "@/components/main-layout";
 import {
   getDaemonStatus,
@@ -157,6 +157,16 @@ export default function SettingsPage() {
             ) : (
               <p className="text-sm text-muted-foreground">Desktop settings are not available in browser-only mode.</p>
             )}
+          </Section>
+
+          <Section title="Harness Builder" description="Scan the selected repository and preview safe AGENTS.md, WORKFLOW.md, docs, and scripts changes.">
+            <div className="space-y-3 text-sm">
+              <KeyValue label="Repository" value={desktopSettings?.repositoryPath ?? daemonStatus?.workspaceRoot ?? "Use Harness Builder to choose a path"} />
+              <a href="/harness" className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted">
+                <ScanSearch className="h-4 w-4" />
+                Open Harness Builder
+              </a>
+            </div>
           </Section>
 
           <Section title="Daemon And Recovery" description="Recovery stays honest: old provider processes are not reattached after restart.">

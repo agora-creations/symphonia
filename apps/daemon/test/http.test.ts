@@ -102,6 +102,66 @@ describe("daemon API", () => {
     expect(JSON.stringify(status)).not.toContain("github-secret");
   });
 
+  it("serves harness scan, preview, dry-run apply, confirmed apply, and stale preview errors", async () => {
+    writeFileSync(join(directory, "package.json"), JSON.stringify({ scripts: { test: "vitest run", lint: "tsc --noEmit", build: "tsc" } }));
+    writeFileSync(join(directory, "README.md"), "# Harness target\n");
+
+    const scanned = await requestJson<{ scan: { id: string; score: { percentage: number }; generatedPreviews: unknown[] } }>(
+      "POST",
+      "/harness/scan",
+      { repositoryPath: directory, includeGeneratedPreviews: false },
+    );
+    expect(scanned.scan.score.percentage).toBeGreaterThan(0);
+    expect(scanned.scan.generatedPreviews).toHaveLength(0);
+
+    const previewed = await requestJson<{ scan: { generatedPreviews: Array<{ id: string; path: string }> } }>(
+      "POST",
+      "/harness/previews",
+      { scanId: scanned.scan.id },
+    );
+    const agents = previewed.scan.generatedPreviews.find((preview) => preview.path === "AGENTS.md")!;
+    expect(agents.id).toBeTruthy();
+
+    const dryRun = await requestJson<{ result: { applied: unknown[]; skipped: unknown[] } }>("POST", "/harness/apply", {
+      repositoryPath: directory,
+      artifactIds: [agents.id],
+      confirmation: null,
+      dryRun: true,
+    });
+    expect(dryRun.result.applied).toHaveLength(0);
+    expect(existsSync(join(directory, "AGENTS.md"))).toBe(false);
+
+    const applied = await requestJson<{ result: { applied: Array<{ path: string }> } }>("POST", "/harness/apply", {
+      repositoryPath: directory,
+      artifactIds: [agents.id],
+      confirmation: "APPLY HARNESS CHANGES",
+      dryRun: false,
+    });
+    expect(applied.result.applied[0]?.path).toBe("AGENTS.md");
+    expect(existsSync(join(directory, "AGENTS.md"))).toBe(true);
+
+    const rescan = await requestJson<{ scan: { id: string } }>("POST", "/harness/scan", {
+      repositoryPath: directory,
+      includeGeneratedPreviews: true,
+    });
+    writeFileSync(join(directory, "AGENTS.md"), "# Changed after preview\n");
+    const stale = await requestJson<{ result: { failed: Array<{ error: string }> } }>("POST", "/harness/apply", {
+      repositoryPath: directory,
+      artifactIds: ["agents-md"],
+      confirmation: "APPLY HARNESS CHANGES",
+      dryRun: false,
+    });
+    expect(rescan.scan.id).toBeTruthy();
+    expect(stale.result.failed[0]?.error).toContain("changed since preview");
+  });
+
+  it("returns a clear harness error for invalid paths", async () => {
+    const response = await requestRaw("POST", "/harness/scan", { repositoryPath: join(directory, "missing") });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.body).toContain("does not exist");
+  });
+
   it("reports linear setup errors without exposing secrets", () => {
     writeLinearWorkflow({ apiKey: "$MISSING_LINEAR_API_KEY", teamKey: "ENG" });
 
@@ -487,9 +547,18 @@ function getEvents(runId: string): AgentEvent[] {
   return (daemon as unknown as { eventStore: EventStore }).eventStore.getEventsForRun(runId);
 }
 
-async function requestJson<T>(method: "GET" | "POST", path: string): Promise<T> {
+async function requestJson<T>(method: "GET" | "POST", path: string, payload?: unknown): Promise<T> {
+  const response = await requestRaw(method, path, payload);
+
+  expect(response.statusCode).toBeGreaterThanOrEqual(200);
+  expect(response.statusCode).toBeLessThan(300);
+  return JSON.parse(response.body) as T;
+}
+
+async function requestRaw(method: "GET" | "POST", path: string, payload?: unknown): Promise<{ statusCode: number; body: string }> {
   let statusCode = 0;
   let body = "";
+  const requestBody = payload === undefined ? "" : JSON.stringify(payload);
   const response = {
     setHeader: () => undefined,
     writeHead: (status: number) => {
@@ -504,7 +573,7 @@ async function requestJson<T>(method: "GET" | "POST", path: string): Promise<T> 
     method,
     url: path,
     async *[Symbol.asyncIterator]() {
-      // No body is needed for current test requests.
+      if (requestBody) yield Buffer.from(requestBody);
     },
   };
 
@@ -512,9 +581,7 @@ async function requestJson<T>(method: "GET" | "POST", path: string): Promise<T> 
     route: (request: unknown, response: unknown) => Promise<void>;
   }).route(request, response);
 
-  expect(statusCode).toBeGreaterThanOrEqual(200);
-  expect(statusCode).toBeLessThan(300);
-  return JSON.parse(body) as T;
+  return { statusCode, body };
 }
 
 function sleep(ms: number): Promise<void> {

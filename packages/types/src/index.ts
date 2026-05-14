@@ -828,6 +828,306 @@ export const ReviewArtifactSnapshotSchema = z.object({
 });
 export type ReviewArtifactSnapshot = z.infer<typeof ReviewArtifactSnapshotSchema>;
 
+export const HarnessGradeSchema = z.enum(["A", "B", "C", "D", "F"]);
+export type HarnessGrade = z.infer<typeof HarnessGradeSchema>;
+
+export const HarnessCategoryStatusSchema = z.enum(["strong", "partial", "missing", "risky", "unknown"]);
+export type HarnessCategoryStatus = z.infer<typeof HarnessCategoryStatusSchema>;
+
+export const HarnessFindingSeveritySchema = z.enum(["info", "low", "medium", "high", "critical"]);
+export type HarnessFindingSeverity = z.infer<typeof HarnessFindingSeveritySchema>;
+
+export const HarnessFindingStatusSchema = z.enum(["present", "missing", "weak", "risky", "unknown"]);
+export type HarnessFindingStatus = z.infer<typeof HarnessFindingStatusSchema>;
+
+export const HarnessRecommendationPrioritySchema = z.enum(["low", "medium", "high"]);
+export type HarnessRecommendationPriority = z.infer<typeof HarnessRecommendationPrioritySchema>;
+
+export const HarnessRiskLevelSchema = z.enum(["low", "medium", "high"]);
+export type HarnessRiskLevel = z.infer<typeof HarnessRiskLevelSchema>;
+
+export const HarnessArtifactKindSchema = z.enum([
+  "AGENTS.md",
+  "WORKFLOW.md",
+  "doc",
+  "script",
+  "skill",
+  "config",
+  "checklist",
+]);
+export type HarnessArtifactKind = z.infer<typeof HarnessArtifactKindSchema>;
+
+export const HarnessArtifactActionSchema = z.enum(["create", "update", "skip", "manual"]);
+export type HarnessArtifactAction = z.infer<typeof HarnessArtifactActionSchema>;
+
+export const HarnessEvidenceSchema = z.object({
+  label: z.string().min(1),
+  value: z.string().min(1),
+  filePath: z.string().min(1).nullable().default(null),
+  lineNumber: z.number().int().positive().nullable().default(null),
+});
+export type HarnessEvidence = z.infer<typeof HarnessEvidenceSchema>;
+
+export const HarnessDetectedFileSchema = z.object({
+  path: z.string().min(1),
+  kind: z.string().min(1),
+  exists: z.boolean(),
+  sizeBytes: z.number().int().nonnegative().nullable(),
+  hash: z.string().min(1).nullable().default(null),
+  summary: z.string(),
+});
+export type HarnessDetectedFile = z.infer<typeof HarnessDetectedFileSchema>;
+
+export const HarnessValidationCommandSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  command: z.string().min(1),
+  source: z.enum(["package.json", "makefile", "script", "ci", "inferred"]),
+  filePath: z.string().min(1).nullable(),
+});
+export type HarnessValidationCommand = z.infer<typeof HarnessValidationCommandSchema>;
+
+export const HarnessRepositoryMetadataSchema = z.object({
+  isGitRepository: z.boolean(),
+  gitDirty: z.boolean().nullable(),
+  gitBranch: z.string().min(1).nullable(),
+  gitRemote: z.string().min(1).nullable(),
+  packageManager: z.string().min(1).nullable(),
+  languages: z.array(z.string().min(1)),
+  frameworks: z.array(z.string().min(1)),
+  validationCommands: z.array(HarnessValidationCommandSchema),
+});
+export type HarnessRepositoryMetadata = z.infer<typeof HarnessRepositoryMetadataSchema>;
+
+export const HarnessScanLimitsSchema = z.object({
+  maxFiles: z.number().int().positive(),
+  maxBytes: z.number().int().positive(),
+  maxFileSizeBytes: z.number().int().positive(),
+  filesScanned: z.number().int().nonnegative(),
+  bytesRead: z.number().int().nonnegative(),
+  truncated: z.boolean(),
+});
+export type HarnessScanLimits = z.infer<typeof HarnessScanLimitsSchema>;
+
+export const HarnessArtifactPreviewSchema = z.object({
+  id: z.string().min(1),
+  kind: HarnessArtifactKindSchema,
+  path: z.string().min(1),
+  action: HarnessArtifactActionSchema,
+  existingContentHash: z.string().min(1).nullable(),
+  proposedContent: z.string(),
+  diff: z.string(),
+  warnings: z.array(z.string().min(1)),
+  requiresConfirmation: z.boolean(),
+});
+export type HarnessArtifactPreview = z.infer<typeof HarnessArtifactPreviewSchema>;
+
+export const HarnessProposedArtifactSchema = HarnessArtifactPreviewSchema.pick({
+  kind: true,
+  path: true,
+  action: true,
+});
+export type HarnessProposedArtifact = z.infer<typeof HarnessProposedArtifactSchema>;
+
+export const HarnessRecommendationSchema = z.object({
+  id: z.string().min(1),
+  categoryId: z.string().min(1),
+  priority: HarnessRecommendationPrioritySchema,
+  title: z.string().min(1),
+  description: z.string().min(1),
+  rationale: z.string().min(1),
+  proposedArtifacts: z.array(HarnessProposedArtifactSchema),
+  manualSteps: z.array(z.string().min(1)),
+  riskLevel: HarnessRiskLevelSchema,
+  appliesAutomatically: z.boolean(),
+});
+export type HarnessRecommendation = z.infer<typeof HarnessRecommendationSchema>;
+
+export const HarnessFindingSchema = z.object({
+  id: z.string().min(1),
+  categoryId: z.string().min(1),
+  severity: HarnessFindingSeveritySchema,
+  status: HarnessFindingStatusSchema,
+  title: z.string().min(1),
+  description: z.string().min(1),
+  evidence: z.array(HarnessEvidenceSchema),
+  filePath: z.string().min(1).nullable(),
+  lineNumber: z.number().int().positive().nullable(),
+  recommendationIds: z.array(z.string().min(1)),
+});
+export type HarnessFinding = z.infer<typeof HarnessFindingSchema>;
+
+export const HarnessCategorySchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  score: z.number().nonnegative(),
+  max: z.number().positive(),
+  status: HarnessCategoryStatusSchema,
+  summary: z.string().min(1),
+  evidence: z.array(HarnessEvidenceSchema),
+  findings: z.array(z.string().min(1)),
+  recommendations: z.array(z.string().min(1)),
+});
+export type HarnessCategory = z.infer<typeof HarnessCategorySchema>;
+
+export const HarnessCategoryScoreSchema = z.object({
+  score: z.number().nonnegative(),
+  max: z.number().positive(),
+  percentage: z.number().min(0).max(100),
+  grade: HarnessGradeSchema,
+  status: HarnessCategoryStatusSchema,
+});
+export type HarnessCategoryScore = z.infer<typeof HarnessCategoryScoreSchema>;
+
+export const HarnessScoreSchema = z.object({
+  overall: z.number().nonnegative(),
+  max: z.number().positive(),
+  percentage: z.number().min(0).max(100),
+  grade: HarnessGradeSchema,
+  categoryScores: z.record(z.string(), HarnessCategoryScoreSchema),
+});
+export type HarnessScore = z.infer<typeof HarnessScoreSchema>;
+
+export const HarnessScanRequestSchema = z.object({
+  repositoryPath: z.string().min(1),
+  includeGitStatus: z.boolean().default(true),
+  includeDocs: z.boolean().default(true),
+  includeScripts: z.boolean().default(true),
+  includePackageMetadata: z.boolean().default(true),
+  includeWorkflow: z.boolean().default(true),
+  includeAgentsMd: z.boolean().default(true),
+  includeCi: z.boolean().default(true),
+  includeSecurity: z.boolean().default(true),
+  includeAccessibility: z.boolean().default(true),
+  includeGeneratedPreviews: z.boolean().default(false),
+});
+export type HarnessScanRequest = z.infer<typeof HarnessScanRequestSchema>;
+
+export const HarnessScanResultSchema = z.object({
+  id: z.string().min(1),
+  repositoryPath: z.string().min(1),
+  scannedAt: isoDateTime,
+  score: HarnessScoreSchema,
+  grade: HarnessGradeSchema,
+  categories: z.array(HarnessCategorySchema),
+  findings: z.array(HarnessFindingSchema),
+  recommendations: z.array(HarnessRecommendationSchema),
+  detectedFiles: z.array(HarnessDetectedFileSchema),
+  generatedPreviews: z.array(HarnessArtifactPreviewSchema),
+  warnings: z.array(z.string().min(1)),
+  errors: z.array(z.string().min(1)),
+  metadata: HarnessRepositoryMetadataSchema,
+  limits: HarnessScanLimitsSchema,
+});
+export type HarnessScanResult = z.infer<typeof HarnessScanResultSchema>;
+
+export const HarnessApplyRequestSchema = z.object({
+  repositoryPath: z.string().min(1),
+  artifactIds: z.array(z.string().min(1)).min(1),
+  confirmation: z.string().nullable().default(null),
+  dryRun: z.boolean().default(true),
+});
+export type HarnessApplyRequest = z.infer<typeof HarnessApplyRequestSchema>;
+
+export const HarnessApplyItemSchema = z.object({
+  artifactId: z.string().min(1),
+  path: z.string().min(1),
+  action: HarnessArtifactActionSchema,
+  message: z.string().min(1),
+});
+export type HarnessApplyItem = z.infer<typeof HarnessApplyItemSchema>;
+
+export const HarnessApplyFailureSchema = HarnessApplyItemSchema.extend({
+  error: z.string().min(1),
+});
+export type HarnessApplyFailure = z.infer<typeof HarnessApplyFailureSchema>;
+
+export const HarnessBackupSchema = z.object({
+  artifactId: z.string().min(1),
+  path: z.string().min(1),
+  backupPath: z.string().min(1),
+});
+export type HarnessBackup = z.infer<typeof HarnessBackupSchema>;
+
+export const HarnessApplyResultSchema = z.object({
+  applied: z.array(HarnessApplyItemSchema),
+  skipped: z.array(HarnessApplyItemSchema),
+  failed: z.array(HarnessApplyFailureSchema),
+  backups: z.array(HarnessBackupSchema),
+  events: z.array(z.string().min(1)),
+  nextScanSuggested: z.boolean(),
+});
+export type HarnessApplyResult = z.infer<typeof HarnessApplyResultSchema>;
+
+export const HarnessStatusSchema = z.object({
+  available: z.boolean(),
+  currentRepositoryPath: z.string().min(1).nullable(),
+  latestScanId: z.string().min(1).nullable(),
+  latestScanAt: isoDateTime.nullable(),
+  latestGrade: HarnessGradeSchema.nullable(),
+});
+export type HarnessStatus = z.infer<typeof HarnessStatusSchema>;
+
+export const HarnessPreviewRequestSchema = z.object({
+  scanId: z.string().min(1),
+});
+export type HarnessPreviewRequest = z.infer<typeof HarnessPreviewRequestSchema>;
+
+export const HarnessScanStartedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("harness.scan.started"),
+  scanId: z.string().min(1),
+  repositoryPath: z.string().min(1),
+});
+
+export const HarnessScanCompletedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("harness.scan.completed"),
+  scanId: z.string().min(1),
+  repositoryPath: z.string().min(1),
+  score: HarnessScoreSchema,
+});
+
+export const HarnessScanFailedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("harness.scan.failed"),
+  scanId: z.string().min(1),
+  repositoryPath: z.string().min(1),
+  error: z.string().min(1),
+});
+
+export const HarnessRecommendationGeneratedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("harness.recommendation.generated"),
+  scanId: z.string().min(1),
+  recommendation: HarnessRecommendationSchema,
+});
+
+export const HarnessArtifactPreviewedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("harness.artifact.previewed"),
+  scanId: z.string().min(1),
+  artifact: HarnessArtifactPreviewSchema,
+});
+
+export const HarnessArtifactAppliedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("harness.artifact.applied"),
+  scanId: z.string().min(1).nullable(),
+  artifactId: z.string().min(1),
+  path: z.string().min(1),
+});
+
+export const HarnessArtifactSkippedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("harness.artifact.skipped"),
+  scanId: z.string().min(1).nullable(),
+  artifactId: z.string().min(1),
+  path: z.string().min(1),
+  reason: z.string().min(1),
+});
+
+export const HarnessArtifactFailedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("harness.artifact.failed"),
+  scanId: z.string().min(1).nullable(),
+  artifactId: z.string().min(1),
+  path: z.string().min(1),
+  error: z.string().min(1),
+});
+
 export const GitHubHealthCheckedEventSchema = BaseAgentEventSchema.extend({
   type: z.literal("github.health.checked"),
   healthy: z.boolean(),
@@ -1180,6 +1480,14 @@ export const AgentEventSchema = z.discriminatedUnion("type", [
   CursorResultEventSchema,
   CursorUsageEventSchema,
   CursorErrorEventSchema,
+  HarnessScanStartedEventSchema,
+  HarnessScanCompletedEventSchema,
+  HarnessScanFailedEventSchema,
+  HarnessRecommendationGeneratedEventSchema,
+  HarnessArtifactPreviewedEventSchema,
+  HarnessArtifactAppliedEventSchema,
+  HarnessArtifactSkippedEventSchema,
+  HarnessArtifactFailedEventSchema,
 ]);
 export type AgentEvent = z.infer<typeof AgentEventSchema>;
 
@@ -1405,6 +1713,32 @@ export const PromptResponseSchema = z.object({
   prompt: z.string().nullable(),
 });
 export type PromptResponse = z.infer<typeof PromptResponseSchema>;
+
+export const HarnessStatusResponseSchema = z.object({
+  harness: HarnessStatusSchema,
+});
+export type HarnessStatusResponse = z.infer<typeof HarnessStatusResponseSchema>;
+
+export const HarnessScanResponseSchema = z.object({
+  scan: HarnessScanResultSchema,
+});
+export type HarnessScanResponse = z.infer<typeof HarnessScanResponseSchema>;
+
+export const HarnessScanHistoryResponseSchema = z.object({
+  scans: z.array(HarnessScanResultSchema),
+});
+export type HarnessScanHistoryResponse = z.infer<typeof HarnessScanHistoryResponseSchema>;
+
+export const HarnessPreviewResponseSchema = z.object({
+  scan: HarnessScanResultSchema,
+  previews: z.array(HarnessArtifactPreviewSchema),
+});
+export type HarnessPreviewResponse = z.infer<typeof HarnessPreviewResponseSchema>;
+
+export const HarnessApplyResponseSchema = z.object({
+  result: HarnessApplyResultSchema,
+});
+export type HarnessApplyResponse = z.infer<typeof HarnessApplyResponseSchema>;
 
 export const HealthResponseSchema = z.object({
   ok: z.boolean(),

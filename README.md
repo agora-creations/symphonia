@@ -1,13 +1,26 @@
 # Symphonia
 
-Symphonia is a local-first visual orchestration prototype for coding-agent work. It is a Linear-like control plane for fetching tracker issues, starting Mock, Codex, Claude Code, or Cursor Agent runs, watching timelines, stopping/retrying work, recovering safely after daemon restarts, managing local workspaces, reconciling active runs against repo-owned workflow configuration, inspecting review artifacts from local git and GitHub, and launching the local workbench through a desktop shell.
+Symphonia is a local-first visual orchestration prototype for coding-agent work. It is a Linear-like control plane for fetching tracker issues, starting Mock, Codex, Claude Code, or Cursor Agent runs, watching timelines, stopping/retrying work, recovering safely after daemon restarts, managing local workspaces, reconciling active runs against repo-owned workflow configuration, inspecting review artifacts from local git and GitHub, launching the local workbench through a desktop shell, and helping users build repository-local harnesses that make agent work easier to understand, validate, review, and recover.
 
-Milestone 8 keeps Mock/Codex/Claude/Cursor providers, Mock/Linear trackers, GitHub review artifacts, `WORKFLOW.md` runtime, restart recovery, workspace cleanup, SQLite/SSE event flow, approvals, stop/retry, and the browser web+daemon workflow stable, then adds an Electron desktop shell, first-run setup, persistent local settings, daemon/web lifecycle controls, diagnostics, and desktop packaging. Automated tests use fake CLIs and temporary databases/workspaces, so contributors do not need real Anthropic, Cursor, OpenAI, Linear, or GitHub credentials for validation.
+Milestone 9 keeps Mock/Codex/Claude/Cursor providers, Mock/Linear trackers, GitHub review artifacts, `WORKFLOW.md` runtime, restart recovery, workspace cleanup, SQLite/SSE event flow, approvals, stop/retry, desktop mode, and the browser web+daemon workflow stable, then adds a deterministic Harness Builder, agent-readiness scoring, preview-only artifact generation, safe confirmation-gated apply, SQLite scan history, daemon APIs, desktop first-run integration, and a local CLI scan command. Automated tests use fake CLIs and temporary databases/workspaces/repositories, so contributors do not need real Anthropic, Cursor, OpenAI, Linear, or GitHub credentials for validation.
 
 This prototype still does not integrate GitHub OAuth, GitHub App installation flow, GitHub webhooks, auto-push, auto-merge, Linear OAuth, Linear webhooks, auth, billing, cloud tenancy, code signing, notarization, auto-update, or Tauri. GitHub writes and PR creation remain disabled by default; PR creation is still deferred.
 
 Reference: the Codex app-server integration follows the official OpenAI developer docs at <https://developers.openai.com/codex/app-server/>.
 Claude Code CLI command-shape references: <https://docs.anthropic.com/en/docs/claude-code/cli-reference>. Cursor Agent CLI command-shape references: <https://docs.cursor.com/en/cli/reference/parameters> and <https://docs.cursor.com/en/cli/reference/output-format>.
+
+## What Milestone 9 Adds
+
+- Shared zod schemas and TypeScript types for harness scans, scores, categories, findings, recommendations, artifact previews, apply requests/results, responses, and harness events.
+- A deterministic repository scanner with safe path validation, bounded tree traversal, generated-folder ignores, large-file skipping, symlink escape protection, package/language/framework hints, validation command detection, git dirty-state detection, and secret-looking path detection without reading secret values.
+- An agent-readiness scoring engine with evidence-backed categories: Repository Map, Workflow Contract, Validation Loop, Documentation System, Safety And Secrets, Provider Readiness, Review Readiness, Observability And Debuggability, Accessibility And UX, and Symphonia Compatibility.
+- Preview-only generation for `AGENTS.md`, `WORKFLOW.md`, starter docs under `docs/`, safe scripts under `scripts/`, `skills/README.md`, and `.env.example` when missing.
+- A safe apply engine that is dry-run by default and writes only selected previews after the exact confirmation string `APPLY HARNESS CHANGES`.
+- Daemon APIs for harness status, scan, scan fetch/history, preview generation, recommendations, and apply.
+- SQLite persistence for scan history, preview metadata, and apply history.
+- A Harness Builder UI available from the sidebar, Settings, browser mode, and desktop mode.
+- Desktop first-run setup can scan the selected repository, preview missing `AGENTS.md`/`WORKFLOW.md`, dry-run apply, and apply selected safe previews with confirmation.
+- `pnpm harness:scan --path <repo>` for running deterministic readiness scoring outside the UI.
 
 ## What Milestone 8 Includes
 
@@ -130,8 +143,76 @@ First-run setup:
 2. Choose the repository folder.
 3. Keep mock tracker and mock provider selected for the safe local path.
 4. Choose or accept the default workspace root and SQLite database path.
-5. Create a safe starter `WORKFLOW.md` only if the repository does not already have one.
-6. Finish setup. The daemon restarts with saved local settings and the board opens.
+5. Optionally run the agent-readiness scan.
+6. If `AGENTS.md` or `WORKFLOW.md` is missing, inspect the generated preview and diff.
+7. Dry-run selected previews first.
+8. Apply selected previews only after typing `APPLY HARNESS CHANGES`.
+9. Create a safe starter `WORKFLOW.md` only if the repository does not already have one and you want the older one-click starter path.
+10. Finish setup. The daemon restarts with saved local settings and the board opens.
+
+## Harness Builder
+
+Harness Builder helps make a selected repository more usable by coding agents. It does not use an LLM for scoring in Milestone 9. It scans deterministic evidence, scores categories, explains findings, recommends harness improvements, previews generated files, and applies only selected changes after explicit confirmation.
+
+Run it in the web app:
+
+```bash
+pnpm dev
+```
+
+Open `http://localhost:3000/harness`.
+
+Run it in desktop mode:
+
+```bash
+pnpm desktop:dev
+```
+
+Open Harness from the sidebar, Settings, or first-run setup.
+
+Run the CLI scanner:
+
+```bash
+pnpm harness:scan --path .
+pnpm harness:scan --path . --json
+pnpm harness:scan --path . --json --output harness-report.json
+```
+
+The CLI prints an overall score and category status. JSON output includes findings, evidence, recommendations, detected files, warnings, errors, metadata, and scan limits. The CLI never writes harness files.
+
+### Scoring
+
+Scores are deterministic and heuristic. They are useful for prioritizing harness work, not proof that agents will succeed. Every category cites evidence from repository files, detected commands, metadata, or git status. Missing information lowers the score. Unknown is distinct from missing. Risky findings remain visible even when other category signals are strong.
+
+### Generated Artifacts
+
+Generated `AGENTS.md` is intended to be a short map, not a giant manual. It points agents to deeper docs and runnable checks. Generated docs are marked starter/inferred and include verification tasks. Generated scripts are POSIX-style, non-destructive, and call detected commands when possible. If a command is unknown, the script fails with an instruction to fill it in rather than pretending validation exists.
+
+Generated `WORKFLOW.md` uses safe mock tracker/provider defaults, a repo-local workspace root, harmless hooks, and no GitHub/Linear writes. Existing files are not overwritten automatically. Existing `WORKFLOW.md` and docs usually produce manual-merge previews rather than direct updates.
+
+### Apply Safety
+
+- Scans and previews write nothing.
+- Apply is dry-run by default.
+- Writes require the exact confirmation string `APPLY HARNESS CHANGES`.
+- Writes are constrained to the selected repository path.
+- Path traversal and symlink escape writes are rejected.
+- Existing file updates verify the preview hash before writing.
+- Updates create backups under `.symphonia/harness-backups/`.
+- Generated scripts are the only generated files made executable.
+- Secret-looking paths are detected by name, but secret values are not read or stored.
+- Harness events, diagnostics, logs, and persisted scan payloads do not include raw file contents from scanned repositories.
+
+### Harness Troubleshooting
+
+- Invalid repo path: choose an existing directory. The daemon returns a clear error and does not scan.
+- Scan truncated: remove generated/heavy folders from the selected repo or raise scanner limits in code. Truncated scans still return partial evidence and warnings.
+- File too large: the scanner records the path and skips file content.
+- Permission denied: fix local filesystem permissions or choose another repository path.
+- Stale preview: re-run previews if a file changed after scan; apply fails safely on hash mismatch.
+- Hash mismatch: inspect the changed file, regenerate previews, and apply again if the diff is still desired.
+- Generated docs are incomplete: treat them as starter/inferred and fill in verified project details.
+- Script command unknown: edit the generated script after preview so it calls the real project command.
 
 Desktop diagnostics are available from the Settings page. The diagnostics bundle includes app, Node/Electron, daemon, web, provider, tracker, GitHub, recovery, workspace, and bounded log information. It redacts secret values and reports env var names rather than API keys.
 
@@ -167,6 +248,7 @@ Useful daemon environment variables:
 pnpm test
 pnpm lint
 pnpm build
+pnpm harness:scan --path .
 ```
 
 ## WORKFLOW.md
@@ -774,7 +856,17 @@ Run events are append-only in SQLite. The daemon also stores durable run records
 - Workspace cleanup remains local-only and does not coordinate with remote branches or PR state.
 - Assistant deltas are displayed compactly as timeline events rather than fully aggregated chat bubbles.
 - Hooks execute trusted local shell commands.
+- Harness scoring is deterministic and heuristic, not a guarantee of agent success.
+- Generated harness docs are starter/inferred and must be reviewed.
+- Harness Builder does not use an LLM to deeply understand architecture.
+- Generated `AGENTS.md` may need human refinement.
+- Generated scripts may require project-specific adjustment.
+- Harness Builder does not create PRs, push branches, merge changes, comment on GitHub, or write Linear updates.
+- No cloud/team harness sharing is implemented.
+- No benchmark/eval scoring is implemented yet.
+- No automated documentation freshness bot is implemented yet.
+- No production-grade doc cross-link linter is implemented yet.
 
 ## Next Milestone
 
-Milestone 9 - Add guided harness builder and agent-readiness scoring for repositories.
+Milestone 10 - Add evals, doc freshness checks, and automated harness quality regression tests.

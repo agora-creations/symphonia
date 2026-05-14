@@ -4,6 +4,10 @@ import Database from "better-sqlite3";
 import {
   AgentEvent,
   AgentEventSchema,
+  HarnessApplyResult,
+  HarnessApplyResultSchema,
+  HarnessScanResult,
+  HarnessScanResultSchema,
   Issue,
   IssueSchema,
   ReviewArtifactSnapshot,
@@ -31,6 +35,16 @@ type IssueStatsRow = {
 type ReviewArtifactRow = {
   payload_json: string;
 };
+
+type HarnessScanRow = {
+  payload_json: string;
+};
+
+type HarnessApplyRow = {
+  payload_json: string;
+};
+
+const maxHarnessPayloadBytes = 2_000_000;
 
 export class EventStore {
   private readonly db: Database.Database;
@@ -381,6 +395,185 @@ export class EventStore {
     return row ? ReviewArtifactSnapshotSchema.parse(JSON.parse(row.payload_json)) : null;
   }
 
+  saveHarnessScan(scan: HarnessScanResult): void {
+    const parsed = HarnessScanResultSchema.parse(scan);
+    const payloadJson = boundedHarnessPayload(parsed);
+    this.db
+      .prepare(
+        `
+          insert into harness_scans (
+            scan_id,
+            repository_path,
+            scanned_at,
+            score_percentage,
+            grade,
+            payload_json,
+            updated_at
+          )
+          values (
+            @scanId,
+            @repositoryPath,
+            @scannedAt,
+            @scorePercentage,
+            @grade,
+            @payloadJson,
+            @updatedAt
+          )
+          on conflict(scan_id) do update set
+            repository_path = excluded.repository_path,
+            scanned_at = excluded.scanned_at,
+            score_percentage = excluded.score_percentage,
+            grade = excluded.grade,
+            payload_json = excluded.payload_json,
+            updated_at = excluded.updated_at
+        `,
+      )
+      .run({
+        scanId: parsed.id,
+        repositoryPath: parsed.repositoryPath,
+        scannedAt: parsed.scannedAt,
+        scorePercentage: parsed.score.percentage,
+        grade: parsed.grade,
+        payloadJson,
+        updatedAt: new Date().toISOString(),
+      });
+  }
+
+  getHarnessScan(scanId: string): HarnessScanResult | null {
+    const row = this.db
+      .prepare(
+        `
+          select payload_json
+          from harness_scans
+          where scan_id = ?
+        `,
+      )
+      .get(scanId) as HarnessScanRow | undefined;
+
+    return row ? HarnessScanResultSchema.parse(JSON.parse(row.payload_json)) : null;
+  }
+
+  getLatestHarnessScanForRepository(repositoryPath: string): HarnessScanResult | null {
+    const row = this.db
+      .prepare(
+        `
+          select payload_json
+          from harness_scans
+          where repository_path = ?
+          order by scanned_at desc, updated_at desc
+          limit 1
+        `,
+      )
+      .get(repositoryPath) as HarnessScanRow | undefined;
+
+    return row ? HarnessScanResultSchema.parse(JSON.parse(row.payload_json)) : null;
+  }
+
+  listHarnessScans(repositoryPath?: string, limit = 20): HarnessScanResult[] {
+    const boundedLimit = Math.max(1, Math.min(100, limit));
+    const rows = (repositoryPath
+      ? this.db
+          .prepare(
+            `
+              select payload_json
+              from harness_scans
+              where repository_path = ?
+              order by scanned_at desc, updated_at desc
+              limit ?
+            `,
+          )
+          .all(repositoryPath, boundedLimit)
+      : this.db
+          .prepare(
+            `
+              select payload_json
+              from harness_scans
+              order by scanned_at desc, updated_at desc
+              limit ?
+            `,
+          )
+          .all(boundedLimit)) as HarnessScanRow[];
+
+    return rows.map((row) => HarnessScanResultSchema.parse(JSON.parse(row.payload_json)));
+  }
+
+  saveHarnessApplyResult(input: {
+    id: string;
+    repositoryPath: string;
+    scanId: string | null;
+    appliedAt: string;
+    result: HarnessApplyResult;
+  }): void {
+    const result = HarnessApplyResultSchema.parse(input.result);
+    const payloadJson = boundedHarnessPayload({ ...input, result });
+    this.db
+      .prepare(
+        `
+          insert into harness_apply_history (
+            apply_id,
+            scan_id,
+            repository_path,
+            applied_at,
+            payload_json
+          )
+          values (
+            @applyId,
+            @scanId,
+            @repositoryPath,
+            @appliedAt,
+            @payloadJson
+          )
+        `,
+      )
+      .run({
+        applyId: input.id,
+        scanId: input.scanId,
+        repositoryPath: input.repositoryPath,
+        appliedAt: input.appliedAt,
+        payloadJson,
+      });
+
+    if (input.scanId) {
+      this.db
+        .prepare(
+          `
+            update harness_scans
+            set last_applied_at = @appliedAt
+            where scan_id = @scanId
+          `,
+        )
+        .run({ appliedAt: input.appliedAt, scanId: input.scanId });
+    }
+  }
+
+  listHarnessApplyHistory(repositoryPath?: string, limit = 20): unknown[] {
+    const boundedLimit = Math.max(1, Math.min(100, limit));
+    const rows = (repositoryPath
+      ? this.db
+          .prepare(
+            `
+              select payload_json
+              from harness_apply_history
+              where repository_path = ?
+              order by applied_at desc
+              limit ?
+            `,
+          )
+          .all(repositoryPath, boundedLimit)
+      : this.db
+          .prepare(
+            `
+              select payload_json
+              from harness_apply_history
+              order by applied_at desc
+              limit ?
+            `,
+          )
+          .all(boundedLimit)) as HarnessApplyRow[];
+
+    return rows.map((row) => JSON.parse(row.payload_json) as unknown);
+  }
+
   close(): void {
     this.db.close();
   }
@@ -455,8 +648,41 @@ export class EventStore {
 
       create index if not exists idx_review_artifact_snapshots_issue_identifier
       on review_artifact_snapshots (issue_identifier, last_refreshed_at);
+
+      create table if not exists harness_scans (
+        scan_id text primary key,
+        repository_path text not null,
+        scanned_at text not null,
+        score_percentage integer not null,
+        grade text not null,
+        payload_json text not null,
+        updated_at text not null,
+        last_applied_at text
+      );
+
+      create index if not exists idx_harness_scans_repository_scanned
+      on harness_scans (repository_path, scanned_at);
+
+      create table if not exists harness_apply_history (
+        apply_id text primary key,
+        scan_id text,
+        repository_path text not null,
+        applied_at text not null,
+        payload_json text not null
+      );
+
+      create index if not exists idx_harness_apply_history_repository
+      on harness_apply_history (repository_path, applied_at);
     `);
   }
+}
+
+function boundedHarnessPayload(value: unknown): string {
+  const payloadJson = JSON.stringify(value);
+  if (Buffer.byteLength(payloadJson, "utf8") > maxHarnessPayloadBytes) {
+    throw new Error("Harness payload exceeded SQLite storage limit.");
+  }
+  return payloadJson;
 }
 
 export function getDatabasePathFromEnv(): string {

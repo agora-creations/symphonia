@@ -4,6 +4,9 @@ import {
   AgentEventSchema,
   ReviewArtifactSnapshotSchema,
   HookRunSchema,
+  HarnessApplyRequestSchema,
+  HarnessScanRequestSchema,
+  HarnessScanResultSchema,
   IssueSchema,
   RunSchema,
   WorkflowConfigSchema,
@@ -91,9 +94,26 @@ describe("shared schemas", () => {
         title: "Mock diff",
         content: "+ added",
       },
+      {
+        id: "event-6",
+        runId: "__daemon__",
+        type: "harness.scan.started",
+        timestamp,
+        scanId: "scan-1",
+        repositoryPath: "/tmp/repo",
+      },
+      {
+        id: "event-7",
+        runId: "__daemon__",
+        type: "harness.artifact.applied",
+        timestamp,
+        scanId: "scan-1",
+        artifactId: "agents-md",
+        path: "AGENTS.md",
+      },
     ];
 
-    expect(events.map((event) => AgentEventSchema.parse(event))).toHaveLength(5);
+    expect(events.map((event) => AgentEventSchema.parse(event))).toHaveLength(7);
   });
 
   it("rejects invalid event payloads", () => {
@@ -105,6 +125,94 @@ describe("shared schemas", () => {
         timestamp,
         toolName: "shell",
         status: "not-a-status",
+      }),
+    ).toThrow();
+  });
+
+  it("parses harness scan results and rejects invalid apply payloads", () => {
+    const request = HarnessScanRequestSchema.parse({
+      repositoryPath: "/tmp/repo",
+    });
+    expect(request.includeGitStatus).toBe(true);
+
+    const scan = HarnessScanResultSchema.parse({
+      id: "scan-1",
+      repositoryPath: "/tmp/repo",
+      scannedAt: timestamp,
+      score: {
+        overall: 8,
+        max: 10,
+        percentage: 80,
+        grade: "B",
+        categoryScores: {
+          "repository-map": {
+            score: 8,
+            max: 10,
+            percentage: 80,
+            grade: "B",
+            status: "strong",
+          },
+        },
+      },
+      grade: "B",
+      categories: [
+        {
+          id: "repository-map",
+          label: "Repository Map",
+          score: 8,
+          max: 10,
+          status: "strong",
+          summary: "Good map.",
+          evidence: [{ label: "README", value: "Found README.md", filePath: "README.md", lineNumber: null }],
+          findings: ["readme-present"],
+          recommendations: [],
+        },
+      ],
+      findings: [
+        {
+          id: "readme-present",
+          categoryId: "repository-map",
+          severity: "info",
+          status: "present",
+          title: "README present",
+          description: "README exists.",
+          evidence: [{ label: "README", value: "Found README.md", filePath: "README.md", lineNumber: null }],
+          filePath: "README.md",
+          lineNumber: null,
+          recommendationIds: [],
+        },
+      ],
+      recommendations: [],
+      detectedFiles: [{ path: "README.md", kind: "readme", exists: true, sizeBytes: 12, hash: "abc", summary: "README" }],
+      generatedPreviews: [],
+      warnings: [],
+      errors: [],
+      metadata: {
+        isGitRepository: true,
+        gitDirty: false,
+        gitBranch: "main",
+        gitRemote: "https://github.com/acme/repo",
+        packageManager: "pnpm",
+        languages: ["TypeScript"],
+        frameworks: ["Node"],
+        validationCommands: [],
+      },
+      limits: {
+        maxFiles: 100,
+        maxBytes: 1000,
+        maxFileSizeBytes: 1000,
+        filesScanned: 1,
+        bytesRead: 12,
+        truncated: false,
+      },
+    });
+
+    expect(scan.grade).toBe("B");
+    expect(() =>
+      HarnessApplyRequestSchema.parse({
+        repositoryPath: "/tmp/repo",
+        artifactIds: [],
+        dryRun: false,
       }),
     ).toThrow();
   });
