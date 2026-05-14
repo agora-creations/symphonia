@@ -2129,6 +2129,10 @@ function GitHubPrPreflightPanel({ preflight }: { preflight: GitHubPrPreflightRes
       <dl className="grid gap-2 p-3 text-xs sm:grid-cols-2">
         <PreviewKeyValue label="Can execute" value={preflight.canExecute ? "yes" : "no"} />
         <PreviewKeyValue label="Workspace" value={preflight.workspace.isIsolatedRunWorkspace ? "isolated" : preflight.workspace.isMainCheckout ? "main checkout" : "not isolated"} />
+        <PreviewKeyValue label="Workspace kind" value={preflight.workspace.workspaceKind?.replaceAll("_", " ") ?? "unknown"} />
+        <PreviewKeyValue label="Isolation" value={preflight.workspace.isolationStatus.replaceAll("_", " ")} />
+        <PreviewKeyValue label="PR eligibility" value={preflight.workspace.prEligibility} />
+        <PreviewKeyValue label="Ownership metadata" value={preflight.workspace.hasOwnershipMetadata ? "present" : "missing"} />
         <PreviewKeyValue label="Run ownership" value={preflight.workspace.belongsToRun ? "matches run" : "mismatch"} />
         <PreviewKeyValue label="Remote" value={preflight.repository.matchesTarget ? "matches target" : "mismatch or unavailable"} />
         <PreviewKeyValue label="Branch" value={preflight.branches.headSafe ? "safe" : "blocked"} />

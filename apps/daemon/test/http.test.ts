@@ -1,4 +1,4 @@
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -371,16 +371,19 @@ describe("daemon API", () => {
       if (body.query.includes("commentCreate") || body.query.includes("issueUpdate")) linearMutationCalls += 1;
       return fakeLinearFetch({ state: "Todo" })(input, init);
     };
+    const sourceRepoPath = join(directory, "source-repo");
+    const remotePath = join(directory, "agora-creations", "symphonia.git");
+    prepareSourceRepository(sourceRepoPath, remotePath);
     const created = createDaemonServer(store, {
       workflowPath,
-      cwd: directory,
+      cwd: sourceRepoPath,
       githubFetch,
       linearFetch,
     });
     daemon.close();
     daemon = created.daemon;
     writeWorkflow({
-      codexCommand: fakeCodexCommand("success"),
+      codexCommand: fakeCodexCommand("success-change"),
       githubEnabled: true,
       githubReadOnly: false,
       githubWriteEnabled: true,
@@ -389,18 +392,33 @@ describe("daemon API", () => {
       linearReadOnly: false,
       linearWriteEnabled: true,
       linearAllowComments: true,
-    });
-    prepareGitWorkspace(join(directory, "workspaces", "ENG-101"), {
-      remotePath: join(directory, "agora-creations", "symphonia.git"),
-      pushInitialBranch: false,
+      workspaceRoot: join(directory, "isolated-workspaces"),
     });
     await daemon.refreshIssueCache();
 
     const run = await daemon.startRun("linear-issue-101", "codex");
     await waitForTerminal(run.id, "succeeded");
+    const isolatedWorkspacePath = daemon.requireRun(run.id).workspacePath!;
+    const workspaceGitRoot = execFileSync("git", ["rev-parse", "--show-toplevel"], {
+      cwd: isolatedWorkspacePath,
+      encoding: "utf8",
+    }).trim();
+    expect(realpathSync(workspaceGitRoot)).toBe(realpathSync(isolatedWorkspacePath));
+    expect(realpathSync(isolatedWorkspacePath)).not.toBe(realpathSync(sourceRepoPath));
+    expect(getEvents(run.id).some((event) => event.type === "workspace.ownership.recorded")).toBe(true);
+    expect(getEvents(run.id).some((event) => event.type === "codex.thread.started" && event.cwd === isolatedWorkspacePath)).toBe(true);
+    writeFileSync(join(isolatedWorkspacePath, "change.txt"), "write-action validation\n");
+    expect(store.getRunWorkspaceOwnership(run.id)).toMatchObject({
+      runId: run.id,
+      workspaceKind: "git_worktree",
+      isolationStatus: "isolated",
+      prEligibility: "eligible",
+      targetRepository: "agora-creations/symphonia",
+    });
     await requestJson("POST", `/runs/${run.id}/review-artifacts/refresh`);
     const actions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
     const githubPreview = actions.previews.find((preview) => preview.kind === "github_pr_create")!;
+    expect(githubPreview.blockingReasons).toEqual([]);
     expect(githubPreview.status).toBe("preview_available");
     expect(githubPreview.targetRepository).toBe("agora-creations/symphonia");
     expectedIdempotencyKey = githubPreview.idempotencyKey;
@@ -408,7 +426,15 @@ describe("daemon API", () => {
     expect(preflight.preflight).toMatchObject({
       status: "passed",
       canExecute: true,
-      workspace: { isIsolatedRunWorkspace: true, isMainCheckout: false, belongsToRun: true },
+      workspace: {
+        isIsolatedRunWorkspace: true,
+        isMainCheckout: false,
+        belongsToRun: true,
+        workspaceKind: "git_worktree",
+        isolationStatus: "isolated",
+        prEligibility: "eligible",
+        hasOwnershipMetadata: true,
+      },
       diff: { matchesApprovalEvidence: true },
       remoteState: { ambiguous: false },
     });
@@ -502,6 +528,13 @@ describe("daemon API", () => {
       githubAllowCreatePr: true,
       githubAllowPush: true,
     });
+    mkdirSync(join(directory, "agora-creations", "symphonia.git"), { recursive: true });
+    execFileSync("git", ["init", "--bare"], { cwd: join(directory, "agora-creations", "symphonia.git"), stdio: "ignore" });
+    await daemon.refreshIssueCache();
+
+    const run = await daemon.startRun("linear-issue-101", "codex");
+    await waitForTerminal(run.id, "succeeded");
+    const workspacePath = daemon.requireRun(run.id).workspacePath!;
     execFileSync("git", ["init"], { cwd: directory, stdio: "ignore" });
     execFileSync("git", ["config", "user.email", "symphonia@example.com"], { cwd: directory, stdio: "ignore" });
     execFileSync("git", ["config", "user.name", "Symphonia Test"], { cwd: directory, stdio: "ignore" });
@@ -510,13 +543,6 @@ describe("daemon API", () => {
     execFileSync("git", ["add", "README.md"], { cwd: directory, stdio: "ignore" });
     execFileSync("git", ["commit", "-m", "Initial main checkout"], { cwd: directory, stdio: "ignore" });
     execFileSync("git", ["checkout", "-b", "feature/main-checkout"], { cwd: directory, stdio: "ignore" });
-    mkdirSync(join(directory, "agora-creations", "symphonia.git"), { recursive: true });
-    execFileSync("git", ["init", "--bare"], { cwd: join(directory, "agora-creations", "symphonia.git"), stdio: "ignore" });
-    await daemon.refreshIssueCache();
-
-    const run = await daemon.startRun("linear-issue-101", "codex");
-    await waitForTerminal(run.id, "succeeded");
-    const workspacePath = daemon.requireRun(run.id).workspacePath!;
     writeFileSync(join(workspacePath, "main-checkout-change.txt"), "not isolated\n");
     await requestJson("POST", `/runs/${run.id}/review-artifacts/refresh`);
     const actions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
@@ -524,9 +550,16 @@ describe("daemon API", () => {
 
     const preflight = await requestJson<GitHubPrPreflightResponse>("GET", githubPreflightPath(run.id, githubPreview));
     expect(preflight.preflight.canExecute).toBe(false);
-    expect(preflight.preflight.workspace).toMatchObject({ isMainCheckout: true, isIsolatedRunWorkspace: false });
+    expect(preflight.preflight.workspace).toMatchObject({
+      isMainCheckout: true,
+      isIsolatedRunWorkspace: false,
+      workspaceKind: "directory",
+      isolationStatus: "legacy_directory",
+      prEligibility: "blocked",
+    });
     expect(preflight.preflight.blockingReasons).toEqual(
       expect.arrayContaining([
+        "Workspace ownership metadata marks this as a legacy directory workspace, not a PR-eligible git worktree or clone.",
         "Run workspace resolves to the main Symphonia checkout, which is not eligible for PR writes.",
         "Run workspace is not an isolated git repository rooted at the workspace path.",
       ]),
@@ -1461,6 +1494,7 @@ function writeWorkflow(
     linearWriteEnabled?: boolean;
     linearAllowComments?: boolean;
     linearAllowStateTransitions?: boolean;
+    workspaceRoot?: string;
   } = {},
 ): void {
   writeFileSync(
@@ -1488,7 +1522,7 @@ ${options.linearApiKey === null ? "" : `  api_key: ${JSON.stringify(options.line
     move_to_state_on_success: "Done"
     move_to_state_on_failure: "Rework"
 workspace:
-  root: "./workspaces"
+  root: ${JSON.stringify(options.workspaceRoot ?? "./workspaces")}
   cleanup:
     enabled: ${options.cleanupEnabled ? "true" : "false"}
     dry_run: ${options.cleanupDryRun === false ? "false" : "true"}
@@ -1802,6 +1836,21 @@ function prepareGitWorkspace(workspacePath: string, options: { remotePath?: stri
   writeFileSync(join(workspacePath, "change.txt"), "write-action validation\n");
 }
 
+function prepareSourceRepository(sourcePath: string, remotePath: string): void {
+  mkdirSync(remotePath, { recursive: true });
+  execFileSync("git", ["init", "--bare"], { cwd: remotePath, stdio: "ignore" });
+  mkdirSync(sourcePath, { recursive: true });
+  writeFileSync(join(sourcePath, "README.md"), "# Source repository\n");
+  execFileSync("git", ["init"], { cwd: sourcePath, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "symphonia@example.com"], { cwd: sourcePath, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "Symphonia Test"], { cwd: sourcePath, stdio: "ignore" });
+  execFileSync("git", ["checkout", "-b", "main"], { cwd: sourcePath, stdio: "ignore" });
+  execFileSync("git", ["remote", "add", "origin", remotePath], { cwd: sourcePath, stdio: "ignore" });
+  execFileSync("git", ["add", "README.md"], { cwd: sourcePath, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "Initial source commit"], { cwd: sourcePath, stdio: "ignore" });
+  execFileSync("git", ["push", "origin", "main"], { cwd: sourcePath, stdio: "ignore" });
+}
+
 function githubPreflightPath(
   runId: string,
   preview: WriteActionPreviewContract,
@@ -1946,6 +1995,9 @@ rl.on("line", (line) => {
       writeFileSync(join(message.params.cwd, "approval-evidence.txt"), "approval evidence change\\n");
       send({ id: "approval-1", method: "item/fileChange/requestApproval", params: { threadId: "thread-1", turnId: "turn-1", itemId: "item-file", startedAtMs: Date.now(), approvalId: "approval-1", cwd: message.params.cwd, availableDecisions: ["accept", "acceptForSession", "decline", "cancel"] } });
       return;
+    }
+    if (mode === "success-change") {
+      writeFileSync(join(message.params.cwd, "change.txt"), "write-action validation\\n");
     }
     if (mode === "wait") return;
     complete();
