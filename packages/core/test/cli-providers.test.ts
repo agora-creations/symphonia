@@ -6,7 +6,7 @@ import { AgentEvent, Issue, ProviderId, Run, WorkflowConfig } from "@symphonia/t
 import {
   checkClaudeHealth,
   checkCursorHealth,
-  MockRunCancelledError,
+  ProviderRunCancelledError,
   resolveWorkflowConfig,
   runClaudeAgentProvider,
   runCursorAgentProvider,
@@ -90,7 +90,7 @@ describe("Claude provider", () => {
 
     await waitForEvent(events, "claude.system.init");
     controller.abort();
-    await expect(running).rejects.toBeInstanceOf(MockRunCancelledError);
+    await expect(running).rejects.toBeInstanceOf(ProviderRunCancelledError);
   });
 });
 
@@ -156,7 +156,7 @@ describe("Cursor provider", () => {
 
     await waitForEvent(events, "cursor.system.init");
     controller.abort();
-    await expect(running).rejects.toBeInstanceOf(MockRunCancelledError);
+    await expect(running).rejects.toBeInstanceOf(ProviderRunCancelledError);
   });
 });
 
@@ -181,7 +181,7 @@ function workflowConfig(provider: Extract<ProviderId, "claude" | "cursor">, mode
   return resolveWorkflowConfig({
     config: {
       provider,
-      tracker: { kind: "mock" },
+      tracker: { kind: "linear", api_key: "test-linear-key", allow_workspace_wide: true },
       claude: {
         enabled: provider === "claude",
         command: `${JSON.stringify(process.execPath)} ${JSON.stringify(scriptPath)} ${mode}`,
@@ -236,7 +236,7 @@ function issue(): Issue {
     priority: "Medium",
     createdAt: "2026-05-13T08:00:00.000Z",
     updatedAt: "2026-05-13T08:00:00.000Z",
-    url: "https://mock.local/issues/SYM-1",
+    url: "https://linear.app/acme/issue/SYM-1",
   };
 }
 

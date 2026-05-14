@@ -135,11 +135,11 @@ function scoreWorkflowContract(context: HarnessScanContext): CategoryDraft {
   const workflow = file(context, "WORKFLOW.md");
   if (workflow?.exists) {
     addPoints(draft, 5, evidence("WORKFLOW.md", "WORKFLOW.md exists.", "WORKFLOW.md"));
-    if (/tracker:\s*\n\s*kind:\s*mock/u.test(workflow.content ?? "")) {
-      addPoints(draft, 1, evidence("Mock tracker", "Safe mock tracker default detected.", "WORKFLOW.md"));
+    if (/tracker:\s*\n[\s\S]*kind:\s*linear/u.test(workflow.content ?? "")) {
+      addPoints(draft, 1, evidence("Linear tracker", "Real Linear tracker configuration detected.", "WORKFLOW.md"));
     }
-    if (/provider:\s*mock/u.test(workflow.content ?? "")) {
-      addPoints(draft, 1, evidence("Mock provider", "Safe mock provider default detected.", "WORKFLOW.md"));
+    if (/provider:\s*(codex|claude|cursor)/u.test(workflow.content ?? "")) {
+      addPoints(draft, 1, evidence("Real provider", "Real provider configuration detected.", "WORKFLOW.md"));
     }
     if (/\{\{\s*issue\./u.test(workflow.content ?? "")) {
       addPoints(draft, 2, evidence("Prompt template", "Issue fields are referenced in the prompt template.", "WORKFLOW.md"));
@@ -149,7 +149,7 @@ function scoreWorkflowContract(context: HarnessScanContext): CategoryDraft {
     }
   } else {
     addFinding(draft, "workflow-missing", "high", "missing", "WORKFLOW.md is missing", "Symphonia needs a workflow contract to run agents safely.", []);
-    addRecommendation(draft, "create-workflow", "high", "Create safe WORKFLOW.md", "Use mock tracker/provider defaults and harmless hooks before enabling real providers.", [
+    addRecommendation(draft, "create-workflow", "high", "Create safe WORKFLOW.md", "Use Linear plus a real provider with harmless hooks and read-only external writes.", [
       artifact("WORKFLOW.md", "WORKFLOW.md", "create"),
     ]);
   }
@@ -349,7 +349,7 @@ function scoreSymphoniaCompatibility(context: HarnessScanContext): CategoryDraft
   const workflow = file(context, "WORKFLOW.md");
   if (!workflow?.exists) {
     addFinding(draft, "symphonia-workflow-missing", "high", "missing", "No Symphonia WORKFLOW.md", "Symphonia can still scan this repo, but agent runs need a workflow contract.", []);
-    addRecommendation(draft, "create-symphonia-workflow", "high", "Create Symphonia workflow", "Use safe mock defaults and a bounded workspace root.", [
+    addRecommendation(draft, "create-symphonia-workflow", "high", "Create Symphonia workflow", "Use Linear plus a real provider with a bounded workspace root and read-only external writes.", [
       artifact("WORKFLOW.md", "WORKFLOW.md", "create"),
     ]);
     draft.summary = "Symphonia compatibility is missing a workflow contract.";

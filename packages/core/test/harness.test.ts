@@ -194,7 +194,7 @@ function strongRepo(): string {
   const repo = tempRepo();
   write(repo, "README.md", "# Strong Repo\n\nRun checks before review.\n");
   write(repo, "AGENTS.md", "# AGENTS.md\n\nRead docs/HARNESS.md. Run pnpm test, pnpm lint, pnpm build. Codex, Claude, and Cursor need approval guidance.\n");
-  write(repo, "WORKFLOW.md", "---\nprovider: mock\ntracker:\n  kind: mock\nworkspace:\n  root: \".symphonia/workspaces\"\n  cleanup:\n    dry_run: true\nhooks:\n  timeout_ms: 1000\n---\nValidate with pnpm test for {{ issue.identifier }}.\n");
+  write(repo, "WORKFLOW.md", "---\nprovider: codex\ntracker:\n  kind: linear\n  api_key: \"$LINEAR_API_KEY\"\n  allow_workspace_wide: true\n  read_only: true\nworkspace:\n  root: \".symphonia/workspaces\"\n  cleanup:\n    dry_run: true\nhooks:\n  timeout_ms: 1000\n---\nValidate with pnpm test for {{ issue.identifier }}.\n");
   write(repo, "package.json", JSON.stringify({ scripts: { test: "vitest run", lint: "eslint .", build: "tsc", check: "pnpm test && pnpm lint && pnpm build" }, dependencies: { next: "1.0.0", react: "1.0.0" } }));
   write(repo, "pnpm-lock.yaml", "lockfileVersion: '9.0'\n");
   write(repo, ".gitignore", ".env\nnode_modules\n");

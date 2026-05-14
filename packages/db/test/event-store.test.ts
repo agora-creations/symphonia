@@ -167,7 +167,7 @@ function reviewArtifactSnapshot(runId: string, identifier: string, lastRefreshed
     runId,
     issueId: `issue-${identifier}`,
     issueIdentifier: identifier,
-    provider: "mock",
+    provider: "codex",
     trackerKind: "linear",
     workspace: {
       issueIdentifier: identifier,
@@ -227,7 +227,7 @@ function runRecord(id: string, status: Run["status"]): Run {
     issueTitle: "Durable run",
     trackerKind: "linear",
     status,
-    provider: "mock",
+    provider: "codex",
     attempt: 1,
     retryOfRunId: null,
     workspacePath: "/tmp/ENG-1",

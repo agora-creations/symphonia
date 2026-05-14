@@ -1,4 +1,4 @@
-import type { User } from "@/data/mock";
+import type { User } from "@/lib/view-models";
 import { cn } from "@/lib/utils";
 
 export function UserAvatar({ user, className, size = 20 }: { user: User; className?: string; size?: number }) {

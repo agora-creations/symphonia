@@ -219,7 +219,7 @@ export class EventStore {
         statement.run({
           issueId: parsed.id,
           identifier: parsed.identifier,
-          trackerKind: parsed.tracker?.kind ?? "mock",
+          trackerKind: parsed.tracker?.kind ?? "linear",
           state: parsed.state,
           updatedAt: parsed.updatedAt,
           lastFetchedAt: parsed.lastFetchedAt ?? fetchedAt,

@@ -3,28 +3,21 @@ import { usePathname } from "next/navigation";
 import {
   Inbox,
   Layers,
-  Users,
-  FolderKanban,
   Settings,
   Search,
   ScanSearch,
   Plus,
   ChevronDown,
-  Hash,
   Moon,
   Sun,
 } from "lucide-react";
-import { teams } from "@/data/mock";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/components/theme-provider";
 
 const workspaceItems = [
-  { to: "/inbox", label: "Inbox", icon: Inbox, count: 3 },
+  { to: "/inbox", label: "Inbox", icon: Inbox },
   { to: "/issues", label: "Issues", icon: Layers },
-  { to: "/projects", label: "Projects", icon: FolderKanban },
   { to: "/harness", label: "Harness", icon: ScanSearch },
-  { to: "/members", label: "Members", icon: Users },
-  { to: "/teams", label: "Teams", icon: Hash },
   { to: "/settings", label: "Settings", icon: Settings },
 ];
 
@@ -68,55 +61,25 @@ export function AppSidebar() {
                     ? "bg-sidebar-accent text-sidebar-accent-foreground font-medium"
                     : "text-muted-foreground hover:bg-sidebar-accent hover:text-foreground",
                 )}
-              >
+                >
                 <Icon className="h-4 w-4" />
                 <span className="flex-1">{item.label}</span>
-                {item.count != null && (
-                  <span className="text-[10px] tabular-nums text-muted-foreground">
-                    {item.count}
-                  </span>
-                )}
               </Link>
             );
           })}
         </nav>
 
-        <div>
-          <div className="flex items-center justify-between px-2 mb-1">
-            <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
-              Your teams
-            </span>
-            <button className="grid h-5 w-5 place-items-center rounded hover:bg-sidebar-accent">
-              <Plus className="h-3 w-3 text-muted-foreground" />
-            </button>
-          </div>
-          <div className="space-y-0.5">
-            {teams.map((t) => (
-              <button
-                key={t.id}
-                className="w-full flex items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground hover:bg-sidebar-accent hover:text-foreground transition-colors"
-              >
-                <span
-                  className={cn(
-                    "grid h-5 w-5 place-items-center rounded text-[10px] font-bold bg-muted",
-                    t.color,
-                  )}
-                >
-                  {t.key[0]}
-                </span>
-                <span className="flex-1 text-left">{t.name}</span>
-              </button>
-            ))}
-          </div>
+        <div className="rounded-md border bg-sidebar-accent/30 px-3 py-2 text-[12px] text-muted-foreground">
+          Connect Linear in `WORKFLOW.md` to populate real issues.
         </div>
       </div>
 
       <div className="border-t px-3 py-2.5 flex items-center justify-between gap-2">
         <button className="flex items-center gap-2 rounded-md px-1.5 py-1 hover:bg-sidebar-accent transition-colors">
-          <span className="grid h-6 w-6 place-items-center rounded-full bg-rose-500 text-[10px] font-medium text-white">
-            AM
+          <span className="grid h-6 w-6 place-items-center rounded-full bg-sky-600 text-[10px] font-medium text-white">
+            S
           </span>
-          <span className="text-sm">Ava Martinez</span>
+          <span className="text-sm">Local operator</span>
         </button>
         <button
           onClick={toggle}

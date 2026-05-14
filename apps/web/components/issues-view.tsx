@@ -1,11 +1,5 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import {
-  PRIORITY_LABELS,
-  labels as mockLabels,
-  users,
-  type Priority,
-  type User,
-} from "@/data/mock";
+import { PRIORITY_LABELS, type Priority, type User } from "@/lib/view-models";
 import { IssueStatusIcon } from "@/components/icons/issue-status-icons";
 import { PriorityIcon } from "@/components/icons/status-icons";
 import { UserAvatar } from "@/components/avatar-stack";
@@ -189,6 +183,7 @@ function IssueRow({
 }
 
 const PRIORITIES: Priority[] = ["urgent", "high", "medium", "low", "no-priority"];
+const labelColorPalette = ["text-sky-500", "text-emerald-500", "text-amber-500", "text-violet-500", "text-rose-500"];
 
 export function IssuesView() {
   const [view, setView] = useState<"board" | "list">("board");
@@ -203,7 +198,7 @@ export function IssuesView() {
   const [selectedReviewArtifacts, setSelectedReviewArtifacts] = useState<ReviewArtifactSnapshot | null>(null);
   const [selectedApprovals, setSelectedApprovals] = useState<ApprovalState[]>([]);
   const [providers, setProviders] = useState<ProviderHealth[]>([]);
-  const [selectedProvider, setSelectedProvider] = useState<ProviderId>("mock");
+  const [selectedProvider, setSelectedProvider] = useState<ProviderId>("codex");
   const [workflow, setWorkflow] = useState<WorkflowStatus | null>(null);
   const [trackerStatus, setTrackerStatus] = useState<TrackerStatus | null>(null);
   const [githubStatus, setGithubStatus] = useState<GitHubStatus | null>(null);
@@ -353,7 +348,7 @@ export function IssuesView() {
       setDaemonStatus(loadedDaemonStatus);
       setWorkspaceInventory(loadedWorkspaceInventory);
       const defaultProvider = loadedWorkflow.effectiveConfigSummary?.defaultProvider;
-      if (defaultProvider === "mock" || defaultProvider === "codex" || defaultProvider === "claude" || defaultProvider === "cursor") {
+      if (defaultProvider === "codex" || defaultProvider === "claude" || defaultProvider === "cursor") {
         setSelectedProvider((current) => current || defaultProvider);
       }
     }
@@ -624,7 +619,7 @@ export function IssuesView() {
             GitHub {githubStatus ? githubStatus.status.replaceAll("_", " ") : "unknown"}
           </span>
           <span className="rounded-full border px-2 py-0.5 text-[11px]">
-            Providers {providers.filter((provider) => provider.available).length}/{providers.length || 4} available
+            Providers {providers.filter((provider) => provider.available).length}/{providers.length || 3} available
           </span>
           <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", daemonStatus?.recoveredRunsCount ? "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300" : "border-border bg-muted/60 text-muted-foreground")}>
             Recovery {daemonStatus ? `${daemonStatus.recoveredRunsCount} recovered` : "unknown"}
@@ -639,7 +634,6 @@ export function IssuesView() {
               className="rounded-md border bg-background px-2 py-1 text-[12px] text-foreground"
               aria-label="Provider mode"
             >
-              <option value="mock">Mock</option>
               <option value="codex">Codex {providerOptionSuffix(providers.find((provider) => provider.id === "codex"))}</option>
               <option value="claude" disabled={providerDisabled(providers.find((provider) => provider.id === "claude"))}>
                 Claude Code {providerOptionSuffix(providers.find((provider) => provider.id === "claude"))}
@@ -1334,7 +1328,7 @@ function WorkflowPanel({
         </div>
         <div className="rounded-md border bg-background p-2">
           <dt className="text-muted-foreground">Provider</dt>
-          <dd className="mt-1 font-medium">{summary?.defaultProvider ?? "mock"}</dd>
+          <dd className="mt-1 font-medium">{summary?.defaultProvider ?? "codex"}</dd>
         </div>
         <div className="rounded-md border bg-background p-2">
           <dt className="text-muted-foreground">Workspace root</dt>
@@ -1356,14 +1350,14 @@ function WorkflowPanel({
             {workspaceInventory ? `${workspaceInventory.counts.candidates} candidates · ${workspaceInventory.counts.protected} protected` : "inventory not loaded"}
           </dd>
         </div>
-        {(["mock", "codex", "claude", "cursor"] as ProviderId[]).map((providerId) => {
+        {(["codex", "claude", "cursor"] as ProviderId[]).map((providerId) => {
           const provider = providers.find((item) => item.id === providerId);
           return (
             <div key={providerId} className="rounded-md border bg-background p-2">
               <dt className="text-muted-foreground">{providerDisplayName(providerId)}</dt>
               <dd className="mt-1 font-medium">{providerLabel(provider)}</dd>
               <dd className="mt-1 break-all text-[11px] text-muted-foreground">
-                {provider?.command ?? (providerId === "mock" ? "built-in" : "not configured")}
+                {provider?.command ?? "not configured"}
               </dd>
             </div>
           );
@@ -1392,7 +1386,7 @@ function WorkflowPanel({
         </div>
         <div className="rounded-md border bg-background p-2">
           <dt className="text-muted-foreground">Tracker endpoint</dt>
-          <dd className="mt-1 break-all font-medium">{summary?.endpoint ?? "local mock"}</dd>
+          <dd className="mt-1 break-all font-medium">{summary?.endpoint ?? "not configured"}</dd>
         </div>
         <div className="rounded-md border bg-background p-2">
           <dt className="text-muted-foreground">Team/project</dt>
@@ -2072,8 +2066,6 @@ function providerDisabled(provider?: ProviderHealth) {
 
 function providerDisplayName(provider: ProviderId) {
   switch (provider) {
-    case "mock":
-      return "Mock";
     case "codex":
       return "Codex";
     case "claude":
@@ -2135,7 +2127,7 @@ function trackerScopeSummary(summary: WorkflowStatus["effectiveConfigSummary"] |
     summary.projectId ? `project id ${summary.projectId}` : null,
     summary.allowWorkspaceWide ? "workspace-wide" : null,
   ].filter(Boolean);
-  return scopes.join(", ") || "local mock";
+  return scopes.join(", ") || "scope missing";
 }
 
 function decisionLabel(decision: ApprovalDecision) {
@@ -2215,10 +2207,7 @@ function extractProviderMetadata(
     };
   }
 
-  return {
-    primary: "built-in mock provider",
-    secondary: "Deterministic local provider for tests and demos.",
-  };
+  return { primary: null, secondary: "Provider metadata is unavailable for this run." };
 }
 
 function findLastEvent<T extends AgentEvent["type"]>(events: AgentEvent[], type: T): Extract<AgentEvent, { type: T }> | null {
@@ -2254,7 +2243,7 @@ function mapDaemonIssues(issues: DaemonIssue[], runs: Run[]): Issue[] {
     const labels = issue.labels.map((label, labelIndex) => ({
       id: `${issue.id}-${label}`,
       name: label,
-      color: mockLabels[(index + labelIndex) % mockLabels.length]?.color ?? "text-sky-500",
+      color: labelColorPalette[(index + labelIndex) % labelColorPalette.length] ?? "text-sky-500",
     }));
 
     return {
@@ -2266,11 +2255,11 @@ function mapDaemonIssues(issues: DaemonIssue[], runs: Run[]): Issue[] {
       iconStatus: iconStatusForState(issue.state),
       priority: priorityForIssue(issue.priority),
       sourcePriority: issue.priority,
-      assignee: users[index % users.length],
+      assignee: undefined,
       labels,
       team: issue.tracker?.teamKey ?? issue.identifier.split("-")[0] ?? "SYM",
       url: issue.url,
-      trackerKind: issue.tracker?.kind ?? "mock",
+      trackerKind: issue.tracker?.kind ?? "linear",
       projectName: issue.tracker?.projectName ?? null,
       lastFetchedAt: issue.lastFetchedAt ?? null,
       latestRun: latestRunByIssue.get(issue.id),

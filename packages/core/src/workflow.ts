@@ -193,15 +193,15 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
     );
   }
 
-  if (trackerKind !== "mock" && trackerKind !== "linear") {
+  if (trackerKind !== "linear") {
     throw new WorkflowError(
       "workflow_tracker_kind_unsupported",
-      `Unsupported tracker.kind: ${trackerKind}.`,
+      `Unsupported tracker.kind: ${trackerKind}. Symphonia now requires a real Linear tracker configuration.`,
       definition.workflowPath,
     );
   }
 
-  const endpoint = readString(trackerRaw, "endpoint") ?? (trackerKind === "linear" ? defaultLinearEndpoint : null);
+  const endpoint = readString(trackerRaw, "endpoint") ?? defaultLinearEndpoint;
   const apiKey = resolveEnvReference(readString(trackerRaw, "apiKey", "api_key"));
   const teamKey = readString(trackerRaw, "teamKey", "team_key");
   const teamId = readString(trackerRaw, "teamId", "team_id");
@@ -625,10 +625,6 @@ export function summarizeWorkflowConfig(config: WorkflowConfig): WorkflowConfigS
     codexCommand: config.codex.command,
     codexModel: config.codex.model,
     providers: {
-      mock: {
-        enabled: true,
-        displayName: "Mock provider",
-      },
       codex: {
         enabled: true,
         command: config.codex.command,
@@ -754,8 +750,8 @@ function resolveProvider(
   agentRaw: Record<string, unknown>,
   workflowPath: string,
 ): ProviderId {
-  const value = process.env.SYMPHONIA_PROVIDER ?? readString(raw, "provider") ?? readString(agentRaw, "provider") ?? "mock";
-  if (value === "mock" || value === "codex" || value === "claude" || value === "cursor") return value;
+  const value = process.env.SYMPHONIA_PROVIDER ?? readString(raw, "provider") ?? readString(agentRaw, "provider") ?? "codex";
+  if (value === "codex" || value === "claude" || value === "cursor") return value;
   throw new WorkflowError("workflow_provider_unsupported", `Unsupported provider: ${value}.`, workflowPath);
 }
 

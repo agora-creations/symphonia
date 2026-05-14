@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { AgentEvent, CursorConfig, ProviderHealth } from "@symphonia/types";
 import { checkCliCommandHealth } from "./command-utils.js";
 import { CliStreamRunnerError, runCliStream } from "./cli-stream-runner.js";
-import { MockRunCancelledError } from "./mock-provider.js";
+import { ProviderRunCancelledError } from "./provider-errors.js";
 import { AgentProvider, ProviderRunContext } from "./provider.js";
 import { nowIso } from "./time.js";
 
@@ -140,7 +140,7 @@ export async function runCursorAgentProvider(context: ProviderRunContext): Promi
     });
   } catch (error) {
     if (context.signal.aborted || (error instanceof CliStreamRunnerError && error.code === "aborted")) {
-      throw new MockRunCancelledError();
+      throw new ProviderRunCancelledError();
     }
 
     const message = error instanceof Error ? error.message : "Cursor Agent provider failed.";

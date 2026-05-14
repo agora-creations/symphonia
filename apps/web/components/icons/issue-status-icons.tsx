@@ -1,4 +1,4 @@
-import type { IssueStatus } from "@/data/mock";
+import type { IssueStatus } from "@/lib/view-models";
 import { cn } from "@/lib/utils";
 
 export function IssueStatusIcon({

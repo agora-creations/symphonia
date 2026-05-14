@@ -15,8 +15,8 @@ describe("DesktopSettingsStore", () => {
       const store = new DesktopSettingsStore({ settingsDir: dir, repoRoot: dir });
       const settings = store.load();
       expect(settings.firstRunCompleted).toBe(false);
-      expect(settings.defaultProviderId).toBe("mock");
-      expect(settings.defaultTrackerKind).toBe("mock");
+      expect(settings.defaultProviderId).toBe("codex");
+      expect(settings.defaultTrackerKind).toBe("linear");
       expect(settings.cleanupEnabled).toBe(false);
       expect(settings.cleanupDryRun).toBe(true);
       expect(settings.githubTokenEnvVar).toBe("GITHUB_TOKEN");
@@ -67,7 +67,7 @@ describe("DesktopSettingsStore", () => {
   it("accepts a repo with a WORKFLOW.md", () => {
     const dir = tempDir();
     try {
-      writeFileSync(resolve(dir, "WORKFLOW.md"), "---\nprovider: mock\n---\n", "utf8");
+      writeFileSync(resolve(dir, "WORKFLOW.md"), "---\nprovider: codex\ntracker:\n  kind: linear\n  api_key: \"$LINEAR_API_KEY\"\n  allow_workspace_wide: true\n---\n", "utf8");
       const store = new DesktopSettingsStore({ settingsDir: resolve(dir, "config"), repoRoot: dir });
       const validation = store.validate(store.load());
       expect(validation.ok).toBe(true);

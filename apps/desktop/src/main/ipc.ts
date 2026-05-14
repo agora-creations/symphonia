@@ -12,10 +12,22 @@ import {
 } from "./ipc-contracts.js";
 
 const starterWorkflow = `---
-provider: mock
+provider: codex
 
 tracker:
-  kind: mock
+  kind: linear
+  api_key: "$LINEAR_API_KEY"
+  allow_workspace_wide: true
+  read_only: true
+  active_states:
+    - "Todo"
+    - "In Progress"
+    - "Backlog"
+  terminal_states:
+    - "Done"
+    - "Closed"
+    - "Canceled"
+    - "Duplicate"
 
 workspace:
   root: ".symphonia/workspaces"
@@ -39,7 +51,8 @@ Description:
 Instructions:
 1. Inspect the workspace context.
 2. Make the smallest correct change.
-3. Report what changed and what was verified.
+3. Run the relevant validation command.
+4. Report what changed and what was verified.
 `;
 
 export function registerDesktopIpc(services: DesktopServices): void {

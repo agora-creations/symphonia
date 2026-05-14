@@ -14,8 +14,6 @@ import {
   createGitHubClient,
   createRetryRun,
   cursorProvider,
-  getMockIssue,
-  mockProviderHealth,
   getWorkflowStatus,
   createLinearTrackerAdapter,
   GitHubFetch,
@@ -25,19 +23,16 @@ import {
   isIssueTerminal,
   LinearFetch,
   linearTrackerAdapter,
-  listMockIssues,
   loadWorkflowRuntime,
-  mockTrackerAdapter,
-  MockRunCancelledError,
   nowIso,
   planWorkspaceCleanup,
+  ProviderRunCancelledError,
   PromptTemplateError,
   refreshReviewArtifacts,
   renderPromptTemplate,
   runClaudeAgentProvider,
   runCodexAgentProvider,
   runCursorAgentProvider,
-  runMockAgentProvider,
   runHook,
   scanHarnessRepository,
   WorkflowError,
@@ -276,8 +271,7 @@ export class SymphoniaDaemon {
   private issueForRun(run: Run): Issue {
     return (
       this.eventStore.getIssue(run.issueId) ??
-      this.eventStore.getIssueByIdentifier(run.issueIdentifier) ??
-      getMockIssue(run.issueId) ?? {
+      this.eventStore.getIssueByIdentifier(run.issueIdentifier) ?? {
         id: run.issueId,
         identifier: run.issueIdentifier,
         title: run.issueTitle ?? run.issueIdentifier,
@@ -412,7 +406,7 @@ export class SymphoniaDaemon {
         return sendJson(response, 200, { recommendations: scan.recommendations });
       }
 
-      const providerHealthMatch = path.match(/^\/providers\/(mock|codex|claude|cursor)\/health$/);
+      const providerHealthMatch = path.match(/^\/providers\/(codex|claude|cursor)\/health$/);
       if (request.method === "GET" && providerHealthMatch) {
         return sendJson(response, 200, { provider: await this.getProviderHealth(providerHealthMatch[1]! as ProviderId) });
       }
@@ -565,14 +559,8 @@ export class SymphoniaDaemon {
   }
 
   async startRun(issueId: string, requestedProvider?: ProviderId): Promise<Run> {
-    let runtime: WorkflowRuntime | null = null;
-    try {
-      runtime = this.loadWorkflowRuntime();
-    } catch {
-      runtime = null;
-    }
-    const fallbackIssue = getMockIssue(issueId);
-    const issue = runtime ? await this.resolveIssue(issueId, runtime) : fallbackIssue;
+    const runtime = this.loadWorkflowRuntime();
+    const issue = await this.resolveIssue(issueId, runtime);
     if (!issue) {
       throw new ApiError(404, `Unknown issue: ${issueId}`);
     }
@@ -593,7 +581,7 @@ export class SymphoniaDaemon {
       issueId: issue.id,
       issueIdentifier: issue.identifier,
       issueTitle: issue.title,
-      trackerKind: issue.tracker?.kind ?? runtime?.config.tracker.kind ?? "mock",
+      trackerKind: issue.tracker?.kind ?? runtime.config.tracker.kind,
       provider,
       attempt,
       timestamp,
@@ -824,17 +812,10 @@ export class SymphoniaDaemon {
           emit: (event) => this.emit(record, event),
         });
       } else {
-        await runMockAgentProvider({
-          run: record.run,
-          issue,
-          attempt: record.attempt,
-          signal: record.controller.signal,
-          delayMs: Number(process.env.SYMPHONIA_MOCK_DELAY_MS ?? 450),
-          emit: (event) => this.emit(record, event),
-        });
+        throw new ApiError(400, `Unsupported provider: ${record.run.provider}`);
       }
     } catch (error) {
-      if (error instanceof MockRunCancelledError || record.controller.signal.aborted) {
+      if (error instanceof ProviderRunCancelledError || record.controller.signal.aborted) {
         return;
       }
 
@@ -906,15 +887,6 @@ export class SymphoniaDaemon {
 
   async listIssues(): Promise<Issue[]> {
     const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
-
-    if (runtime.config.tracker.kind === "mock") {
-      const fetched = await mockTrackerAdapter.fetchIssues(this.trackerContext(runtime));
-      this.eventStore.upsertIssues(fetched.issues, fetched.fetchedAt);
-      this.trackerLastSyncAt = fetched.fetchedAt;
-      this.trackerLastError = null;
-      return fetched.issues;
-    }
-
     return this.eventStore.listIssues(runtime.config.tracker.kind);
   }
 
@@ -933,7 +905,6 @@ export class SymphoniaDaemon {
       return fetched.issues;
     } catch (error) {
       this.trackerLastError = error instanceof Error ? error.message : "Issue refresh failed.";
-      if (runtime.config.tracker.kind === "mock") return listMockIssues();
       return this.eventStore.listIssues(runtime.config.tracker.kind);
     }
   }
@@ -1353,7 +1324,7 @@ export class SymphoniaDaemon {
     try {
       const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
       const issues = this.eventStore.listIssues(runtime.config.tracker.kind);
-      const identifiers = issues.length > 0 ? issues.map((issue) => issue.identifier) : listMockIssues().map((issue) => issue.identifier);
+      const identifiers = issues.map((issue) => issue.identifier);
       const listed = new WorkspaceManager(runtime.config.workspace.root).listExistingWorkspaces(
         identifiers,
       );
@@ -1373,7 +1344,7 @@ export class SymphoniaDaemon {
     const inventory = await buildWorkspaceInventory({
       workspaceRoot: runtime.config.workspace.root,
       runs: this.listRuns(),
-      issues: issues.length > 0 ? issues : runtime.config.tracker.kind === "mock" ? listMockIssues() : [],
+      issues,
       cleanupPolicy: runtime.config.workspace.cleanup,
     });
     this.latestWorkspaceInventory = inventory;
@@ -1583,7 +1554,6 @@ export class SymphoniaDaemon {
 
   async listProviderHealth(): Promise<ProviderHealth[]> {
     return [
-      mockProviderHealth,
       await this.getProviderHealth("codex"),
       await this.getProviderHealth("claude"),
       await this.getProviderHealth("cursor"),
@@ -1591,7 +1561,6 @@ export class SymphoniaDaemon {
   }
 
   async getProviderHealth(providerId: ProviderId): Promise<ProviderHealth> {
-    if (providerId === "mock") return mockProviderHealth;
     if (providerId === "codex") return codexProvider.health(this.getCodexConfigForHealth());
     if (providerId === "claude") return claudeProvider.health(this.getClaudeConfigForHealth());
     return cursorProvider.health(this.getCursorConfigForHealth());
@@ -1763,7 +1732,7 @@ export class SymphoniaDaemon {
         type: "run.status",
         timestamp: nowIso(),
         status: hook.status === "timed_out" ? "timed_out" : "failed",
-        message: `${hookName} hook failed before mock provider start.`,
+        message: `${hookName} hook failed before provider start.`,
         error: hook.error ?? `${hookName} hook did not succeed.`,
       });
       return false;
@@ -1896,7 +1865,7 @@ export class SymphoniaDaemon {
 
   private getDefaultProvider(): ProviderId {
     const envProvider = process.env.SYMPHONIA_PROVIDER;
-    if (envProvider === "mock" || envProvider === "codex" || envProvider === "claude" || envProvider === "cursor") {
+    if (envProvider === "codex" || envProvider === "claude" || envProvider === "cursor") {
       return envProvider;
     }
 
@@ -1904,12 +1873,12 @@ export class SymphoniaDaemon {
       const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
       return runtime.config.provider;
     } catch {
-      return "mock";
+      return "codex";
     }
   }
 
   private trackerAdapter(kind: TrackerKind) {
-    if (kind !== "linear") return mockTrackerAdapter;
+    if (kind !== "linear") throw new ApiError(400, `Unsupported tracker: ${kind}`);
     return this.options.linearFetch ? createLinearTrackerAdapter({ fetch: this.options.linearFetch }) : linearTrackerAdapter;
   }
 
