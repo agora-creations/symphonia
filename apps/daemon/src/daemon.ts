@@ -45,6 +45,7 @@ import {
   runCursorAgentProvider,
   runHook,
   scanHarnessRepository,
+  validateIntegrationWriteExecution,
   WorkflowError,
   WorkflowRuntime,
   WorkspaceError,
@@ -1507,11 +1508,11 @@ export class SymphoniaDaemon {
     const request = IntegrationWriteExecutionRequestSchema.parse(input);
     const preview = this.eventStore.getIntegrationWritePreview(request.previewId);
     if (!preview || preview.runId !== runId) throw new ApiError(404, "GitHub PR preview not found for this run.");
+    validateIntegrationWriteExecution(preview, request, "github_pr_create", "github");
+    const existing = this.getMatchingIdempotencyResult(preview, request);
+    if (existing) return existing;
     const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
     const credential = await this.resolveGithubCredential();
-    const existing = request.idempotencyKey
-      ? this.eventStore.findIntegrationWriteResultByIdempotencyKey(request.idempotencyKey)
-      : null;
     this.appendWriteStartedEvent(preview);
     const result = await executeGitHubPrCreate({
       preview,
@@ -1519,7 +1520,7 @@ export class SymphoniaDaemon {
       workflowConfig: runtime.config,
       credential,
       githubClient: this.githubClientForRuntime(runtime, credential?.token ?? null),
-      existingResult: existing,
+      existingResult: null,
     });
     this.eventStore.saveIntegrationWriteResult(result, request.idempotencyKey ?? null);
     this.appendWriteResultEvents(preview, result);
@@ -1551,15 +1552,15 @@ export class SymphoniaDaemon {
     const request = IntegrationWriteExecutionRequestSchema.parse(input);
     const preview = this.eventStore.getIntegrationWritePreview(request.previewId);
     if (!preview || preview.runId !== runId) throw new ApiError(404, "Linear comment preview not found for this run.");
+    validateIntegrationWriteExecution(preview, request, "linear_comment_create", "linear");
+    const existing = this.getMatchingIdempotencyResult(preview, request);
+    if (existing) return existing;
     const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
     let credential = this.authManager.resolveCredential("linear");
     if (credential?.connection.status === "expired") {
       await this.authManager.refreshConnection("linear");
       credential = this.authManager.resolveCredential("linear");
     }
-    const existing = request.idempotencyKey
-      ? this.eventStore.findIntegrationWriteResultByIdempotencyKey(request.idempotencyKey)
-      : null;
     this.appendWriteStartedEvent(preview);
     const result = await executeLinearCommentCreate({
       preview,
@@ -1567,7 +1568,7 @@ export class SymphoniaDaemon {
       workflowConfig: runtime.config,
       credential,
       linearClient: this.linearClientForRuntime(runtime, credential?.authorizationHeader ?? null),
-      existingResult: existing,
+      existingResult: null,
     });
     this.eventStore.saveIntegrationWriteResult(result, request.idempotencyKey ?? null);
     this.appendWriteResultEvents(preview, result);
@@ -2247,6 +2248,27 @@ export class SymphoniaDaemon {
     });
   }
 
+  private getMatchingIdempotencyResult(
+    preview: IntegrationWritePreview,
+    request: { idempotencyKey: string | null },
+  ): IntegrationWriteResult | null {
+    if (!request.idempotencyKey) return null;
+    const existing = this.eventStore.findIntegrationWriteResultByIdempotencyKey(request.idempotencyKey);
+    if (!existing) return null;
+
+    const existingRunId = stringFromRecord(existing.redactedRequestSummary, "runId");
+    if (
+      existing.previewId !== preview.id ||
+      existing.provider !== preview.provider ||
+      existing.kind !== preview.kind ||
+      existingRunId !== preview.runId
+    ) {
+      throw new ApiError(409, "Idempotency key was already used for a different write action.");
+    }
+
+    return existing;
+  }
+
   private appendWriteResultEvents(preview: IntegrationWritePreview, result: IntegrationWriteResult): void {
     if (result.status === "succeeded") {
       this.appendDaemonEvent({
@@ -2290,6 +2312,19 @@ export class SymphoniaDaemon {
           result: result.linearComment,
         });
       }
+      return;
+    }
+    if (result.status === "cancelled") {
+      this.appendDaemonEvent({
+        id: randomUUID(),
+        runId: preview.runId,
+        type: "integration.write.cancelled",
+        timestamp: nowIso(),
+        previewId: preview.id,
+        provider: preview.provider,
+        kind: preview.kind,
+        reason: result.errors[0] ?? "Integration write was cancelled.",
+      });
       return;
     }
     const error = result.errors[0] ?? "Integration write failed.";
@@ -2676,6 +2711,11 @@ function parseAuthProvider(value: string): AuthProviderId {
 
 function objectBody(input: unknown): Record<string, unknown> {
   return typeof input === "object" && input !== null && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
+}
+
+function stringFromRecord(input: Record<string, unknown>, key: string): string | null {
+  const value = input[key];
+  return typeof value === "string" ? value : null;
 }
 
 function stringBody(input: Record<string, unknown>, key: string): string | null {

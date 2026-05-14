@@ -431,6 +431,15 @@ function ensureExecutablePreview(
   return preview;
 }
 
+export function validateIntegrationWriteExecution(
+  preview: IntegrationWritePreview,
+  request: IntegrationWriteExecutionRequest,
+  expectedKind: IntegrationWritePreview["kind"],
+  expectedProvider: IntegrationWritePreview["provider"],
+): void {
+  ensureExecutablePreview(preview, request, expectedKind, expectedProvider);
+}
+
 async function findPr(client: GitHubRestClient, branch: string) {
   const existing = await client.listPullRequests({ headBranch: branch, state: "open" });
   return existing[0] ?? null;
