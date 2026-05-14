@@ -345,7 +345,3 @@ Automated tests use fake CLIs, fake fetch transports, temp databases, temp works
 - GitHub branch push is allowed only inside the manual draft PR route when `github.write.allow_push` is explicitly enabled and all confirmation/audit gates pass.
 - Provider auth for Codex, Claude, and Cursor remains separate from GitHub/Linear integration auth.
 - No cloud accounts, team sharing, GitHub App install flow, Linear webhooks, GitHub webhooks, code signing, notarization, auto-update, or Tauri support yet.
-
-## Next Milestone
-
-Milestone 12 should be `Add CI workflows, release automation, and production packaging hardening`.
