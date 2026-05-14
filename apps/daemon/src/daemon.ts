@@ -23,6 +23,7 @@ import {
   cursorProvider,
   getWorkflowStatus,
   createLinearTrackerAdapter,
+  executeGitHubPrCreate,
   githubWritePolicy,
   GitHubFetch,
   HarnessApplyError,
@@ -35,6 +36,7 @@ import {
   loadWorkflowRuntime,
   nowIso,
   planWorkspaceCleanup,
+  prepareGitHubPrBranch,
   ProviderRunCancelledError,
   PromptTemplateError,
   refreshReviewArtifacts,
@@ -76,6 +78,10 @@ import {
   ProviderHealth,
   ProviderId,
   GitHubHealth,
+  GitHubPrExecutionRequestSchema,
+  GitHubPrExecutionRequest,
+  GitHubPrExecutionResponse,
+  GitHubPrExecutionResponseSchema,
   GitHubStatus,
   HarnessApplyRequestSchema,
   HarnessApplyResult,
@@ -84,7 +90,12 @@ import {
   HarnessScanResult,
   HarnessStatus,
   IntegrationWritePreview,
+  IntegrationWritePreviewSchema,
   IntegrationWriteResult,
+  IntegrationWriteResultSchema,
+  LocalWriteApprovalRecordSchema,
+  LocalWriteExecutionRecord,
+  LocalWriteExecutionRecordSchema,
   ReviewArtifactSnapshot,
   Run,
   RunApprovalEvidence,
@@ -683,8 +694,8 @@ export class SymphoniaDaemon {
 
       const githubPrCreateMatch = path.match(/^\/runs\/([^/]+)\/github\/pr\/create$/);
       if (request.method === "POST" && githubPrCreateMatch) {
-        this.requireRun(githubPrCreateMatch[1]!);
-        throw new ApiError(405, "GitHub PR creation is disabled in Milestone 15B; use preview-only write contracts.");
+        const result = await this.createGithubPr(githubPrCreateMatch[1]!, await readJsonBody(request));
+        return sendJson(response, 200, { result });
       }
 
       const linearCommentPreviewMatch = path.match(/^\/runs\/([^/]+)\/linear\/comment\/preview$/);
@@ -696,7 +707,7 @@ export class SymphoniaDaemon {
       const linearCommentCreateMatch = path.match(/^\/runs\/([^/]+)\/linear\/comment\/create$/);
       if (request.method === "POST" && linearCommentCreateMatch) {
         this.requireRun(linearCommentCreateMatch[1]!);
-        throw new ApiError(405, "Linear comments are disabled in Milestone 15B; use preview-only write contracts.");
+        throw new ApiError(405, "Linear comments are disabled in Milestone 15C; use preview-only Linear contracts.");
       }
 
       const runPromptMatch = path.match(/^\/runs\/([^/]+)\/prompt$/);
@@ -1971,8 +1982,369 @@ export class SymphoniaDaemon {
   }
 
   async createGithubPr(runId: string, _input: unknown) {
-    this.requireRun(runId);
-    throw new ApiError(405, "GitHub PR creation is disabled in Milestone 15B; use preview-only write contracts.");
+    const record = this.requireRecord(runId);
+    const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+    const request = GitHubPrExecutionRequestSchema.parse({ ...objectBody(_input), runId });
+    const generatedAt = nowIso();
+    const existingExecution = this.eventStore.findLocalWriteExecutionByIdempotencyKey(request.idempotencyKey);
+    const existingConflict =
+      existingExecution && existingExecution.payloadHash !== request.payloadHash
+        ? `Idempotency key already exists for a different payload hash: ${existingExecution.payloadHash}.`
+        : null;
+
+    if (existingConflict) {
+      return githubPrExecutionResponse({
+        status: "blocked",
+        request,
+        payloadHashVerification: {
+          status: "mismatched",
+          expectedPayloadHash: existingExecution?.payloadHash ?? null,
+          receivedPayloadHash: request.payloadHash,
+        },
+        idempotency: {
+          status: "conflict",
+          idempotencyKey: request.idempotencyKey,
+          existingExecutionRecordId: existingExecution?.id ?? null,
+          existingExternalUrl: existingExecution?.githubPrUrl ?? null,
+          blockingReason: existingConflict,
+        },
+        blockingReasons: [existingConflict],
+        errorSummary: existingConflict,
+        executionRecord: existingExecution ?? null,
+      });
+    }
+
+    if (existingExecution?.status === "succeeded" && existingExecution.githubPrUrl) {
+      return githubPrExecutionResponse({
+        status: "already_executed",
+        request,
+        payloadHashVerification: {
+          status: "matched",
+          expectedPayloadHash: existingExecution.payloadHash,
+          receivedPayloadHash: request.payloadHash,
+        },
+        idempotency: {
+          status: "already_executed",
+          idempotencyKey: request.idempotencyKey,
+          existingExecutionRecordId: existingExecution.id,
+          existingExternalUrl: existingExecution.githubPrUrl,
+          blockingReason: null,
+        },
+        blockingReasons: [],
+        errorSummary: null,
+        executionRecord: existingExecution,
+      });
+    }
+
+    if (existingExecution && (existingExecution.status === "pending" || existingExecution.status === "in_progress")) {
+      const reason = "A write execution with this idempotency key is already in progress.";
+      return githubPrExecutionResponse({
+        status: "blocked",
+        request,
+        payloadHashVerification: {
+          status: "matched",
+          expectedPayloadHash: existingExecution.payloadHash,
+          receivedPayloadHash: request.payloadHash,
+        },
+        idempotency: {
+          status: "in_progress",
+          idempotencyKey: request.idempotencyKey,
+          existingExecutionRecordId: existingExecution.id,
+          existingExternalUrl: existingExecution.githubPrUrl,
+          blockingReason: reason,
+        },
+        blockingReasons: [reason],
+        errorSummary: reason,
+        executionRecord: existingExecution,
+      });
+    }
+
+    const previews = await this.getWriteActionPreviews(runId);
+    const previewContract = previews.find((preview) => preview.id === request.previewId && preview.kind === "github_pr_create") ?? null;
+    if (!previewContract) {
+      const reason = "GitHub PR preview was not found for this run.";
+      return githubPrExecutionResponse({
+        status: "blocked",
+        request,
+        payloadHashVerification: { status: "missing_preview", expectedPayloadHash: null, receivedPayloadHash: request.payloadHash },
+        idempotency: {
+          status: existingExecution?.status === "failed" ? "retry_allowed" : "new",
+          idempotencyKey: request.idempotencyKey,
+          existingExecutionRecordId: existingExecution?.id ?? null,
+          existingExternalUrl: existingExecution?.githubPrUrl ?? null,
+          blockingReason: reason,
+        },
+        blockingReasons: [reason],
+        errorSummary: reason,
+        executionRecord: existingExecution ?? null,
+      });
+    }
+
+    const evidence = this.getRunApprovalEvidence(runId);
+    const blockers = this.githubPrExecutionBlockers(request, previewContract, evidence, runtime);
+    const credential = await this.resolveGithubCredential();
+    const githubClient = this.githubClientForRuntime(runtime, credential?.token ?? null);
+    if (!credential) blockers.push("GitHub credentials are unavailable.");
+    if (!githubClient) blockers.push("GitHub client is unavailable for the configured repository.");
+
+    if (githubClient && blockers.length === 0) {
+      try {
+        await githubClient.healthCheck();
+      } catch (error) {
+        blockers.push(error instanceof Error ? error.message : "GitHub repository validation failed.");
+      }
+    }
+
+    const payloadHashVerification = {
+      status: previewContract.payloadHash === request.payloadHash ? ("matched" as const) : ("mismatched" as const),
+      expectedPayloadHash: previewContract.payloadHash,
+      receivedPayloadHash: request.payloadHash,
+    };
+    if (payloadHashVerification.status === "mismatched") {
+      blockers.push("Preview payload hash does not match the current GitHub PR preview.");
+    }
+
+    if (blockers.length > 0) {
+      return githubPrExecutionResponse({
+        status: "blocked",
+        request,
+        payloadHashVerification,
+        idempotency: {
+          status: existingExecution?.status === "failed" ? "retry_allowed" : "new",
+          idempotencyKey: request.idempotencyKey,
+          existingExecutionRecordId: existingExecution?.id ?? null,
+          existingExternalUrl: existingExecution?.githubPrUrl ?? null,
+          blockingReason: blockers[0] ?? null,
+        },
+        blockingReasons: uniqueStrings(blockers),
+        errorSummary: uniqueStrings(blockers).join("; "),
+        executionRecord: existingExecution ?? null,
+      });
+    }
+
+    const integrationPreview = await buildGitHubPrPreview({
+      run: record.run,
+      issue: record.issue,
+      workflowConfig: runtime.config,
+      reviewArtifacts: evidence.reviewArtifact,
+      credential,
+      githubClient: null,
+    });
+    const executablePreview = IntegrationWritePreviewSchema.parse({
+      ...integrationPreview,
+      id: request.previewId,
+      target: {
+        ...integrationPreview.target,
+        owner: runtime.config.github.owner,
+        repo: runtime.config.github.repo,
+        branch: request.headBranch,
+        baseBranch: request.baseBranch,
+      },
+      githubPr: integrationPreview.githubPr
+        ? {
+            ...integrationPreview.githubPr,
+            owner: runtime.config.github.owner,
+            repo: runtime.config.github.repo,
+            baseBranch: request.baseBranch,
+            headBranch: request.headBranch,
+            draft: request.draft,
+          }
+        : null,
+    });
+
+    const approvalRecord = LocalWriteApprovalRecordSchema.parse({
+      id: `write-approval-${sha256(request.idempotencyKey).slice(0, 24)}`,
+      runId,
+      issueId: record.issue.id,
+      issueIdentifier: record.issue.identifier,
+      kind: "github_pr_create",
+      targetSystem: "github",
+      targetRepository: request.targetRepository,
+      baseBranch: request.baseBranch,
+      headBranch: request.headBranch,
+      payloadHash: request.payloadHash,
+      approvalEvidenceSource: previewContract.approvalEvidenceSource,
+      reviewArtifactSource: previewContract.reviewArtifactId,
+      changedFiles: previewContract.changedFiles,
+      title: previewContract.payload.githubPr?.title ?? previewContract.title,
+      bodySummary: truncateText(previewContract.bodyPreview, 1200),
+      confirmationType: "typed_phrase",
+      confirmationPhrase: previewContract.confirmationPhrase,
+      approvedAt: generatedAt,
+      status: "approved",
+      idempotencyKey: request.idempotencyKey,
+    });
+    let executionRecord = LocalWriteExecutionRecordSchema.parse({
+      recordType: "local_write_execution",
+      id: `write-execution-${sha256(request.idempotencyKey).slice(0, 24)}`,
+      approvalRecordId: approvalRecord.id,
+      runId,
+      issueId: record.issue.id,
+      issueIdentifier: record.issue.identifier,
+      previewId: request.previewId,
+      kind: "github_pr_create",
+      targetSystem: "github",
+      targetRepository: request.targetRepository,
+      baseBranch: request.baseBranch,
+      headBranch: request.headBranch,
+      payloadHash: request.payloadHash,
+      idempotencyKey: request.idempotencyKey,
+      status: "in_progress",
+      approvalRecord,
+      startedAt: generatedAt,
+      completedAt: null,
+      externalWriteId: null,
+      githubPrNumber: null,
+      githubPrUrl: null,
+      errorSummary: null,
+      blockingReasons: [],
+    });
+    this.eventStore.saveLocalWriteExecutionRecord(executionRecord);
+    this.appendWriteStartedEvent(executablePreview);
+
+    const branchPreparation = await prepareGitHubPrBranch({
+      workspacePath: record.run.workspacePath,
+      run: record.run,
+      issue: record.issue,
+      changedFiles: previewContract.changedFiles,
+      owner: runtime.config.github.owner,
+      repo: runtime.config.github.repo,
+      remoteName: runtime.config.github.remoteName,
+      baseBranch: request.baseBranch,
+      headBranch: request.headBranch,
+      protectedBranches: runtime.config.github.write.protectedBranches,
+      allowPush: runtime.config.github.write.allowPush,
+      idempotencyKey: request.idempotencyKey,
+    });
+
+    if (branchPreparation.errors.length > 0) {
+      const errorSummary = branchPreparation.errors.join("; ");
+      executionRecord = LocalWriteExecutionRecordSchema.parse({
+        ...executionRecord,
+        status: "failed",
+        completedAt: nowIso(),
+        errorSummary,
+        blockingReasons: branchPreparation.errors,
+      });
+      this.eventStore.saveLocalWriteExecutionRecord(executionRecord);
+      const failed = failedIntegrationWriteResult(executablePreview, branchPreparation.errors);
+      this.appendWriteResultEvents(executablePreview, failed);
+      return githubPrExecutionResponse({
+        status: "failed",
+        request,
+        payloadHashVerification,
+        idempotency: {
+          status: "retry_allowed",
+          idempotencyKey: request.idempotencyKey,
+          existingExecutionRecordId: executionRecord.id,
+          existingExternalUrl: null,
+          blockingReason: errorSummary,
+        },
+        blockingReasons: branchPreparation.errors,
+        errorSummary,
+        executionRecord,
+      });
+    }
+
+    const preparedPreview = IntegrationWritePreviewSchema.parse({
+      ...executablePreview,
+      warnings: uniqueStrings([...executablePreview.warnings, ...branchPreparation.warnings]),
+      githubPr: executablePreview.githubPr
+        ? {
+            ...executablePreview.githubPr,
+            headSha: branchPreparation.commitSha ?? executablePreview.githubPr.headSha,
+          }
+        : null,
+    });
+
+    const writeResult = await executeGitHubPrCreate({
+      preview: preparedPreview,
+      request: {
+        previewId: request.previewId,
+        confirmation: request.confirmationText,
+        dryRun: false,
+        idempotencyKey: request.idempotencyKey,
+      },
+      workflowConfig: runtime.config,
+      credential,
+      githubClient,
+    });
+    const completedAt = writeResult.executedAt;
+    executionRecord = LocalWriteExecutionRecordSchema.parse({
+      ...executionRecord,
+      status: writeResult.status === "succeeded" ? "succeeded" : "failed",
+      completedAt,
+      externalWriteId: writeResult.externalId,
+      githubPrNumber: writeResult.githubPr?.number ?? null,
+      githubPrUrl: writeResult.githubPr?.url ?? null,
+      errorSummary: writeResult.errors[0] ?? null,
+      blockingReasons: writeResult.errors,
+    });
+    this.eventStore.saveLocalWriteExecutionRecord(executionRecord);
+    this.appendWriteResultEvents(preparedPreview, writeResult);
+
+    return githubPrExecutionResponse({
+      status: writeResult.status === "succeeded" ? "succeeded" : "failed",
+      request,
+      payloadHashVerification,
+      idempotency: {
+        status: writeResult.status === "succeeded" ? "already_executed" : "retry_allowed",
+        idempotencyKey: request.idempotencyKey,
+        existingExecutionRecordId: executionRecord.id,
+        existingExternalUrl: executionRecord.githubPrUrl,
+        blockingReason: writeResult.errors[0] ?? null,
+      },
+      blockingReasons: writeResult.errors,
+      errorSummary: writeResult.errors[0] ?? null,
+      executionRecord,
+    });
+  }
+
+  private githubPrExecutionBlockers(
+    request: GitHubPrExecutionRequest,
+    preview: WriteActionPreviewContract,
+    evidence: RunApprovalEvidence,
+    runtime: WorkflowRuntime,
+  ): string[] {
+    const blockers: string[] = [];
+    const policy = githubWritePolicy(runtime.config.github);
+    const expectedRepository =
+      runtime.config.github.owner && runtime.config.github.repo
+        ? `${runtime.config.github.owner}/${runtime.config.github.repo}`
+        : null;
+
+    if (preview.kind !== "github_pr_create") blockers.push("Preview is not a GitHub PR creation preview.");
+    if (preview.targetSystem !== "github") blockers.push("Preview does not target GitHub.");
+    if (request.actionKind !== "github_pr_create") blockers.push("Request action kind must be github_pr_create.");
+    if (preview.idempotencyKey !== request.idempotencyKey) blockers.push("Idempotency key does not match the current preview.");
+    if (preview.targetRepository !== request.targetRepository) blockers.push("Target repository does not match the current preview.");
+    if (expectedRepository && request.targetRepository !== expectedRepository) {
+      blockers.push(`Target repository must be ${expectedRepository}.`);
+    }
+    if (preview.baseBranch !== request.baseBranch) blockers.push("Base branch does not match the current preview.");
+    if (preview.targetBranch !== request.headBranch) blockers.push("Head branch does not match the current preview.");
+    if (!request.draft) blockers.push("Manual GitHub PR creation must create a draft PR.");
+    if (preview.payload.githubPr?.draft !== true) blockers.push("GitHub PR preview is not configured as a draft PR.");
+    if (request.confirmationText !== preview.confirmationPhrase) blockers.push(`Confirmation phrase must be: ${preview.confirmationPhrase}`);
+    if (!runtime.config.github.enabled) blockers.push("GitHub integration is disabled.");
+    if (runtime.config.github.readOnly) blockers.push("GitHub read_only is true.");
+    if (!policy.enabled) blockers.push("GitHub writes are disabled.");
+    if (!policy.allowedKinds.includes("github_pr_create")) blockers.push("GitHub PR creation is not enabled in WORKFLOW.md.");
+    if (!policy.requireConfirmation) blockers.push("GitHub PR creation must require manual confirmation.");
+    if (!runtime.config.github.write.allowCreatePr) blockers.push("GitHub PR creation is disabled.");
+    if (!runtime.config.github.owner || !runtime.config.github.repo) blockers.push("GitHub owner/repo is not configured.");
+    if (!request.headBranch || request.headBranch === request.baseBranch) blockers.push("Head branch must be a non-base branch.");
+    if (runtime.config.github.write.protectedBranches.includes(request.headBranch)) {
+      blockers.push(`Head branch ${request.headBranch} is protected.`);
+    }
+    if (preview.status !== "preview_available") blockers.push(...preview.blockingReasons);
+    if (evidence.finalRunState !== "succeeded") blockers.push(`Run must be succeeded before creating a PR; current state is ${evidence.finalRunState}.`);
+    if (evidence.missingEvidenceReasons.length > 0) blockers.push(...evidence.missingEvidenceReasons);
+    if (evidence.reviewArtifactStatus !== "ready") blockers.push("Review artifact must be ready before creating a PR.");
+    if (preview.changedFiles.length === 0) blockers.push("Changed files are unavailable for this PR preview.");
+    if (!evidence.workspacePath) blockers.push("Run workspace path is unavailable.");
+
+    return uniqueStrings(blockers);
   }
 
   async previewLinearComment(runId: string, input: unknown): Promise<IntegrationWritePreview> {
@@ -3206,7 +3578,9 @@ function previewContractFromIntegrationPreview(input: {
   const blockingReasons = uniqueStrings([...input.preview.blockers, ...availabilityReasons]);
   const riskWarnings = uniqueStrings([
     ...input.preview.warnings,
-    "Preview-only in Milestone 15B; no external write endpoint will execute this action.",
+    input.preview.kind === "github_pr_create"
+      ? "GitHub draft PR creation requires Milestone 15C manual confirmation; no automatic GitHub write occurs."
+      : "Preview-only in Milestone 15C; no Linear write endpoint will execute this action.",
   ]);
   const generatedAt = nowIso();
   const targetRepository =
@@ -3232,6 +3606,7 @@ function previewContractFromIntegrationPreview(input: {
     approvalEvidenceSource: `approval-evidence:${input.evidence.fileSummarySource}`,
     requiredPermissions: input.preview.requiredPermissions,
     confirmationRequired: input.preview.confirmationRequired,
+    confirmationPhrase: input.preview.confirmationPhrase,
     confirmationPrompt: confirmationPrompt(input.preview.confirmationRequired, input.preview.confirmationPhrase),
     blockingReasons,
     riskWarnings,
@@ -3316,12 +3691,13 @@ function linearStatusPreviewContract(input: {
     approvalEvidenceSource: `approval-evidence:${input.evidence.fileSummarySource}`,
     requiredPermissions: ["Linear issueUpdate"],
     confirmationRequired: true,
+    confirmationPhrase: confirmationPhraseFromAvailability(input.availability),
     confirmationPrompt: confirmationPrompt(true, confirmationPhraseFromAvailability(input.availability)),
     blockingReasons,
     riskWarnings: uniqueStrings([
       ...input.preview.warnings,
       `Credential source would be ${input.credentialSource}.`,
-      "Preview-only in Milestone 15B; no external write endpoint will execute this action.",
+      "Preview-only in Milestone 15C; no Linear write endpoint will execute this action.",
     ]),
     idempotencyKey: previewIdempotencyKey(input.run.id, "linear_status_update", payloadHash),
     payloadHash,
@@ -3427,6 +3803,58 @@ function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.filter((value) => value.trim().length > 0))];
 }
 
+function githubPrExecutionResponse(input: {
+  status: GitHubPrExecutionResponse["status"];
+  request: GitHubPrExecutionRequest;
+  payloadHashVerification: GitHubPrExecutionResponse["payloadHashVerification"];
+  idempotency: GitHubPrExecutionResponse["idempotency"];
+  blockingReasons: string[];
+  errorSummary: string | null;
+  executionRecord: LocalWriteExecutionRecord | null;
+}): GitHubPrExecutionResponse {
+  const execution = input.executionRecord;
+  return GitHubPrExecutionResponseSchema.parse({
+    status: input.status,
+    runId: input.request.runId,
+    previewId: input.request.previewId,
+    approvalRecordId: execution?.approvalRecordId ?? null,
+    executionRecordId: execution?.id ?? null,
+    idempotencyKey: input.request.idempotencyKey,
+    githubPrNumber: execution?.githubPrNumber ?? null,
+    githubPrUrl: execution?.githubPrUrl ?? null,
+    headBranch: execution?.headBranch ?? input.request.headBranch,
+    baseBranch: execution?.baseBranch ?? input.request.baseBranch,
+    blockingReasons: uniqueStrings(input.blockingReasons),
+    errorSummary: input.errorSummary,
+    payloadHashVerification: input.payloadHashVerification,
+    idempotency: input.idempotency,
+    approvalRecord: execution?.approvalRecord ?? null,
+    executionRecord: execution,
+    createdAt: execution?.startedAt ?? null,
+    completedAt: execution?.completedAt ?? null,
+  });
+}
+
+function failedIntegrationWriteResult(preview: IntegrationWritePreview, errors: string[]): IntegrationWriteResult {
+  return IntegrationWriteResultSchema.parse({
+    id: `write-result-${randomUUID()}`,
+    previewId: preview.id,
+    provider: preview.provider,
+    kind: preview.kind,
+    status: "failed",
+    target: preview.target,
+    externalUrl: null,
+    externalId: null,
+    warnings: preview.warnings,
+    errors,
+    executedAt: nowIso(),
+    redactedRequestSummary: { previewId: preview.id, runId: preview.runId, credentialSource: preview.credentialSource },
+    redactedResponseSummary: { errors },
+    githubPr: null,
+    linearComment: null,
+  });
+}
+
 function writeAvailability(input: {
   provider: WriteActionAvailability["provider"];
   kind: IntegrationWriteKind;
@@ -3466,7 +3894,7 @@ function writeAvailability(input: {
     reasons.push(...input.evidenceMissing);
   }
   if (reasons.length === 0 && input.policy.requireConfirmation) {
-    status = "gated";
+    status = "manual_enabled";
     reasons.push(`Manual confirmation phrase is required: ${input.policy.confirmationPhrase}.`);
   }
   if (reasons.length === 0) {

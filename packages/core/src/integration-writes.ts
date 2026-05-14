@@ -1,4 +1,6 @@
+import { execFile } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { promisify } from "node:util";
 import { AuthResolvedCredential } from "./auth-manager.js";
 import { GitHubClientError, GitHubRestClient } from "./github-client.js";
 import { inspectGitRepository } from "./git-inspector.js";
@@ -8,6 +10,7 @@ import { nowIso } from "./time.js";
 import {
   GitHubPrCreateResult,
   GitHubPrCreateResultSchema,
+  ChangedFile,
   IntegrationWriteExecutionRequest,
   IntegrationWritePolicy,
   IntegrationWritePolicySchema,
@@ -26,6 +29,8 @@ export const githubPrConfirmationPhrase = "CREATE GITHUB PR";
 export const linearCommentConfirmationPhrase = "POST LINEAR COMMENT";
 const previewTtlMs = 15 * 60 * 1000;
 const runMarkerPrefix = "<!-- symphonia-run-id:";
+const execFileAsync = promisify(execFile);
+const gitTimeoutMs = 30_000;
 
 export type GitHubPrPreviewOptions = {
   run: Run;
@@ -58,6 +63,30 @@ export type GitHubPrExecuteOptions = {
   githubClient: GitHubRestClient | null;
   existingResult?: IntegrationWriteResult | null;
   now?: string;
+};
+
+export type GitHubPrBranchPreparationOptions = {
+  workspacePath: string | null;
+  run: Run;
+  issue: Issue;
+  changedFiles: ChangedFile[];
+  owner: string | null;
+  repo: string | null;
+  remoteName: string;
+  baseBranch: string;
+  headBranch: string | null;
+  protectedBranches: string[];
+  allowPush: boolean;
+  idempotencyKey: string;
+};
+
+export type GitHubPrBranchPreparationResult = {
+  committed: boolean;
+  pushed: boolean;
+  commitSha: string | null;
+  remoteBranchExisted: boolean | null;
+  warnings: string[];
+  errors: string[];
 };
 
 export type LinearCommentExecuteOptions = {
@@ -149,8 +178,12 @@ export async function buildGitHubPrPreview(options: GitHubPrPreviewOptions): Pro
   if (!config.write.allowPush && branch && !existingPr) {
     warnings.push("Symphonia will not push branches. The branch must already exist on GitHub before PR creation.");
   }
-  if (git?.isDirty) warnings.push("Workspace has local uncommitted or untracked changes.");
-  if (diff.filesChanged === 0) warnings.push("No changed files were detected in review artifacts.");
+  if (git?.isDirty && !config.write.allowPush) {
+    blockers.push("Workspace has unpublished local changes and GitHub branch pushes are disabled.");
+  } else if (git?.isDirty) {
+    warnings.push("Workspace has local uncommitted or untracked changes.");
+  }
+  if (diff.filesChanged === 0) blockers.push("No changed files were detected in review artifacts.");
 
   let title = options.titleOverride ?? "";
   let body = options.bodyOverride ?? "";
@@ -284,6 +317,102 @@ export function buildLinearCommentPreview(options: LinearCommentPreviewOptions):
       warnings,
     },
   });
+}
+
+export async function prepareGitHubPrBranch(options: GitHubPrBranchPreparationOptions): Promise<GitHubPrBranchPreparationResult> {
+  const warnings: string[] = [];
+  const errors: string[] = [];
+
+  if (!options.workspacePath) errors.push("Run workspace path is unavailable.");
+  if (!options.owner || !options.repo) errors.push("GitHub owner/repo is not configured.");
+  if (!options.headBranch) errors.push("GitHub PR head branch is unavailable.");
+  if (options.headBranch && options.headBranch === options.baseBranch) {
+    errors.push(`Head branch ${options.headBranch} matches base branch ${options.baseBranch}.`);
+  }
+  if (options.headBranch && isProtectedBranch(options.headBranch, options.protectedBranches)) {
+    errors.push(`Head branch ${options.headBranch} is protected.`);
+  }
+  if (options.changedFiles.length === 0) errors.push("No changed files are available for the PR.");
+  if (errors.length > 0) {
+    return { committed: false, pushed: false, commitSha: null, remoteBranchExisted: null, warnings, errors };
+  }
+
+  const cwd = options.workspacePath!;
+  const inside = await git(cwd, ["rev-parse", "--is-inside-work-tree"]);
+  if (!inside.ok || inside.stdout.trim() !== "true") errors.push(inside.error ?? "Workspace is not a git repository.");
+
+  const branch = await gitValue(cwd, ["branch", "--show-current"]);
+  if (branch !== options.headBranch) {
+    errors.push(`Workspace branch ${branch || "unknown"} does not match requested PR head ${options.headBranch}.`);
+  }
+
+  const remoteUrl = await gitValue(cwd, ["remote", "get-url", options.remoteName]);
+  if (!remoteUrl) {
+    errors.push(`Git remote ${options.remoteName} is unavailable.`);
+  } else if (!remoteUrlMatchesRepository(remoteUrl, options.owner!, options.repo!)) {
+    errors.push(`Git remote ${options.remoteName} does not match ${options.owner}/${options.repo}.`);
+  }
+
+  const status = await git(cwd, ["status", "--porcelain=v1"]);
+  const statusPaths = status.ok ? parsePorcelainPaths(status.stdout) : [];
+  if (!status.ok) errors.push(status.error ?? "Unable to inspect workspace git status.");
+  const evidencePaths = new Set(options.changedFiles.flatMap((file) => [file.path, file.oldPath].filter(isString)));
+  const unexpected = statusPaths.filter((path) => !evidencePaths.has(path));
+  if (unexpected.length > 0) {
+    errors.push(`Workspace has changes not represented by approval evidence: ${unexpected.slice(0, 8).join(", ")}.`);
+  }
+  if (statusPaths.length > 0 && !options.allowPush) {
+    errors.push("Workspace has unpublished local changes and github.write.allow_push is false.");
+  }
+
+  if (errors.length > 0) {
+    return { committed: false, pushed: false, commitSha: null, remoteBranchExisted: null, warnings, errors };
+  }
+
+  let committed = false;
+  if (statusPaths.length > 0) {
+    const pathsToAdd = [...evidencePaths].filter((path) => path.trim().length > 0);
+    const add = await git(cwd, ["add", "--", ...pathsToAdd]);
+    if (!add.ok) {
+      return { committed: false, pushed: false, commitSha: null, remoteBranchExisted: null, warnings, errors: [add.error ?? "git add failed."] };
+    }
+    const commit = await git(cwd, [
+      "-c",
+      "user.name=Symphonia",
+      "-c",
+      "user.email=symphonia@local",
+      "commit",
+      "-m",
+      `${options.issue.identifier}: Symphonia run ${options.run.id.slice(0, 8)}`,
+      "-m",
+      `Run: ${options.run.id}\nIssue: ${options.issue.identifier}\nIdempotency: ${options.idempotencyKey}`,
+    ]);
+    if (!commit.ok) {
+      return { committed: false, pushed: false, commitSha: null, remoteBranchExisted: null, warnings, errors: [commit.error ?? "git commit failed."] };
+    }
+    committed = true;
+  }
+
+  const commitSha = await gitValue(cwd, ["rev-parse", "HEAD"]);
+  const remoteBranch = await git(cwd, ["ls-remote", "--heads", options.remoteName, options.headBranch!]);
+  const remoteBranchExisted = remoteBranch.ok ? remoteBranch.stdout.trim().length > 0 : null;
+  if (!remoteBranch.ok) warnings.push(remoteBranch.error ?? "Unable to verify whether the remote branch exists.");
+
+  if (!options.allowPush && (remoteBranchExisted === false || remoteBranchExisted === null)) {
+    const reason = "Remote branch could not be verified and github.write.allow_push is false.";
+    return { committed, pushed: false, commitSha, remoteBranchExisted, warnings, errors: [reason] };
+  }
+
+  let pushed = false;
+  if (options.allowPush && (committed || remoteBranchExisted === false || remoteBranchExisted === null)) {
+    const push = await git(cwd, ["push", options.remoteName, `HEAD:refs/heads/${options.headBranch}`]);
+    if (!push.ok) {
+      return { committed, pushed: false, commitSha, remoteBranchExisted, warnings, errors: [push.error ?? "git push failed."] };
+    }
+    pushed = true;
+  }
+
+  return { committed, pushed, commitSha, remoteBranchExisted, warnings, errors: [] };
 }
 
 export async function executeGitHubPrCreate(options: GitHubPrExecuteOptions): Promise<IntegrationWriteResult> {
@@ -551,6 +680,71 @@ function isProtectedBranch(branch: string, protectedBranches: string[]): boolean
 
 function truncate(value: string, max: number): string {
   return value.length <= max ? value : `${value.slice(0, Math.max(0, max - 15))}\n... truncated ...`;
+}
+
+async function git(cwd: string, args: string[]): Promise<{ ok: boolean; stdout: string; stderr: string; error: string | null }> {
+  try {
+    const { stdout, stderr } = await execFileAsync("git", args, {
+      cwd,
+      timeout: gitTimeoutMs,
+      maxBuffer: 1_000_000,
+    });
+    return { ok: true, stdout, stderr, error: null };
+  } catch (error) {
+    const failure = error as { stdout?: string; stderr?: string; message?: string };
+    return {
+      ok: false,
+      stdout: failure.stdout ?? "",
+      stderr: failure.stderr ?? "",
+      error: String(failure.stderr || failure.message || "git command failed").trim(),
+    };
+  }
+}
+
+async function gitValue(cwd: string, args: string[]): Promise<string | null> {
+  const result = await git(cwd, args);
+  if (!result.ok) return null;
+  const value = result.stdout.trim();
+  return value.length > 0 ? value : null;
+}
+
+function parsePorcelainPaths(output: string): string[] {
+  return output
+    .split(/\r?\n/)
+    .map((line) => line.trimEnd())
+    .filter(Boolean)
+    .flatMap((line) => {
+      const rawPath = line.slice(3);
+      if (rawPath.includes(" -> ")) {
+        return rawPath.split(" -> ").map(unquotePath);
+      }
+      return [unquotePath(rawPath)];
+    });
+}
+
+function unquotePath(path: string): string {
+  const trimmed = path.trim();
+  if (!trimmed.startsWith('"')) return trimmed;
+  try {
+    return JSON.parse(trimmed) as string;
+  } catch {
+    return trimmed.replace(/^"|"$/g, "");
+  }
+}
+
+function remoteUrlMatchesRepository(remoteUrl: string, owner: string, repo: string): boolean {
+  const normalized = remoteUrl.trim().replace(/\\/g, "/").replace(/\.git$/i, "").toLowerCase();
+  const slug = `${owner}/${repo}`.toLowerCase();
+  return (
+    normalized.endsWith(slug) ||
+    normalized.includes(`github.com/${slug}`) ||
+    normalized.includes(`github.com:${slug}`) ||
+    normalized.includes(`/${slug}`)
+  );
+}
+
+function isString(value: string | null): value is string {
+  return typeof value === "string" && value.length > 0;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

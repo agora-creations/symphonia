@@ -21,6 +21,9 @@ import {
   EventsResponseSchema,
   GitHubHealth,
   GitHubHealthResponseSchema,
+  GitHubPrExecutionRequest,
+  GitHubPrExecutionResponse,
+  GitHubPrExecutionResultResponseSchema,
   GitHubStatus,
   GitHubStatusResponseSchema,
   HarnessApplyRequest,
@@ -273,6 +276,15 @@ export async function getWritesStatus(): Promise<WritesStatus> {
 export async function getRunWriteActions(runId: string): Promise<IntegrationWriteActionsResponse> {
   const response = await request(`/runs/${runId}/write-actions`);
   return IntegrationWriteActionsResponseSchema.parse(response);
+}
+
+export async function createGithubDraftPr(runId: string, input: GitHubPrExecutionRequest): Promise<GitHubPrExecutionResponse> {
+  const response = await request(`/runs/${runId}/github/pr/create`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return GitHubPrExecutionResultResponseSchema.parse(response).result;
 }
 
 export async function getWorkflowStatus(): Promise<WorkflowStatus> {

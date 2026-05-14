@@ -14,6 +14,8 @@ import {
   IntegrationWriteResultSchema,
   Issue,
   IssueSchema,
+  LocalWriteExecutionRecord,
+  LocalWriteExecutionRecordSchema,
   ReviewArtifactSnapshot,
   ReviewArtifactSnapshotSchema,
   Run,
@@ -731,7 +733,7 @@ export class EventStore {
       });
   }
 
-  listIntegrationWriteActionsForRun(runId: string): Array<IntegrationWritePreview | IntegrationWriteResult> {
+  listIntegrationWriteActionsForRun(runId: string): Array<IntegrationWritePreview | IntegrationWriteResult | LocalWriteExecutionRecord> {
     const rows = this.db
       .prepare(
         `
@@ -762,6 +764,88 @@ export class EventStore {
     if (!row) return null;
     const parsed = parseWriteActionPayload(row.payload_json);
     return parsed && "previewId" in parsed && "executedAt" in parsed ? IntegrationWriteResultSchema.parse(parsed) : null;
+  }
+
+  saveLocalWriteExecutionRecord(record: LocalWriteExecutionRecord): void {
+    const parsed = LocalWriteExecutionRecordSchema.parse(record);
+    const payloadJson = boundedWriteActionPayload(parsed);
+    this.db
+      .prepare(
+        `
+          insert into integration_write_actions (
+            action_id,
+            preview_id,
+            provider,
+            kind,
+            run_id,
+            issue_id,
+            status,
+            external_id,
+            external_url,
+            idempotency_key,
+            created_at,
+            executed_at,
+            payload_json
+          )
+          values (
+            @actionId,
+            @previewId,
+            @provider,
+            @kind,
+            @runId,
+            @issueId,
+            @status,
+            @externalId,
+            @externalUrl,
+            @idempotencyKey,
+            @createdAt,
+            @executedAt,
+            @payloadJson
+          )
+          on conflict(action_id) do update set
+            status = excluded.status,
+            external_id = excluded.external_id,
+            external_url = excluded.external_url,
+            idempotency_key = excluded.idempotency_key,
+            executed_at = excluded.executed_at,
+            payload_json = excluded.payload_json
+        `,
+      )
+      .run({
+        actionId: parsed.id,
+        previewId: parsed.previewId,
+        provider: parsed.targetSystem,
+        kind: parsed.kind,
+        runId: parsed.runId,
+        issueId: parsed.issueId,
+        status: parsed.status,
+        externalId: parsed.externalWriteId,
+        externalUrl: parsed.githubPrUrl,
+        idempotencyKey: parsed.idempotencyKey,
+        createdAt: parsed.startedAt,
+        executedAt: parsed.completedAt,
+        payloadJson,
+      });
+  }
+
+  findLocalWriteExecutionByIdempotencyKey(idempotencyKey: string): LocalWriteExecutionRecord | null {
+    const row = this.db
+      .prepare(
+        `
+          select payload_json
+          from integration_write_actions
+          where idempotency_key = ?
+          order by coalesce(executed_at, created_at) desc
+          limit 1
+        `,
+      )
+      .get(idempotencyKey) as WriteActionRow | undefined;
+
+    if (!row) return null;
+    const parsed = parseWriteActionPayload(row.payload_json);
+    return parsed && "recordType" in parsed && parsed.recordType === "local_write_execution"
+      ? LocalWriteExecutionRecordSchema.parse(parsed)
+      : null;
   }
 
   close(): void {
@@ -912,8 +996,10 @@ function boundedWriteActionPayload(value: unknown): string {
   return payloadJson;
 }
 
-function parseWriteActionPayload(payloadJson: string): IntegrationWritePreview | IntegrationWriteResult | null {
+function parseWriteActionPayload(payloadJson: string): IntegrationWritePreview | IntegrationWriteResult | LocalWriteExecutionRecord | null {
   const value = JSON.parse(payloadJson) as unknown;
+  const localExecution = LocalWriteExecutionRecordSchema.safeParse(value);
+  if (localExecution.success) return localExecution.data;
   const result = IntegrationWriteResultSchema.safeParse(value);
   if (result.success) return result.data;
   const preview = IntegrationWritePreviewSchema.safeParse(value);
