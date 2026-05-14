@@ -388,6 +388,150 @@ export const GitHubConfigSchema = z.object({
 });
 export type GitHubConfig = z.infer<typeof GitHubConfigSchema>;
 
+export const AuthProviderIdSchema = z.enum(["github", "linear"]);
+export type AuthProviderId = z.infer<typeof AuthProviderIdSchema>;
+
+export const AuthMethodSchema = z.enum([
+  "oauth_device",
+  "oauth_loopback",
+  "oauth_pkce",
+  "manual_token",
+  "env_token",
+  "unavailable",
+]);
+export type AuthMethod = z.infer<typeof AuthMethodSchema>;
+
+export const AuthConnectionStatusSchema = z.enum([
+  "disconnected",
+  "connecting",
+  "pending_user",
+  "connected",
+  "refreshing",
+  "expired",
+  "revoked",
+  "failed",
+  "unavailable",
+]);
+export type AuthConnectionStatus = z.infer<typeof AuthConnectionStatusSchema>;
+
+export const TokenStorageKindSchema = z.enum([
+  "os_keychain",
+  "electron_safe_storage",
+  "encrypted_local_file",
+  "env",
+  "memory",
+  "none",
+]);
+export type TokenStorageKind = z.infer<typeof TokenStorageKindSchema>;
+
+export const AuthCredentialSourceSchema = z.enum(["connected", "env", "manual", "unavailable"]);
+export type AuthCredentialSource = z.infer<typeof AuthCredentialSourceSchema>;
+
+export const IntegrationAuthConnectionSchema = z.object({
+  id: z.string().min(1),
+  provider: AuthProviderIdSchema,
+  method: AuthMethodSchema,
+  status: AuthConnectionStatusSchema,
+  accountLabel: z.string().min(1).nullable(),
+  accountId: z.string().min(1).nullable(),
+  workspaceLabel: z.string().min(1).nullable(),
+  workspaceId: z.string().min(1).nullable(),
+  scopes: z.array(z.string().min(1)),
+  permissions: z.array(z.string().min(1)),
+  tokenStorage: TokenStorageKindSchema,
+  tokenExpiresAt: isoDateTime.nullable(),
+  refreshTokenExpiresAt: isoDateTime.nullable(),
+  connectedAt: isoDateTime.nullable(),
+  lastValidatedAt: isoDateTime.nullable(),
+  lastError: z.string().min(1).nullable(),
+  redactedSource: z.string().min(1),
+  credentialSource: AuthCredentialSourceSchema,
+  refreshSupported: z.boolean(),
+  envTokenPresent: z.boolean().default(false),
+  clientIdConfigured: z.boolean().default(false),
+  clientSecretConfigured: z.boolean().default(false),
+});
+export type IntegrationAuthConnection = z.infer<typeof IntegrationAuthConnectionSchema>;
+
+export const AuthRedirectModeSchema = z.enum(["device", "loopback", "manual", "none"]);
+export type AuthRedirectMode = z.infer<typeof AuthRedirectModeSchema>;
+
+export const AuthStartRequestSchema = z.object({
+  provider: AuthProviderIdSchema,
+  method: AuthMethodSchema,
+  requestedScopes: z.array(z.string().min(1)).default([]),
+  redirectMode: AuthRedirectModeSchema.default("none"),
+  repositoryPath: z.string().min(1).nullable().default(null),
+  metadata: z.record(z.string(), z.unknown()).default({}),
+});
+export type AuthStartRequest = z.infer<typeof AuthStartRequestSchema>;
+
+export const AuthStartResultSchema = z.object({
+  authSessionId: z.string().min(1),
+  provider: AuthProviderIdSchema,
+  method: AuthMethodSchema,
+  status: AuthConnectionStatusSchema,
+  authorizationUrl: z.string().url().nullable(),
+  verificationUri: z.string().url().nullable(),
+  userCode: z.string().min(1).nullable(),
+  expiresAt: isoDateTime.nullable(),
+  pollIntervalMs: z.number().int().positive().nullable(),
+  instructions: z.array(z.string().min(1)),
+});
+export type AuthStartResult = z.infer<typeof AuthStartResultSchema>;
+
+export const AuthPollResultSchema = z.object({
+  authSessionId: z.string().min(1),
+  status: AuthConnectionStatusSchema,
+  connection: IntegrationAuthConnectionSchema.nullable(),
+  error: z.string().min(1).nullable(),
+});
+export type AuthPollResult = z.infer<typeof AuthPollResultSchema>;
+
+export const AuthCallbackResultSchema = z.object({
+  provider: AuthProviderIdSchema,
+  status: AuthConnectionStatusSchema,
+  connection: IntegrationAuthConnectionSchema.nullable(),
+  error: z.string().min(1).nullable(),
+});
+export type AuthCallbackResult = z.infer<typeof AuthCallbackResultSchema>;
+
+export const AuthDisconnectRequestSchema = z.object({
+  provider: AuthProviderIdSchema,
+  deleteStoredToken: z.boolean().default(true),
+  revokeRemoteTokenIfSupported: z.boolean().default(false),
+});
+export type AuthDisconnectRequest = z.infer<typeof AuthDisconnectRequestSchema>;
+
+export const AuthValidationResultSchema = z.object({
+  provider: AuthProviderIdSchema,
+  status: AuthConnectionStatusSchema,
+  account: z
+    .object({
+      id: z.string().min(1).nullable(),
+      label: z.string().min(1).nullable(),
+      workspaceId: z.string().min(1).nullable(),
+      workspaceLabel: z.string().min(1).nullable(),
+    })
+    .nullable(),
+  scopes: z.array(z.string().min(1)),
+  permissions: z.array(z.string().min(1)),
+  expiresAt: isoDateTime.nullable(),
+  error: z.string().min(1).nullable(),
+  credentialSource: AuthCredentialSourceSchema,
+  redactedSource: z.string().min(1),
+});
+export type AuthValidationResult = z.infer<typeof AuthValidationResultSchema>;
+
+export const AuthStatusSchema = z.object({
+  providers: z.array(IntegrationAuthConnectionSchema),
+  storage: z.object({
+    kind: TokenStorageKindSchema,
+    available: z.boolean(),
+  }),
+});
+export type AuthStatus = z.infer<typeof AuthStatusSchema>;
+
 export const WorkflowConfigSchema = z.object({
   provider: ProviderIdSchema,
   tracker: TrackerConfigSchema,
@@ -698,6 +842,62 @@ export const ProviderStderrEventSchema = BaseAgentEventSchema.extend({
   type: z.literal("provider.stderr"),
   provider: ProviderIdSchema,
   message: z.string().min(1),
+});
+
+export const AuthStartedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("auth.started"),
+  provider: AuthProviderIdSchema,
+  method: AuthMethodSchema,
+  authSessionId: z.string().min(1),
+});
+
+export const AuthPendingUserEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("auth.pending_user"),
+  provider: AuthProviderIdSchema,
+  method: AuthMethodSchema,
+  authSessionId: z.string().min(1),
+  verificationUri: z.string().url().nullable(),
+});
+
+export const AuthConnectedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("auth.connected"),
+  connection: IntegrationAuthConnectionSchema,
+});
+
+export const AuthRefreshedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("auth.refreshed"),
+  connection: IntegrationAuthConnectionSchema,
+});
+
+export const AuthFailedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("auth.failed"),
+  provider: AuthProviderIdSchema,
+  method: AuthMethodSchema,
+  authSessionId: z.string().min(1).nullable(),
+  error: z.string().min(1),
+});
+
+export const AuthDisconnectedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("auth.disconnected"),
+  provider: AuthProviderIdSchema,
+  deleteStoredToken: z.boolean(),
+});
+
+export const AuthRevokedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("auth.revoked"),
+  provider: AuthProviderIdSchema,
+});
+
+export const AuthValidationSucceededEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("auth.validation_succeeded"),
+  result: AuthValidationResultSchema,
+});
+
+export const AuthValidationFailedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("auth.validation_failed"),
+  provider: AuthProviderIdSchema,
+  error: z.string().min(1),
+  credentialSource: AuthCredentialSourceSchema,
 });
 
 export const GitRepositoryStateSchema = z.object({
@@ -1437,6 +1637,15 @@ export const AgentEventSchema = z.discriminatedUnion("type", [
   PromptRenderedEventSchema,
   ProviderStartedEventSchema,
   ProviderStderrEventSchema,
+  AuthStartedEventSchema,
+  AuthPendingUserEventSchema,
+  AuthConnectedEventSchema,
+  AuthRefreshedEventSchema,
+  AuthFailedEventSchema,
+  AuthDisconnectedEventSchema,
+  AuthRevokedEventSchema,
+  AuthValidationSucceededEventSchema,
+  AuthValidationFailedEventSchema,
   GitHubHealthCheckedEventSchema,
   GitHubRepoDetectedEventSchema,
   GitStatusCheckedEventSchema,
@@ -1568,6 +1777,41 @@ export const GitHubHealthResponseSchema = z.object({
   github: GitHubHealthSchema,
 });
 export type GitHubHealthResponse = z.infer<typeof GitHubHealthResponseSchema>;
+
+export const AuthStatusResponseSchema = z.object({
+  auth: AuthStatusSchema,
+});
+export type AuthStatusResponse = z.infer<typeof AuthStatusResponseSchema>;
+
+export const AuthConnectionsResponseSchema = z.object({
+  connections: z.array(IntegrationAuthConnectionSchema),
+});
+export type AuthConnectionsResponse = z.infer<typeof AuthConnectionsResponseSchema>;
+
+export const AuthConnectionResponseSchema = z.object({
+  connection: IntegrationAuthConnectionSchema,
+});
+export type AuthConnectionResponse = z.infer<typeof AuthConnectionResponseSchema>;
+
+export const AuthStartResponseSchema = z.object({
+  result: AuthStartResultSchema,
+});
+export type AuthStartResponse = z.infer<typeof AuthStartResponseSchema>;
+
+export const AuthPollResponseSchema = z.object({
+  result: AuthPollResultSchema,
+});
+export type AuthPollResponse = z.infer<typeof AuthPollResponseSchema>;
+
+export const AuthCallbackResponseSchema = z.object({
+  result: AuthCallbackResultSchema,
+});
+export type AuthCallbackResponse = z.infer<typeof AuthCallbackResponseSchema>;
+
+export const AuthValidationResponseSchema = z.object({
+  result: AuthValidationResultSchema,
+});
+export type AuthValidationResponse = z.infer<typeof AuthValidationResponseSchema>;
 
 export const ReviewArtifactResponseSchema = z.object({
   reviewArtifacts: ReviewArtifactSnapshotSchema.nullable(),

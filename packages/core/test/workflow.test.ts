@@ -264,10 +264,11 @@ describe("workflow config resolution", () => {
     expect(JSON.stringify(summary)).not.toContain("apiKey");
   });
 
-  it("requires linear api key and a practical scope", () => {
-    expect(() => resolveWorkflowConfig(definition({ tracker: { kind: "linear", project_slug: "demo" } }))).toThrow(
-      "tracker.api_key is required",
-    );
+  it("allows connected-auth linear config without api key but still requires a practical scope", () => {
+    const config = resolveWorkflowConfig(definition({ tracker: { kind: "linear", project_slug: "demo" } }));
+    expect(config.tracker.apiKey).toBeNull();
+    expect(config.tracker.projectSlug).toBe("demo");
+
     expect(() => resolveWorkflowConfig(definition({ tracker: { kind: "linear", api_key: "key" } }))).toThrow(
       "requires team_key, team_id, project_slug, project_id, or allow_workspace_wide",
     );

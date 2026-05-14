@@ -6,6 +6,23 @@ Add real user-facing authentication paths for GitHub and Linear so users can con
 
 This milestone must happen before the next larger product milestone.
 
+## Implementation Status
+
+Started on branch `milestone-10-real-auth-plan`.
+
+Implemented:
+
+- Shared auth domain schemas and secret-free auth event variants.
+- Local token storage abstraction with test memory storage and encrypted local-file storage.
+- Daemon `AuthManager` with connected/env/manual source priority.
+- GitHub device-flow start/poll/validate/refresh/disconnect paths.
+- Linear PKCE authorization URL, loopback callback, token exchange, validate/refresh/disconnect paths.
+- Manual token mode.
+- Daemon auth APIs.
+- Settings -> Integrations cards.
+- First-run optional integration validation/connect entry.
+- Existing GitHub and Linear runtime paths can resolve connected tokens before env/config fallback.
+
 ## End State
 
 A user can:

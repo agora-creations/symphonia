@@ -3,6 +3,17 @@ import {
   ApprovalResponseRequest,
   ApprovalState,
   ApprovalsResponseSchema,
+  AuthCallbackResponseSchema,
+  AuthConnectionResponseSchema,
+  AuthConnectionsResponseSchema,
+  AuthDisconnectRequest,
+  AuthPollResponseSchema,
+  AuthProviderId,
+  AuthStartRequest,
+  AuthStartResponseSchema,
+  AuthStatus,
+  AuthStatusResponseSchema,
+  AuthValidationResponseSchema,
   DaemonStatus,
   DaemonStatusResponseSchema,
   EventsResponseSchema,
@@ -104,6 +115,63 @@ export async function getGithubStatus(): Promise<GitHubStatus> {
 export async function getGithubHealth(): Promise<GitHubHealth> {
   const response = await request("/github/health");
   return GitHubHealthResponseSchema.parse(response).github;
+}
+
+export async function getAuthStatus(): Promise<AuthStatus> {
+  const response = await request("/auth/status");
+  return AuthStatusResponseSchema.parse(response).auth;
+}
+
+export async function getAuthConnections() {
+  const response = await request("/auth/connections");
+  return AuthConnectionsResponseSchema.parse(response).connections;
+}
+
+export async function getAuthConnection(provider: AuthProviderId) {
+  const response = await request(`/auth/${provider}`);
+  return AuthConnectionResponseSchema.parse(response).connection;
+}
+
+export async function startAuth(provider: AuthProviderId, input: Omit<AuthStartRequest, "provider">) {
+  const response = await request(`/auth/${provider}/start`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...input, provider }),
+  });
+  return AuthStartResponseSchema.parse(response).result;
+}
+
+export async function pollAuth(provider: AuthProviderId, authSessionId: string) {
+  const response = await request(`/auth/${provider}/poll/${encodeURIComponent(authSessionId)}`);
+  return AuthPollResponseSchema.parse(response).result;
+}
+
+export async function completeAuthCallback(provider: AuthProviderId, input: unknown) {
+  const response = await request(`/auth/${provider}/callback`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return AuthCallbackResponseSchema.parse(response).result;
+}
+
+export async function refreshAuth(provider: AuthProviderId) {
+  const response = await request(`/auth/${provider}/refresh`, { method: "POST" });
+  return AuthValidationResponseSchema.parse(response).result;
+}
+
+export async function validateAuth(provider: AuthProviderId) {
+  const response = await request(`/auth/${provider}/validate`, { method: "POST" });
+  return AuthValidationResponseSchema.parse(response).result;
+}
+
+export async function disconnectAuth(provider: AuthProviderId, input: Omit<AuthDisconnectRequest, "provider">) {
+  const response = await request(`/auth/${provider}/disconnect`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ ...input, provider }),
+  });
+  return AuthConnectionResponseSchema.parse(response).connection;
 }
 
 export async function getRuns(): Promise<Run[]> {

@@ -46,6 +46,14 @@ type HarnessApplyRow = {
 
 const maxHarnessPayloadBytes = 2_000_000;
 
+function parseRunPayload(payloadJson: string): Run | null {
+  try {
+    return RunSchema.parse(JSON.parse(payloadJson));
+  } catch {
+    return null;
+  }
+}
+
 export class EventStore {
   private readonly db: Database.Database;
   private readonly databasePath: string;
@@ -152,7 +160,7 @@ export class EventStore {
       )
       .get(runId) as StoredRow | undefined;
 
-    return row ? RunSchema.parse(JSON.parse(row.payload_json)) : null;
+    return row ? parseRunPayload(row.payload_json) : null;
   }
 
   listRuns(): Run[] {
@@ -166,7 +174,10 @@ export class EventStore {
       )
       .all() as StoredRow[];
 
-    return rows.map((row) => RunSchema.parse(JSON.parse(row.payload_json)));
+    return rows.flatMap((row) => {
+      const parsed = parseRunPayload(row.payload_json);
+      return parsed ? [parsed] : [];
+    });
   }
 
   getEventsForRun(runId: string): AgentEvent[] {

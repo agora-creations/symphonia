@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EventStore } from "@symphonia/db";
-import { GitHubFetch, LinearFetch } from "@symphonia/core";
+import { AuthFetch, GitHubFetch, LinearFetch } from "@symphonia/core";
 import { AgentEvent, ApprovalState, WorkflowStatus } from "@symphonia/types";
 import { createDaemonServer, SymphoniaDaemon } from "../src/daemon";
 
@@ -14,6 +14,7 @@ const originalEnv = { ...process.env };
 
 beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), "symphonia-daemon-"));
+  process.env.SYMPHONIA_AUTH_STORE_PATH = join(directory, "auth-tokens.enc.json");
   workflowPath = join(directory, "WORKFLOW.md");
   writeWorkflow();
 
@@ -104,6 +105,133 @@ describe("daemon API", () => {
     expect(JSON.stringify(status)).not.toContain("github-secret");
   });
 
+  it("serves auth status, GitHub device flow, Linear PKCE callback, validation, and disconnect without leaking tokens", async () => {
+    let githubPolls = 0;
+    const created = createDaemonServer(new EventStore(join(directory, "auth.sqlite")), {
+      workflowPath,
+      cwd: directory,
+      authFetch: fakeAuthFetch(() => {
+        githubPolls += 1;
+        return githubPolls;
+      }),
+    });
+    daemon.close();
+    daemon = created.daemon;
+
+    const status = await requestJson<{ auth: { providers: Array<{ provider: string; status: string }> } }>("GET", "/auth/status");
+    expect(status.auth.providers.map((provider) => provider.provider)).toEqual(["github", "linear"]);
+
+    const githubStart = await requestJson<{ result: { authSessionId: string; userCode: string } }>(
+      "POST",
+      "/auth/github/start",
+      { method: "oauth_device", requestedScopes: ["repo"], redirectMode: "device", metadata: { clientId: "github-client" } },
+    );
+    expect(githubStart.result.userCode).toBe("ABCD-1234");
+    expect((await requestJson<{ result: { status: string } }>("GET", `/auth/github/poll/${githubStart.result.authSessionId}`)).result.status).toBe(
+      "pending_user",
+    );
+    const githubDone = await requestJson<{ result: { status: string; connection: { accountLabel: string; redactedSource: string } } }>(
+      "GET",
+      `/auth/github/poll/${githubStart.result.authSessionId}`,
+    );
+    expect(githubDone.result.status).toBe("connected");
+    expect(githubDone.result.connection.accountLabel).toBe("octocat");
+    expect(JSON.stringify(githubDone)).not.toContain("ghu_daemon_secret");
+
+    const linearStart = await requestJson<{ result: { authSessionId: string; authorizationUrl: string } }>(
+      "POST",
+      "/auth/linear/start",
+      { method: "oauth_pkce", requestedScopes: ["read"], redirectMode: "loopback", metadata: { clientId: "linear-client" } },
+    );
+    const state = new URL(linearStart.result.authorizationUrl).searchParams.get("state");
+    const callback = await requestRaw("GET", `/auth/linear/callback?code=linear-code&state=${encodeURIComponent(state ?? "")}`);
+    expect(callback.statusCode, callback.body).toBe(200);
+    expect(callback.body).toContain("connected");
+
+    const linear = await requestJson<{ connection: { accountLabel: string; redactedSource: string } }>("GET", "/auth/linear");
+    expect(linear.connection.accountLabel).toBe("Linear User");
+    expect(JSON.stringify(linear)).not.toContain("lin_daemon_secret");
+
+    const validation = await requestJson<{ result: { status: string } }>("POST", "/auth/linear/validate");
+    expect(validation.result.status).toBe("connected");
+
+    const disconnected = await requestJson<{ connection: { status: string; credentialSource: string } }>("POST", "/auth/github/disconnect", {
+      deleteStoredToken: true,
+      revokeRemoteTokenIfSupported: false,
+    });
+    expect(["disconnected", "connected"]).toContain(disconnected.connection.status);
+    expect(disconnected.connection.credentialSource).not.toBe("connected");
+  });
+
+  it("uses connected GitHub credentials for GitHub health when workflow token is absent", async () => {
+    let authorization = "";
+    const created = createDaemonServer(new EventStore(join(directory, "github-auth.sqlite")), {
+      workflowPath,
+      cwd: directory,
+      authFetch: fakeAuthFetch(() => 2),
+      githubFetch: async (input, init) => {
+        authorization = authorizationHeader(init);
+        if (input.includes("/repos/agora-creations/symphonia")) {
+          return jsonResponse({
+            id: 1,
+            name: "symphonia",
+            full_name: "agora-creations/symphonia",
+            default_branch: "main",
+          });
+        }
+        return jsonResponse({ message: `Unexpected GitHub URL: ${input}` }, 404);
+      },
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeWorkflow({ githubEnabled: true });
+
+    const started = await requestJson<{ result: { authSessionId: string } }>("POST", "/auth/github/start", {
+      method: "oauth_device",
+      requestedScopes: ["repo"],
+      redirectMode: "device",
+      metadata: { clientId: "github-client" },
+    });
+    const polled = await requestJson<{ result: { status: string } }>("GET", `/auth/github/poll/${started.result.authSessionId}`);
+    expect(polled.result.status).toBe("connected");
+
+    const health = await daemon.getGithubHealth();
+
+    expect(health).toMatchObject({ enabled: true, healthy: true, error: null });
+    expect(authorization).toBe("Bearer ghu_daemon_secret");
+    expect(JSON.stringify(health)).not.toContain("ghu_daemon_secret");
+  });
+
+  it("uses connected Linear credentials when workflow api_key is omitted", async () => {
+    let authorization = "";
+    const created = createDaemonServer(new EventStore(join(directory, "linear-auth.sqlite")), {
+      workflowPath,
+      cwd: directory,
+      authFetch: fakeAuthFetch(() => 2),
+      linearFetch: async (input, init) => {
+        authorization = authorizationHeader(init);
+        return fakeLinearFetch({ state: "Todo" })(input, init);
+      },
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeLinearWorkflow({ apiKey: null });
+
+    const manual = await requestJson<{ result: { status: string } }>("POST", "/auth/linear/start", {
+      method: "manual_token",
+      requestedScopes: ["read"],
+      redirectMode: "manual",
+      metadata: { token: "Bearer lin_connected_secret" },
+    });
+    expect(manual.result.status).toBe("connected");
+
+    const issues = await daemon.refreshIssueCache();
+
+    expect(issues[0]?.identifier).toBe("ENG-101");
+    expect(authorization).toBe("Bearer lin_connected_secret");
+    expect(JSON.stringify(issues)).not.toContain("lin_connected_secret");
+  });
+
   it("serves harness scan, preview, dry-run apply, confirmed apply, and stale preview errors", async () => {
     writeFileSync(join(directory, "package.json"), JSON.stringify({ scripts: { test: "vitest run", lint: "tsc --noEmit", build: "tsc" } }));
     writeFileSync(join(directory, "README.md"), "# Harness target\n");
@@ -165,12 +293,12 @@ describe("daemon API", () => {
   });
 
   it("reports linear setup errors without exposing secrets", () => {
-    writeLinearWorkflow({ apiKey: "$MISSING_LINEAR_API_KEY", teamKey: "ENG" });
+    writeLinearWorkflow({ apiKey: "$MISSING_LINEAR_API_KEY", teamKey: "" });
 
     const status = daemon.getTrackerStatus();
 
     expect(status.status).toBe("invalid_config");
-    expect(status.error).toContain("tracker.api_key is required");
+    expect(status.error).toContain("requires team_key, team_id, project_slug, project_id, or allow_workspace_wide");
     expect(JSON.stringify(status)).not.toContain("MISSING_LINEAR_API_KEY");
   });
 
@@ -627,6 +755,7 @@ function writeWorkflow(
     cursorCommand?: string;
     provider?: "codex" | "claude" | "cursor";
     githubToken?: string;
+    githubEnabled?: boolean;
     cleanupEnabled?: boolean;
     cleanupDryRun?: boolean;
     cleanupAfterMs?: number;
@@ -662,11 +791,10 @@ workspace:
     protect_active: true
     protect_recent_runs_ms: 0
     protect_dirty_git: true
-${options.githubToken ? `github:
+${options.githubToken || options.githubEnabled ? `github:
   enabled: true
   endpoint: "https://api.github.test"
-  token: ${JSON.stringify(options.githubToken)}
-  owner: "agora-creations"
+${options.githubToken ? `  token: ${JSON.stringify(options.githubToken)}\n` : ""}  owner: "agora-creations"
   repo: "symphonia"
   default_base_branch: "main"
   remote_name: "origin"
@@ -723,7 +851,7 @@ Title:
   );
 }
 
-function writeLinearWorkflow(options: { codexCommand?: string; apiKey?: string; teamKey?: string } = {}): void {
+function writeLinearWorkflow(options: { codexCommand?: string; apiKey?: string | null; teamKey?: string } = {}): void {
   writeFileSync(
     workflowPath,
     `---
@@ -731,8 +859,7 @@ provider: codex
 tracker:
   kind: linear
   endpoint: "https://api.linear.app/graphql"
-  api_key: ${JSON.stringify(options.apiKey ?? "linear-secret")}
-  team_key: ${JSON.stringify(options.teamKey ?? "ENG")}
+${options.apiKey === null ? "" : `  api_key: ${JSON.stringify(options.apiKey ?? "linear-secret")}\n`}  team_key: ${JSON.stringify(options.teamKey ?? "ENG")}
   active_states:
     - "Todo"
     - "In Progress"
@@ -849,6 +976,48 @@ function fakeGitHubFetch(): GitHubFetch {
       });
     }
     return jsonResponse({ message: `Unexpected GitHub URL: ${input}` }, 404);
+  };
+}
+
+function authorizationHeader(init?: RequestInit): string {
+  const headers = init?.headers;
+  if (headers instanceof Headers) return headers.get("Authorization") ?? "";
+  if (Array.isArray(headers)) {
+    return headers.find(([key]) => key.toLowerCase() === "authorization")?.[1] ?? "";
+  }
+  if (headers && typeof headers === "object") {
+    const record = headers as Record<string, string>;
+    return record.Authorization ?? record.authorization ?? "";
+  }
+  return "";
+}
+
+function fakeAuthFetch(nextGithubPoll: () => number): AuthFetch {
+  return async (input) => {
+    if (input.includes("/login/device/code")) {
+      return jsonResponse({
+        device_code: "device-code",
+        user_code: "ABCD-1234",
+        verification_uri: "https://github.com/login/device",
+        expires_in: 900,
+        interval: 5,
+      });
+    }
+    if (input.includes("/login/oauth/access_token")) {
+      return nextGithubPoll() === 1
+        ? jsonResponse({ error: "authorization_pending" })
+        : jsonResponse({ access_token: "ghu_daemon_secret", refresh_token: "ghr_refresh", expires_in: 28800, scope: "repo" });
+    }
+    if (input.includes("api.github.com/user")) {
+      return jsonResponse({ id: 1, login: "octocat" });
+    }
+    if (input.includes("/oauth/token")) {
+      return jsonResponse({ access_token: "lin_daemon_secret", refresh_token: "lin_refresh", expires_in: 86399, scope: "read" });
+    }
+    if (input.includes("/graphql")) {
+      return jsonResponse({ data: { viewer: { id: "linear-user", name: "Linear User", email: "linear@example.com" } } });
+    }
+    return jsonResponse({ message: `Unexpected auth URL: ${input}` }, 404);
   };
 }
 

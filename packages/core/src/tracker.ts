@@ -10,6 +10,7 @@ export type TrackerFetchResult = {
 export type TrackerContext = {
   workflowConfig: WorkflowConfig;
   trackerConfig: TrackerConfig;
+  credentialToken?: string;
   signal?: AbortSignal;
 };
 
