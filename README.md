@@ -183,28 +183,28 @@ Useful local auth variables:
 - `SYMPHONIA_AUTH_STORE_PATH`
 - `SYMPHONIA_AUTH_STORAGE_KEY`, optional local encryption key override
 
-## GitHub PRs And Linear Comments
+## Write Approval Previews
 
-Milestone 11 adds explicit write actions for completed or cancelled runs:
+Milestone 15B keeps external writes disabled and exposes preview-only write approval contracts for completed runs:
 
-- Preview a GitHub draft PR from run, issue, workspace, git, and review-artifact data.
-- Create the draft PR only after the configured confirmation phrase is typed.
-- Preview a Linear run comment from the run and issue context.
-- Post the Linear comment only after the configured confirmation phrase is typed.
-- Persist redacted preview/result history in SQLite.
-- Emit write events in the run timeline.
-- Refresh GitHub review artifacts after PR creation.
+- Preview the GitHub PR payload that could be created in a later milestone.
+- Preview the Linear comment payload that could be posted in a later milestone.
+- Preview the Linear status update that could be requested in a later milestone.
+- Show approval evidence, review artifact source, changed files, required permissions, blocking reasons, risk warnings, confirmation requirements, and idempotency metadata.
+- Keep GitHub PR creation, Linear comments, Linear status updates, and remote pushes non-executable.
 
-Writes are still off by default. Enable them in `WORKFLOW.md` only for a safe repository and issue:
+The current product can say what it would write and why it is not allowed to write it yet. It does not create GitHub PRs or mutate Linear.
+
+Writes remain off by default in `WORKFLOW.md`:
 
 ```yaml
 github:
   enabled: true
-  read_only: false
+  read_only: true
   write:
-    enabled: true
+    enabled: false
     require_confirmation: true
-    allow_create_pr: true
+    allow_create_pr: false
     allow_push: false
     draft_pr_by_default: true
     protected_branches:
@@ -214,31 +214,24 @@ github:
 
 tracker:
   kind: linear
-  read_only: false
+  read_only: true
   write:
-    enabled: true
+    enabled: false
     require_confirmation: true
-    allow_comments: true
+    allow_comments: false
     allow_state_transitions: false
 ```
 
-GitHub PR creation requires a connected, env, or manual token with pull-request write permission for the configured repo. Symphonia never auto-pushes, never force-pushes, never pushes protected/default branches, and never auto-merges. If a branch has not been pushed to GitHub, PR creation will fail at GitHub and the UI reports the error; push remains an explicit/manual step.
-
-Linear comments require a connected, env, or manual Linear credential that can access and comment on the issue. Symphonia does not create Linear issues and does not transition Linear issue states.
-
-Confirmation phrases:
-
-- GitHub PR: `CREATE GITHUB PR`
-- Linear comment: `POST LINEAR COMMENT`
+Future execution milestones will require a separate approval record and explicit confirmation before any external write path can be enabled.
 
 Troubleshooting:
 
-- `writes disabled`: enable the provider write block and the specific action flag.
-- `read_only true`: set `github.read_only: false` or `tracker.read_only: false` for the beta workflow.
+- `writes disabled`: the preview is available for review, but execution is not available in this milestone.
+- `read_only true`: the connected system is intentionally read-only.
 - `no token`: connect in Settings -> Integrations or set `GITHUB_TOKEN`/`GITHUB_PAT`/`LINEAR_API_KEY`.
 - `branch is protected`: create a throwaway branch before previewing a PR.
 - `existing PR found`: refresh review artifacts and use the existing PR instead of creating another one.
-- `token lacks permission`: use a token/app installation with repo PR write access or Linear comment permission.
+- `token lacks permission`: the preview reports the permission needed for a future write.
 - `GraphQL error`: inspect the redacted daemon response; token values are intentionally omitted.
 - `rate limit`: wait for the reported GitHub reset window or reduce refresh frequency.
 
@@ -302,11 +295,9 @@ Selected daemon endpoints:
 - `GET /github/health`
 - `POST /runs/:runId/review-artifacts/refresh`
 - `GET /writes/status`
-- `GET /runs/:runId/write-actions`
+- `GET /runs/:runId/write-actions` for preview-only contracts and local write audit history
 - `POST /runs/:runId/github/pr/preview`
-- `POST /runs/:runId/github/pr/create`
 - `POST /runs/:runId/linear/comment/preview`
-- `POST /runs/:runId/linear/comment/create`
 - `POST /harness/scan`
 - `POST /harness/previews`
 - `POST /harness/apply`
