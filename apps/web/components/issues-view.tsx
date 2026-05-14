@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { PRIORITY_LABELS, type Priority, type User } from "@/lib/view-models";
+import { userFromIssue } from "@/lib/workspace-insights";
 import { IssueStatusIcon } from "@/components/icons/issue-status-icons";
 import { PriorityIcon } from "@/components/icons/status-icons";
 import { UserAvatar } from "@/components/avatar-stack";
@@ -2255,7 +2256,7 @@ function mapDaemonIssues(issues: DaemonIssue[], runs: Run[]): Issue[] {
       iconStatus: iconStatusForState(issue.state),
       priority: priorityForIssue(issue.priority),
       sourcePriority: issue.priority,
-      assignee: undefined,
+      assignee: userFromIssue(issue) ?? undefined,
       labels,
       team: issue.tracker?.teamKey ?? issue.identifier.split("-")[0] ?? "SYM",
       url: issue.url,

@@ -67,6 +67,14 @@ export const LinearIssueNodeSchema = z.object({
     })
     .nullable()
     .optional(),
+  assignee: z
+    .object({
+      id: z.string().nullable().optional(),
+      name: z.string().nullable().optional(),
+      email: z.string().nullable().optional(),
+    })
+    .nullable()
+    .optional(),
   project: z
     .object({
       id: z.string().nullable().optional(),
@@ -160,6 +168,11 @@ export class LinearGraphqlClient {
                 name
               }
             }
+            assignee {
+              id
+              name
+              email
+            }
             project {
               id
               name
@@ -214,6 +227,11 @@ export class LinearGraphqlClient {
             nodes {
               name
             }
+          }
+          assignee {
+            id
+            name
+            email
           }
           project {
             id

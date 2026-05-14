@@ -55,6 +55,14 @@ export function normalizeLinearIssue(node: LinearIssueNode, fetchedAt = nowIso()
   }
 
   const labels = [...new Set((node.labels?.nodes ?? []).map((label) => label.name?.trim().toLowerCase()).filter(isNonEmpty))];
+  const assignee =
+    node.assignee?.id && (node.assignee.name || node.assignee.email)
+      ? {
+          id: node.assignee.id,
+          name: node.assignee.name ?? null,
+          email: node.assignee.email ?? null,
+        }
+      : null;
   const issue = {
     id: node.id,
     identifier: node.identifier,
@@ -64,6 +72,7 @@ export function normalizeLinearIssue(node: LinearIssueNode, fetchedAt = nowIso()
     labels,
     priority: normalizeLinearPriority(node.priority),
     branchName: node.branchName ?? null,
+    assignee,
     createdAt: node.createdAt,
     updatedAt: node.updatedAt,
     url: node.url ?? `https://linear.app/issue/${encodeURIComponent(node.identifier)}`,
