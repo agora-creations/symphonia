@@ -600,6 +600,38 @@ describe("daemon API", () => {
     });
   });
 
+  it("keeps real connected blockers explicit when Linear auth is missing and GitHub validation is disabled", async () => {
+    const created = createDaemonServer(new EventStore(join(directory, "real-blockers.sqlite")), {
+      workflowPath,
+      cwd: directory,
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeWorkflow({ codexCommand: fakeCodexCommand("success"), linearApiKey: null });
+
+    await requestJson("POST", "/issues/refresh");
+    const status = await requestJson<{
+      connected: {
+        linear: { status: string; error: string | null };
+        github: { status: string; enabled: boolean };
+        nextAction: { kind: string };
+        blockingReasons: string[];
+      };
+    }>("GET", "/connected/status");
+
+    expect(status.connected).toMatchObject({
+      linear: { status: "missing_auth", error: "Linear tracker config is missing endpoint or api key." },
+      github: { status: "disabled", enabled: false },
+      nextAction: { kind: "connect_linear" },
+    });
+    expect(status.connected.blockingReasons).toEqual(
+      expect.arrayContaining([
+        "Linear is not connected: Linear tracker config is missing endpoint or api key.",
+        "GitHub repository validation is disabled in WORKFLOW.md; enable read-only GitHub validation to prove repository access.",
+      ]),
+    );
+  });
+
   it("starts the codex provider from a fake linear issue", async () => {
     const created = createDaemonServer(new EventStore(join(directory, "linear-codex.sqlite")), {
       workflowPath,
@@ -1036,6 +1068,7 @@ function writeWorkflow(
     cleanupEnabled?: boolean;
     cleanupDryRun?: boolean;
     cleanupAfterMs?: number;
+    linearApiKey?: string | null;
   } = {},
 ): void {
   writeFileSync(
@@ -1045,8 +1078,7 @@ provider: ${options.provider ?? "codex"}
 tracker:
   kind: linear
   endpoint: "https://api.linear.app/graphql"
-  api_key: "linear-secret"
-  team_key: "ENG"
+${options.linearApiKey === null ? "" : `  api_key: ${JSON.stringify(options.linearApiKey ?? "linear-secret")}\n`}  team_key: "ENG"
   active_states:
     - "Todo"
     - "In Progress"

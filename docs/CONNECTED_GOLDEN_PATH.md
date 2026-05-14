@@ -46,6 +46,8 @@ The board needs these fields from the supported real tracker source:
 
 Fake or seeded product issues are not part of this model. Tests may create deterministic fixture issues through fake transports.
 
+When a real tracker issue has a title but no description, treat it as a narrow smoke pass: keep changes harmless and title-scoped, then report the missing acceptance detail in the review handoff instead of inferring broader product behavior.
+
 ## Normalized Run Model
 
 A run is tied to one real issue and one provider:

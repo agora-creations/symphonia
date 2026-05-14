@@ -85,6 +85,19 @@ export function DesktopSetupGate() {
     setAuthStatus(await getAuthStatus());
   }
 
+  async function connectLinearFromSetup() {
+    const result = await startAuth("linear", {
+      method: "oauth_pkce",
+      requestedScopes: ["read"],
+      redirectMode: "loopback",
+      repositoryPath: settings?.repositoryPath ?? null,
+      metadata: {},
+    });
+    if (result.authorizationUrl) await desktop?.openExternalLink(result.authorizationUrl);
+    setMessage(result.instructions.join(" "));
+    setAuthStatus(await getAuthStatus());
+  }
+
   async function validateIntegration(provider: "github" | "linear") {
     const result = await validateAuth(provider);
     setMessage(result.error ?? `${provider} validation ${result.status}.`);
@@ -343,6 +356,14 @@ export function DesktopSetupGate() {
                 >
                   <ExternalLink className="h-4 w-4" />
                   Connect GitHub
+                </button>
+                <button
+                  type="button"
+                  onClick={connectLinearFromSetup}
+                  className="inline-flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted"
+                >
+                  <ExternalLink className="h-4 w-4" />
+                  Connect Linear
                 </button>
                 <button
                   type="button"
