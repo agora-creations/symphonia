@@ -183,17 +183,19 @@ Useful local auth variables:
 - `SYMPHONIA_AUTH_STORE_PATH`
 - `SYMPHONIA_AUTH_STORAGE_KEY`, optional local encryption key override
 
-## Write Approval Previews
+## Manual Write Approval
 
-Milestone 15B keeps external writes disabled and exposes preview-only write approval contracts for completed runs:
+Milestone 15C keeps writes disabled by default and enables one external write path only: manual GitHub draft PR creation after explicit confirmation.
 
-- Preview the GitHub PR payload that could be created in a later milestone.
-- Preview the Linear comment payload that could be posted in a later milestone.
-- Preview the Linear status update that could be requested in a later milestone.
+- Preview the GitHub PR payload before it can be executed.
+- Create a GitHub draft PR only after GitHub write mode is explicitly enabled and the user enters the configured confirmation phrase.
+- Persist a local approval/execution audit record before any GitHub write call.
+- Use the preview payload hash and idempotency key to prevent duplicate PR creation.
+- Preview the Linear comment and Linear status update payloads without making them executable.
 - Show approval evidence, review artifact source, changed files, required permissions, blocking reasons, risk warnings, confirmation requirements, and idempotency metadata.
-- Keep GitHub PR creation, Linear comments, Linear status updates, and remote pushes non-executable.
+- Keep Linear comments, Linear status updates, auto-merge, and background writeback non-executable.
 
-The current product can say what it would write and why it is not allowed to write it yet. It does not create GitHub PRs or mutate Linear.
+The current product can create a draft GitHub PR only through the explicit manual gate. It does not mutate Linear.
 
 Writes remain off by default in `WORKFLOW.md`:
 
@@ -295,7 +297,8 @@ Selected daemon endpoints:
 - `GET /github/health`
 - `POST /runs/:runId/review-artifacts/refresh`
 - `GET /writes/status`
-- `GET /runs/:runId/write-actions` for preview-only contracts and local write audit history
+- `GET /runs/:runId/write-actions` for preview contracts and local write audit history
+- `POST /runs/:runId/github/pr/create` for manual, confirmation-gated draft PR creation
 - `POST /runs/:runId/github/pr/preview`
 - `POST /runs/:runId/linear/comment/preview`
 - `POST /harness/scan`
@@ -320,8 +323,8 @@ Automated tests use fake CLIs, fake fetch transports, temp databases, temp works
 
 - Linear is read-only by default.
 - GitHub is read-only by default.
-- GitHub PR creation and Linear comments are previewed, confirmation-gated, and disabled by default.
-- GitHub branch push, GitHub comments, reviewer requests, auto-merge, GitHub issue creation, Linear issue creation, and Linear state transitions remain deferred.
+- GitHub draft PR creation is disabled by default and requires explicit manual write mode plus confirmation.
+- Linear comments, Linear state transitions, Linear labels/assignees/descriptions, GitHub comments, reviewer requests, auto-merge, GitHub issue creation, and Linear issue creation remain deferred.
 - Workspace cleanup is disabled and dry-run by default.
 - Generated harness artifacts are never applied automatically.
 - Existing files are not overwritten without diff preview and explicit confirmation.
@@ -337,9 +340,9 @@ Automated tests use fake CLIs, fake fetch transports, temp databases, temp works
 - Provider validation still depends on locally installed/authenticated provider CLIs.
 - OS keychain storage is not wired into the daemon-owned token path yet; local storage uses an encrypted file with a local key and should be treated as local-beta storage.
 - Linear workspace/team/project summaries are still minimal during auth validation; tracker configuration controls issue scope.
-- GitHub writes remain disabled by default; only explicit draft PR creation is implemented.
-- Linear writes remain disabled by default; only explicit run comments are implemented.
-- GitHub branch push is deferred; push branches manually or add a future explicit push flow.
+- GitHub writes remain disabled by default; only explicit manual draft PR creation is implemented.
+- Linear writes remain disabled.
+- GitHub branch push is allowed only inside the manual draft PR route when `github.write.allow_push` is explicitly enabled and all confirmation/audit gates pass.
 - Provider auth for Codex, Claude, and Cursor remains separate from GitHub/Linear integration auth.
 - No cloud accounts, team sharing, GitHub App install flow, Linear webhooks, GitHub webhooks, code signing, notarization, auto-update, or Tauri support yet.
 

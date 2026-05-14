@@ -1280,6 +1280,7 @@ export const WriteActionPreviewContractSchema = z.object({
   approvalEvidenceSource: z.string().min(1),
   requiredPermissions: z.array(z.string().min(1)),
   confirmationRequired: z.boolean(),
+  confirmationPhrase: z.string().min(1),
   confirmationPrompt: z.string().min(1),
   blockingReasons: z.array(z.string().min(1)),
   riskWarnings: z.array(z.string().min(1)),
@@ -1292,6 +1293,127 @@ export const WriteActionPreviewContractSchema = z.object({
   audit: WriteActionPreviewAuditSchema,
 });
 export type WriteActionPreviewContract = z.infer<typeof WriteActionPreviewContractSchema>;
+
+export const PayloadHashVerificationResultSchema = z.object({
+  status: z.enum(["matched", "mismatched", "missing_preview"]),
+  expectedPayloadHash: z.string().min(1).nullable(),
+  receivedPayloadHash: z.string().min(1).nullable(),
+});
+export type PayloadHashVerificationResult = z.infer<typeof PayloadHashVerificationResultSchema>;
+
+export const IdempotencyResultSchema = z.object({
+  status: z.enum(["new", "already_executed", "in_progress", "retry_allowed", "conflict"]),
+  idempotencyKey: z.string().min(1),
+  existingExecutionRecordId: z.string().min(1).nullable(),
+  existingExternalUrl: z.string().url().nullable(),
+  blockingReason: z.string().min(1).nullable(),
+});
+export type IdempotencyResult = z.infer<typeof IdempotencyResultSchema>;
+
+export const GitHubPrExecutionRequestSchema = z.object({
+  runId: z.string().min(1),
+  previewId: z.string().min(1),
+  actionKind: z.literal("github_pr_create"),
+  payloadHash: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+  confirmationText: z.string().min(1),
+  targetRepository: z.string().min(1),
+  baseBranch: z.string().min(1),
+  headBranch: z.string().min(1),
+  draft: z.literal(true),
+});
+export type GitHubPrExecutionRequest = z.infer<typeof GitHubPrExecutionRequestSchema>;
+
+export const WriteExecutionStatusSchema = z.enum([
+  "pending",
+  "in_progress",
+  "succeeded",
+  "blocked",
+  "failed",
+  "already_executed",
+]);
+export type WriteExecutionStatus = z.infer<typeof WriteExecutionStatusSchema>;
+
+export const LocalWriteApprovalRecordSchema = z.object({
+  id: z.string().min(1),
+  runId: z.string().min(1),
+  issueId: z.string().min(1).nullable(),
+  issueIdentifier: z.string().min(1).nullable(),
+  kind: z.literal("github_pr_create"),
+  targetSystem: z.literal("github"),
+  targetRepository: z.string().min(1),
+  baseBranch: z.string().min(1),
+  headBranch: z.string().min(1),
+  payloadHash: z.string().min(1),
+  approvalEvidenceSource: z.string().min(1),
+  reviewArtifactSource: z.string().min(1).nullable(),
+  changedFiles: z.array(ChangedFileSchema),
+  title: z.string().min(1),
+  bodySummary: z.string(),
+  confirmationType: z.literal("typed_phrase"),
+  confirmationPhrase: z.string().min(1),
+  approvedAt: isoDateTime,
+  status: z.literal("approved"),
+  idempotencyKey: z.string().min(1),
+});
+export type LocalWriteApprovalRecord = z.infer<typeof LocalWriteApprovalRecordSchema>;
+
+export const LocalWriteExecutionRecordSchema = z.object({
+  recordType: z.literal("local_write_execution"),
+  id: z.string().min(1),
+  approvalRecordId: z.string().min(1),
+  runId: z.string().min(1),
+  issueId: z.string().min(1).nullable(),
+  issueIdentifier: z.string().min(1).nullable(),
+  previewId: z.string().min(1),
+  kind: z.literal("github_pr_create"),
+  targetSystem: z.literal("github"),
+  targetRepository: z.string().min(1),
+  baseBranch: z.string().min(1),
+  headBranch: z.string().min(1),
+  payloadHash: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+  status: WriteExecutionStatusSchema,
+  approvalRecord: LocalWriteApprovalRecordSchema,
+  startedAt: isoDateTime,
+  completedAt: isoDateTime.nullable(),
+  externalWriteId: z.string().min(1).nullable(),
+  githubPrNumber: z.number().int().positive().nullable(),
+  githubPrUrl: z.string().url().nullable(),
+  errorSummary: z.string().min(1).nullable(),
+  blockingReasons: z.array(z.string().min(1)),
+});
+export type LocalWriteExecutionRecord = z.infer<typeof LocalWriteExecutionRecordSchema>;
+
+export const GitHubPrExecutionStatusSchema = z.enum(["succeeded", "blocked", "failed", "already_executed"]);
+export type GitHubPrExecutionStatus = z.infer<typeof GitHubPrExecutionStatusSchema>;
+
+export const GitHubPrExecutionResponseSchema = z.object({
+  status: GitHubPrExecutionStatusSchema,
+  runId: z.string().min(1),
+  previewId: z.string().min(1),
+  approvalRecordId: z.string().min(1).nullable(),
+  executionRecordId: z.string().min(1).nullable(),
+  idempotencyKey: z.string().min(1),
+  githubPrNumber: z.number().int().positive().nullable(),
+  githubPrUrl: z.string().url().nullable(),
+  headBranch: z.string().min(1).nullable(),
+  baseBranch: z.string().min(1).nullable(),
+  blockingReasons: z.array(z.string().min(1)),
+  errorSummary: z.string().min(1).nullable(),
+  payloadHashVerification: PayloadHashVerificationResultSchema,
+  idempotency: IdempotencyResultSchema,
+  approvalRecord: LocalWriteApprovalRecordSchema.nullable(),
+  executionRecord: LocalWriteExecutionRecordSchema.nullable(),
+  createdAt: isoDateTime.nullable(),
+  completedAt: isoDateTime.nullable(),
+});
+export type GitHubPrExecutionResponse = z.infer<typeof GitHubPrExecutionResponseSchema>;
+
+export const GitHubPrExecutionResultResponseSchema = z.object({
+  result: GitHubPrExecutionResponseSchema,
+});
+export type GitHubPrExecutionResultResponse = z.infer<typeof GitHubPrExecutionResultResponseSchema>;
 
 export const IntegrationWriteExecutionRequestSchema = z.object({
   previewId: z.string().min(1),
@@ -2243,6 +2365,7 @@ export type WritesStatusResponse = z.infer<typeof WritesStatusResponseSchema>;
 export const WriteActionAvailabilityStatusSchema = z.enum([
   "enabled",
   "gated",
+  "manual_enabled",
   "read_only",
   "disabled",
   "unavailable",
@@ -2261,7 +2384,7 @@ export const WriteActionAvailabilitySchema = z.object({
 export type WriteActionAvailability = z.infer<typeof WriteActionAvailabilitySchema>;
 
 export const IntegrationWriteActionsResponseSchema = z.object({
-  writeActions: z.array(z.union([IntegrationWritePreviewSchema, IntegrationWriteResultSchema])),
+  writeActions: z.array(z.union([IntegrationWritePreviewSchema, IntegrationWriteResultSchema, LocalWriteExecutionRecordSchema])),
   availability: z.array(WriteActionAvailabilitySchema).default([]),
   previews: z.array(WriteActionPreviewContractSchema).default([]),
 });

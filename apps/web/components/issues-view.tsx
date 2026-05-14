@@ -23,6 +23,7 @@ import {
   X,
 } from "lucide-react";
 import {
+  createGithubDraftPr,
   getConnectedStatus,
   executeWorkspaceCleanup,
   getDaemonStatus,
@@ -64,10 +65,12 @@ import {
   type IssuePriority,
   type IssueState,
   type GitHubStatus,
+  type GitHubPrExecutionResponse,
   type IntegrationWriteActionsResponse,
   type IntegrationWritePolicy,
   type IntegrationWritePreview,
   type IntegrationWriteResult,
+  type LocalWriteExecutionRecord,
   type ProviderHealth,
   type ProviderId,
   type ReviewArtifactSnapshot,
@@ -1701,9 +1704,12 @@ function WriteActionsPanel({
 }) {
   const [status, setStatus] = useState<WritesStatus | null>(null);
   const [writeActionResponse, setWriteActionResponse] = useState<IntegrationWriteActionsResponse | null>(null);
-  const [history, setHistory] = useState<Array<IntegrationWritePreview | IntegrationWriteResult>>([]);
+  const [history, setHistory] = useState<Array<IntegrationWritePreview | IntegrationWriteResult | LocalWriteExecutionRecord>>([]);
   const [error, setError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
+  const [executingPreviewId, setExecutingPreviewId] = useState<string | null>(null);
+  const [confirmationByPreview, setConfirmationByPreview] = useState<Record<string, string>>({});
+  const [executionResult, setExecutionResult] = useState<GitHubPrExecutionResponse | null>(null);
 
   const loadWriteActions = useCallback(async () => {
     if (!run) {
@@ -1744,6 +1750,37 @@ function WriteActionsPanel({
     }
   }, [loadWriteActions, run]);
 
+  const handleCreateDraftPr = useCallback(
+    async (preview: WriteActionPreviewContract) => {
+      if (!run || preview.kind !== "github_pr_create" || !preview.payload.githubPr || !preview.targetRepository || !preview.baseBranch || !preview.targetBranch) {
+        return;
+      }
+      try {
+        setExecutingPreviewId(preview.id);
+        setError(null);
+        const result = await createGithubDraftPr(run.id, {
+          runId: run.id,
+          previewId: preview.id,
+          actionKind: "github_pr_create",
+          payloadHash: preview.payloadHash,
+          idempotencyKey: preview.idempotencyKey,
+          confirmationText: confirmationByPreview[preview.id] ?? "",
+          targetRepository: preview.targetRepository,
+          baseBranch: preview.baseBranch,
+          headBranch: preview.targetBranch,
+          draft: true,
+        });
+        setExecutionResult(result);
+        await loadWriteActions();
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : "GitHub draft PR creation failed.");
+      } finally {
+        setExecutingPreviewId(null);
+      }
+    },
+    [confirmationByPreview, loadWriteActions, run],
+  );
+
   const previews = writeActionResponse?.previews ?? [];
   const availability = writeActionResponse?.availability ?? approvalEvidence?.writeActionAvailability ?? [];
 
@@ -1755,7 +1792,7 @@ function WriteActionsPanel({
             External write previews
           </h3>
           <p className="mt-1 text-xs text-muted-foreground">
-            Preview-only contracts for {issue.key}. No GitHub or Linear write can be executed from this milestone.
+            GitHub draft PR creation is manual and confirmation-gated for {issue.key}. Linear writes remain disabled.
           </p>
         </div>
         {run && (
@@ -1797,7 +1834,15 @@ function WriteActionsPanel({
           ) : (
             <div className="grid gap-3 xl:grid-cols-3">
               {previews.map((preview) => (
-                <WritePreviewContractCard key={preview.id} preview={preview} />
+                <WritePreviewContractCard
+                  key={preview.id}
+                  preview={preview}
+                  confirmationValue={confirmationByPreview[preview.id] ?? ""}
+                  executionResult={executionResult?.previewId === preview.id ? executionResult : null}
+                  executing={executingPreviewId === preview.id}
+                  onConfirmationChange={(value) => setConfirmationByPreview((current) => ({ ...current, [preview.id]: value }))}
+                  onCreateDraftPr={() => void handleCreateDraftPr(preview)}
+                />
               ))}
             </div>
           )}
@@ -1820,11 +1865,11 @@ function WriteActionsPanel({
                       </span>
                     </div>
                     <div className="mt-1 flex flex-wrap gap-2 text-xs text-muted-foreground">
-                      <span>{action.provider}</span>
+                      <span>{writeActionProvider(action)}</span>
                       <span>{action.kind.replaceAll("_", " ")}</span>
-                      <span>{formatTime("executedAt" in action ? action.executedAt : action.createdAt)}</span>
-                      {"externalUrl" in action && action.externalUrl && (
-                        <a href={action.externalUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hover:text-foreground">
+                      <span>{formatTime(writeActionTimestamp(action))}</span>
+                      {writeActionUrl(action) && (
+                        <a href={writeActionUrl(action) ?? ""} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hover:text-foreground">
                           Open result <ExternalLink className="h-3 w-3" />
                         </a>
                       )}
@@ -1896,7 +1941,27 @@ function PolicySummary({ policy, title }: { policy: IntegrationWritePolicy; titl
   );
 }
 
-function WritePreviewContractCard({ preview }: { preview: WriteActionPreviewContract }) {
+function WritePreviewContractCard({
+  confirmationValue,
+  executing,
+  executionResult,
+  onConfirmationChange,
+  onCreateDraftPr,
+  preview,
+}: {
+  confirmationValue: string;
+  executing: boolean;
+  executionResult: GitHubPrExecutionResponse | null;
+  onConfirmationChange: (value: string) => void;
+  onCreateDraftPr: () => void;
+  preview: WriteActionPreviewContract;
+}) {
+  const canCreateDraftPr =
+    preview.kind === "github_pr_create" &&
+    preview.status === "preview_available" &&
+    preview.blockingReasons.length === 0 &&
+    confirmationValue === preview.confirmationPhrase;
+  const isGithubPr = preview.kind === "github_pr_create";
   return (
     <article className="rounded-md border p-3">
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -1913,6 +1978,7 @@ function WritePreviewContractCard({ preview }: { preview: WriteActionPreviewCont
         <PreviewKeyValue label="Mode" value={preview.dryRunOnly ? "preview only" : "execution unavailable"} />
         <PreviewKeyValue label="Evidence" value={preview.approvalEvidenceSource} />
         <PreviewKeyValue label="Review artifact" value={preview.reviewArtifactId ?? "missing"} />
+        <PreviewKeyValue label="Payload hash" value={preview.payloadHash.slice(0, 16)} />
         <PreviewKeyValue label="Idempotency" value={preview.idempotencyKey} />
         {preview.targetRepository && <PreviewKeyValue label="Repository" value={preview.targetRepository} />}
         {preview.baseBranch && <PreviewKeyValue label="Base" value={preview.baseBranch} />}
@@ -1965,6 +2031,52 @@ function WritePreviewContractCard({ preview }: { preview: WriteActionPreviewCont
 
       {preview.blockingReasons.length > 0 && <StatusList title="Blocking reasons" tone="danger" items={preview.blockingReasons} />}
       {preview.riskWarnings.length > 0 && <StatusList title="Risk warnings" tone="warning" items={preview.riskWarnings} />}
+
+      {isGithubPr && preview.blockingReasons.length === 0 && preview.status === "preview_available" && (
+        <div className="mt-3 rounded-md border p-3">
+          <label className="text-xs font-medium" htmlFor={`${preview.id}-confirmation`}>
+            Type {preview.confirmationPhrase} to create a draft PR
+          </label>
+          <input
+            id={`${preview.id}-confirmation`}
+            value={confirmationValue}
+            onChange={(event) => onConfirmationChange(event.target.value)}
+            className="mt-2 w-full rounded-md border bg-background px-2 py-1.5 font-mono text-xs"
+            placeholder={preview.confirmationPhrase}
+          />
+          <button
+            type="button"
+            disabled={!canCreateDraftPr || executing}
+            onClick={onCreateDraftPr}
+            className="mt-2 inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <GitPullRequest className="h-3.5 w-3.5" />
+            {executing ? "Creating draft PR..." : "Create draft PR"}
+          </button>
+          <p className="mt-2 text-xs text-muted-foreground">
+            This writes to GitHub only after local approval/audit persistence. Linear actions remain unavailable.
+          </p>
+        </div>
+      )}
+
+      {isGithubPr && (preview.blockingReasons.length > 0 || preview.status !== "preview_available") && (
+        <p className="mt-3 rounded-md border p-3 text-xs text-muted-foreground">
+          Draft PR creation is unavailable until the GitHub write gate, evidence, repository, branch, and confirmation requirements are satisfied.
+        </p>
+      )}
+
+      {executionResult && (
+        <div className="mt-3 rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-700 dark:text-emerald-300">
+          <p className="font-medium">GitHub PR execution: {executionResult.status.replaceAll("_", " ")}</p>
+          {executionResult.githubPrUrl ? (
+            <a href={executionResult.githubPrUrl} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 hover:underline">
+              PR #{executionResult.githubPrNumber} <ExternalLink className="h-3 w-3" />
+            </a>
+          ) : (
+            <p className="mt-1">{executionResult.errorSummary ?? executionResult.blockingReasons.join(" ")}</p>
+          )}
+        </div>
+      )}
     </article>
   );
 }
@@ -1999,11 +2111,28 @@ function writePolicyText(policy: IntegrationWritePolicy | null): string {
   return `Enabled for ${policy.allowedKinds.map((kind) => kind.replaceAll("_", " ")).join(", ")}; confirmation required.`;
 }
 
-function writeActionLabel(action: IntegrationWritePreview | IntegrationWriteResult): string {
+function writeActionLabel(action: IntegrationWritePreview | IntegrationWriteResult | LocalWriteExecutionRecord): string {
+  if ("recordType" in action) {
+    return action.githubPrUrl ? "GitHub draft PR execution" : "GitHub draft PR attempt";
+  }
   if ("executedAt" in action) {
     return action.externalUrl ? `${action.kind.replaceAll("_", " ")} result` : `${action.kind.replaceAll("_", " ")} attempt`;
   }
   return action.title;
+}
+
+function writeActionProvider(action: IntegrationWritePreview | IntegrationWriteResult | LocalWriteExecutionRecord): string {
+  return "recordType" in action ? action.targetSystem : action.provider;
+}
+
+function writeActionTimestamp(action: IntegrationWritePreview | IntegrationWriteResult | LocalWriteExecutionRecord): string {
+  if ("recordType" in action) return action.completedAt ?? action.startedAt;
+  return "executedAt" in action ? action.executedAt : action.createdAt;
+}
+
+function writeActionUrl(action: IntegrationWritePreview | IntegrationWriteResult | LocalWriteExecutionRecord): string | null {
+  if ("recordType" in action) return action.githubPrUrl;
+  return "externalUrl" in action ? action.externalUrl : null;
 }
 
 function writePreviewLabel(kind: WriteActionPreviewContract["kind"]): string {
@@ -2035,14 +2164,17 @@ function writePreviewStatusClass(status: WriteActionPreviewContract["status"]) {
   }
 }
 
-function writeStatusClass(status: IntegrationWritePreview["status"]) {
+function writeStatusClass(status: IntegrationWritePreview["status"] | LocalWriteExecutionRecord["status"]) {
   switch (status) {
     case "succeeded":
+    case "already_executed":
       return "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300";
     case "blocked":
     case "failed":
       return "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300";
     case "executing":
+    case "in_progress":
+    case "pending":
     case "pending_confirmation":
     case "previewed":
       return "border-blue-500/30 bg-blue-500/10 text-blue-600 dark:text-blue-300";
@@ -2055,6 +2187,7 @@ function writeAvailabilityClass(status: RunApprovalEvidence["writeActionAvailabi
   switch (status) {
     case "enabled":
       return "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300";
+    case "manual_enabled":
     case "gated":
       return "border-blue-500/30 bg-blue-500/10 text-blue-600 dark:text-blue-300";
     case "read_only":
