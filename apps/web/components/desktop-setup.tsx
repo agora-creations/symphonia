@@ -132,16 +132,16 @@ export function DesktopSetupGate() {
       }
       const next = await desktop.updateSettings({
         firstRunCompleted: true,
-        defaultTrackerKind: "mock",
-        defaultProviderId: "mock",
+        defaultTrackerKind: "linear",
+        defaultProviderId: "codex",
         githubEnabled: false,
-        linearEnabled: false,
+        linearEnabled: true,
         cleanupDryRun: true,
         cleanupEnabled: false,
       });
       setSettings(next);
       await desktop.restartDaemon();
-      setMessage("Setup saved. Symphonia is ready in local mock mode.");
+      setMessage("Setup saved. Symphonia is ready for real Linear and provider configuration.");
     } catch (error) {
       setMessage(error instanceof Error ? error.message : String(error));
     } finally {
@@ -158,8 +158,8 @@ export function DesktopSetupGate() {
               <p className="text-xs font-medium uppercase text-muted-foreground">First-run setup</p>
               <h1 className="mt-1 text-2xl font-semibold">Set up Symphonia as a local desktop workbench</h1>
               <p className="mt-2 max-w-2xl text-sm text-muted-foreground">
-                The desktop shell starts the local daemon and web UI. The daemon still owns providers, trackers, workspaces,
-                events, and SQLite. Optional integrations use environment variables rather than stored secrets.
+                The desktop shell starts the local daemon and web UI. The daemon owns real providers, Linear tracking,
+                workspaces, events, and SQLite. Integrations use environment variables rather than stored secrets.
               </p>
             </div>
             <div className="rounded-md border px-3 py-2 text-xs text-muted-foreground">
@@ -190,8 +190,8 @@ export function DesktopSetupGate() {
             />
             <SetupItem
               icon={<ShieldCheck className="h-4 w-4" />}
-              title="Safe defaults"
-              value="Mock tracker/provider, GitHub and Linear disabled, cleanup disabled and dry-run."
+              title="Real-data defaults"
+              value="Linear tracker, Codex provider, GitHub writes disabled, cleanup disabled and dry-run."
             />
           </div>
 

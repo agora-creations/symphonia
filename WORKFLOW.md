@@ -1,11 +1,15 @@
 ---
-provider: mock
+provider: codex
 
 tracker:
-  kind: mock
+  kind: linear
+  api_key: "$LINEAR_API_KEY"
+  allow_workspace_wide: true
+  read_only: true
   active_states:
     - "Todo"
     - "In Progress"
+    - "Backlog"
     - "Rework"
   terminal_states:
     - "Done"
@@ -49,9 +53,9 @@ hooks:
   after_create: |
     printf "Workspace created at $(pwd)\n"
   before_run: |
-    printf "Preparing mock run in $(pwd)\n"
+    printf "Preparing provider run in $(pwd)\n"
   after_run: |
-    printf "Finished mock run in $(pwd)\n"
+    printf "Finished provider run in $(pwd)\n"
 ---
 
 You are working on issue {{ issue.identifier }}.

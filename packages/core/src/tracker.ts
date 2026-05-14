@@ -1,13 +1,4 @@
-import {
-  Issue,
-  IssueSchema,
-  TrackerConfig,
-  TrackerHealth,
-  TrackerKind,
-  WorkflowConfig,
-} from "@symphonia/types";
-import { getMockIssue, getMockIssueByIdentifier, listMockIssues } from "./mock-tracker.js";
-import { nowIso } from "./time.js";
+import { Issue, TrackerConfig, TrackerHealth, TrackerKind, WorkflowConfig } from "@symphonia/types";
 
 export type TrackerFetchResult = {
   issues: Issue[];
@@ -31,40 +22,6 @@ export type TrackerAdapter = {
   fetchIssue(context: TrackerContext, issueIdOrIdentifier: string): Promise<Issue | null>;
   createIssueComment?: (context: TrackerContext, issueId: string, body: string) => Promise<void>;
   transitionIssueState?: (context: TrackerContext, issueId: string, stateNameOrId: string) => Promise<void>;
-};
-
-export const mockTrackerAdapter: TrackerAdapter = {
-  id: "mock",
-  displayName: "Mock tracker",
-  async health() {
-    return {
-      kind: "mock",
-      displayName: "Mock tracker",
-      healthy: true,
-      checkedAt: nowIso(),
-      error: null,
-    };
-  },
-  async fetchIssues(context) {
-    const fetchedAt = nowIso();
-    return {
-      issues: listMockIssues().map((issue) => withTrackerMetadata(issue, context.trackerConfig.kind, fetchedAt)),
-      fetchedAt,
-      truncated: false,
-      diagnostics: [],
-    };
-  },
-  async fetchIssuesByIds(context, issueIds) {
-    const fetchedAt = nowIso();
-    const wanted = new Set(issueIds);
-    return listMockIssues()
-      .filter((issue) => wanted.has(issue.id) || wanted.has(issue.identifier))
-      .map((issue) => withTrackerMetadata(issue, context.trackerConfig.kind, fetchedAt));
-  },
-  async fetchIssue(context, issueIdOrIdentifier) {
-    const issue = getMockIssue(issueIdOrIdentifier) ?? getMockIssueByIdentifier(issueIdOrIdentifier);
-    return issue ? withTrackerMetadata(issue, context.trackerConfig.kind, nowIso()) : null;
-  },
 };
 
 export function normalizeStateKey(state: string): string {
@@ -113,15 +70,7 @@ export function filterActiveCandidateIssues(
 }
 
 export function trackerDisplayName(kind: TrackerKind): string {
-  return kind === "linear" ? "Linear" : "Mock tracker";
-}
-
-function withTrackerMetadata(issue: Issue, kind: TrackerKind, fetchedAt: string): Issue {
-  return IssueSchema.parse({
-    ...issue,
-    tracker: issue.tracker ?? { kind, sourceId: issue.id },
-    lastFetchedAt: fetchedAt,
-  });
+  return kind === "linear" ? "Linear" : kind;
 }
 
 function priorityRank(priority: Issue["priority"]): number {

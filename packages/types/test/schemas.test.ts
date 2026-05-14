@@ -23,13 +23,13 @@ describe("shared schemas", () => {
       id: "issue-1",
       identifier: "SYM-1",
       title: "Build board",
-      description: "Render mock issues.",
+      description: "Render Linear issues.",
       state: "Todo",
       labels: ["frontend"],
       priority: "High",
       createdAt: timestamp,
       updatedAt: timestamp,
-      url: "https://mock.local/issues/SYM-1",
+      url: "https://linear.app/acme/issue/SYM-1",
     });
 
     expect(issue.identifier).toBe("SYM-1");
@@ -41,7 +41,7 @@ describe("shared schemas", () => {
       issueId: "issue-1",
       issueIdentifier: "SYM-1",
       status: "queued",
-      provider: "mock",
+      provider: "codex",
       startedAt: timestamp,
       endedAt: null,
       error: null,
@@ -91,7 +91,7 @@ describe("shared schemas", () => {
         type: "artifact",
         timestamp,
         artifactType: "diff",
-        title: "Mock diff",
+        title: "Provider diff",
         content: "+ added",
       },
       {
@@ -219,9 +219,9 @@ describe("shared schemas", () => {
 
   it("parses valid workflow config, definition, status, workspace, and hook payloads", () => {
     const config = WorkflowConfigSchema.parse({
-      provider: "mock",
+      provider: "codex",
       tracker: {
-        kind: "mock",
+        kind: "linear",
         endpoint: null,
         apiKey: null,
         teamKey: null,
@@ -329,10 +329,10 @@ describe("shared schemas", () => {
       },
     });
 
-    expect(config.tracker.kind).toBe("mock");
+    expect(config.tracker.kind).toBe("linear");
 
     const definition = WorkflowDefinitionSchema.parse({
-      config: { tracker: { kind: "mock" } },
+      config: { tracker: { kind: "linear" } },
       promptTemplate: "Work on {{ issue.identifier }}.",
       workflowPath: "/repo/WORKFLOW.md",
       loadedAt: timestamp,
@@ -345,8 +345,8 @@ describe("shared schemas", () => {
       loadedAt: timestamp,
       error: null,
       effectiveConfigSummary: {
-        defaultProvider: "mock",
-        trackerKind: "mock",
+        defaultProvider: "codex",
+        trackerKind: "linear",
         endpoint: null,
         teamKey: null,
         teamId: null,
@@ -420,8 +420,8 @@ describe("shared schemas", () => {
         workflowPath: "/repo/WORKFLOW.md",
         loadedAt: timestamp,
         configSummary: {
-          defaultProvider: "mock",
-          trackerKind: "mock",
+          defaultProvider: "codex",
+          trackerKind: "linear",
           endpoint: null,
           teamKey: null,
           teamId: null,
@@ -585,8 +585,8 @@ describe("shared schemas", () => {
       runId: "run-1",
       issueId: "issue-1",
       issueIdentifier: "SYM-1",
-      provider: "mock",
-      trackerKind: "mock",
+      provider: "codex",
+      trackerKind: "linear",
       workspace: {
         issueIdentifier: "SYM-1",
         workspaceKey: "SYM-1",
@@ -681,9 +681,9 @@ describe("shared schemas", () => {
   it("rejects invalid workflow-related payloads", () => {
     expect(() =>
       WorkflowConfigSchema.parse({
-        provider: "mock",
+        provider: "codex",
         tracker: {
-          kind: "mock",
+          kind: "linear",
           endpoint: null,
           apiKey: null,
           projectSlug: null,
@@ -738,7 +738,6 @@ describe("shared schemas", () => {
 
 function summaryProviders() {
   return {
-    mock: { enabled: true, displayName: "Mock provider" },
     codex: { enabled: true, command: "codex app-server", model: null },
     claude: {
       enabled: false,

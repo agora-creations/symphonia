@@ -46,7 +46,7 @@ describe("workflow parser", () => {
   it("loads valid YAML front matter and trims the prompt body", () => {
     const workflowPath = writeWorkflow(`---
 tracker:
-  kind: mock
+  kind: linear
 unknown_key: ignored
 ---
 
@@ -54,7 +54,7 @@ Use {{ issue.title }}.
 `);
     const definition = loadWorkflowDefinition({ workflowPath, loadedAt: timestamp });
 
-    expect(definition.config).toMatchObject({ tracker: { kind: "mock" }, unknown_key: "ignored" });
+    expect(definition.config).toMatchObject({ tracker: { kind: "linear" }, unknown_key: "ignored" });
     expect(definition.promptTemplate).toBe("Use {{ issue.title }}.");
   });
 
@@ -80,7 +80,7 @@ Prompt`);
   it("allows an empty prompt body", () => {
     const workflowPath = writeWorkflow(`---
 tracker:
-  kind: mock
+  kind: linear
 ---
 `);
 
@@ -90,7 +90,7 @@ tracker:
   it("allows unknown top-level keys", () => {
     const workflowPath = writeWorkflow(`---
 tracker:
-  kind: mock
+  kind: linear
 surprise:
   enabled: true
 ---
@@ -101,12 +101,13 @@ Prompt`);
 });
 
 describe("workflow config resolution", () => {
-  it("applies defaults for mock tracker config without credentials", () => {
-    const config = resolveWorkflowConfig(definition({ tracker: { kind: "mock" } }));
+  it("applies defaults for real Linear and Codex config", () => {
+    const config = resolveWorkflowConfig(definition({ tracker: linearTracker() }));
 
-    expect(config.provider).toBe("mock");
-    expect(config.tracker.kind).toBe("mock");
-    expect(config.tracker.apiKey).toBeNull();
+    expect(config.provider).toBe("codex");
+    expect(config.tracker.kind).toBe("linear");
+    expect(config.tracker.apiKey).toBe("linear-test-key");
+    expect(config.tracker.allowWorkspaceWide).toBe(true);
     expect(config.github.enabled).toBe(false);
     expect(config.github.token).toBeNull();
     expect(config.claude.enabled).toBe(false);
@@ -121,7 +122,7 @@ describe("workflow config resolution", () => {
     const config = resolveWorkflowConfig(
       definition({
         provider: "codex",
-        tracker: { kind: "mock" },
+        tracker: linearTracker(),
         codex: {
           command: "codex app-server",
           model: "gpt-test",
@@ -141,7 +142,7 @@ describe("workflow config resolution", () => {
     const config = resolveWorkflowConfig(
       definition({
         provider: "claude",
-        tracker: { kind: "mock" },
+        tracker: linearTracker(),
         claude: {
           enabled: true,
           command: "claude",
@@ -185,14 +186,14 @@ describe("workflow config resolution", () => {
     process.env.SYMPHONIA_PROVIDER = "codex";
     process.env.SYMPHONIA_CODEX_COMMAND = "node fake-app-server.mjs";
 
-    const config = resolveWorkflowConfig(definition({ tracker: { kind: "mock" }, provider: "mock" }));
+    const config = resolveWorkflowConfig(definition({ tracker: linearTracker(), provider: "codex" }));
 
     expect(config.provider).toBe("codex");
     expect(config.codex.command).toBe("node fake-app-server.mjs");
   });
 
   it("rejects unsupported providers", () => {
-    expect(() => resolveWorkflowConfig(definition({ tracker: { kind: "mock" }, provider: "banana" }))).toThrow(
+    expect(() => resolveWorkflowConfig(definition({ tracker: linearTracker(), provider: "banana" }))).toThrow(
       "Unsupported provider",
     );
   });
@@ -217,7 +218,7 @@ describe("workflow config resolution", () => {
     const root = makeTempDir();
     const workflowPath = join(root, "nested", "WORKFLOW.md");
     const config = resolveWorkflowConfig(
-      definition({ tracker: { kind: "mock" }, workspace: { root: ".symphonia/workspaces" } }, workflowPath),
+      definition({ tracker: linearTracker(), workspace: { root: ".symphonia/workspaces" } }, workflowPath),
     );
 
     expect(config.workspace.root).toBe(resolve(root, "nested", ".symphonia/workspaces"));
@@ -308,7 +309,7 @@ describe("workflow config resolution", () => {
 
     const config = resolveWorkflowConfig(
       definition({
-        tracker: { kind: "mock" },
+        tracker: linearTracker(),
         github: {
           enabled: true,
           endpoint: "https://api.github.com",
@@ -341,7 +342,7 @@ describe("workflow config resolution", () => {
   it("allows github enabled without token for local-only artifacts", () => {
     const config = resolveWorkflowConfig(
       definition({
-        tracker: { kind: "mock" },
+        tracker: linearTracker(),
         github: {
           enabled: true,
           owner: "agora-creations",
@@ -356,22 +357,22 @@ describe("workflow config resolution", () => {
 
   it("validates github repository, pagination, and write guards", () => {
     expect(() =>
-      resolveWorkflowConfig(definition({ tracker: { kind: "mock" }, github: { enabled: true, owner: "agora-creations" } })),
+      resolveWorkflowConfig(definition({ tracker: linearTracker(), github: { enabled: true, owner: "agora-creations" } })),
     ).toThrow("github.owner and github.repo are required");
     expect(() =>
       resolveWorkflowConfig(
-        definition({ tracker: { kind: "mock" }, github: { enabled: true, owner: "agora-creations", repo: "symphonia", page_size: 0 } }),
+        definition({ tracker: linearTracker(), github: { enabled: true, owner: "agora-creations", repo: "symphonia", page_size: 0 } }),
       ),
     ).toThrow("github.page_size must be between");
     expect(() =>
       resolveWorkflowConfig(
-        definition({ tracker: { kind: "mock" }, github: { enabled: true, owner: "agora-creations", repo: "symphonia", max_pages: 0 } }),
+        definition({ tracker: linearTracker(), github: { enabled: true, owner: "agora-creations", repo: "symphonia", max_pages: 0 } }),
       ),
     ).toThrow("github.max_pages must be between");
     expect(() =>
       resolveWorkflowConfig(
         definition({
-          tracker: { kind: "mock" },
+          tracker: linearTracker(),
           github: {
             enabled: true,
             owner: "agora-creations",
@@ -386,17 +387,17 @@ describe("workflow config resolution", () => {
 
   it("fails invalid positive numeric settings", () => {
     expect(() =>
-      resolveWorkflowConfig(definition({ tracker: { kind: "mock" }, hooks: { timeout_ms: 0 } })),
+      resolveWorkflowConfig(definition({ tracker: linearTracker(), hooks: { timeout_ms: 0 } })),
     ).toThrow("hooks.timeout_ms must be positive");
     expect(() =>
-      resolveWorkflowConfig(definition({ tracker: { kind: "mock" }, agent: { max_turns: -1 } })),
+      resolveWorkflowConfig(definition({ tracker: linearTracker(), agent: { max_turns: -1 } })),
     ).toThrow("agent.max_turns must be positive");
   });
 
   it("resolves workspace cleanup policy defaults and safe summaries", () => {
     const config = resolveWorkflowConfig(
       definition({
-        tracker: { kind: "mock" },
+        tracker: linearTracker(),
         workspace: {
           root: ".symphonia/workspaces",
           cleanup: {
@@ -426,10 +427,10 @@ describe("workflow config resolution", () => {
 });
 
 describe("prompt rendering", () => {
-  const issue = mockIssue();
+  const issue = issueFixture();
   const workflow = {
-    defaultProvider: "mock" as const,
-    trackerKind: "mock" as const,
+    defaultProvider: "codex" as const,
+    trackerKind: "linear" as const,
     endpoint: null,
     projectSlug: null,
     teamKey: null,
@@ -451,7 +452,6 @@ describe("prompt rendering", () => {
     codexCommand: "codex app-server",
     codexModel: null,
     providers: {
-      mock: { enabled: true, displayName: "Mock provider" },
       codex: { enabled: true, command: "codex app-server", model: null },
       claude: {
         enabled: false,
@@ -535,7 +535,7 @@ describe("workspace manager", () => {
 
   it("creates and reuses issue workspaces", () => {
     const manager = new WorkspaceManager(makeTempDir());
-    const issue = mockIssue();
+    const issue = issueFixture();
     const first = manager.prepareIssueWorkspace(issue);
     const second = manager.prepareIssueWorkspace(issue);
 
@@ -555,8 +555,8 @@ describe("workspace manager", () => {
 
   it("creates distinct directories for distinct issues", () => {
     const manager = new WorkspaceManager(makeTempDir());
-    const first = manager.prepareIssueWorkspace(mockIssue("SYM-1"));
-    const second = manager.prepareIssueWorkspace(mockIssue("SYM-2"));
+    const first = manager.prepareIssueWorkspace(issueFixture("SYM-1"));
+    const second = manager.prepareIssueWorkspace(issueFixture("SYM-2"));
 
     expect(first.path).not.toBe(second.path);
     expect(manager.listExistingWorkspaces(["SYM-1", "SYM-2"])).toHaveLength(2);
@@ -604,7 +604,7 @@ describe("hook runner", () => {
   it("allows after_create orchestration to run only for newly-created workspaces", async () => {
     const root = makeTempDir();
     const manager = new WorkspaceManager(root);
-    const issue = mockIssue();
+    const issue = issueFixture();
     const first = manager.prepareIssueWorkspace(issue);
     const second = manager.prepareIssueWorkspace(issue);
 
@@ -646,7 +646,11 @@ function makeTempDir(): string {
   return root;
 }
 
-function mockIssue(identifier = "SYM-1"): Issue {
+function linearTracker(overrides: Record<string, unknown> = {}) {
+  return { kind: "linear", api_key: "linear-test-key", allow_workspace_wide: true, ...overrides };
+}
+
+function issueFixture(identifier = "SYM-1"): Issue {
   return {
     id: `issue-${identifier}`,
     identifier,
@@ -657,6 +661,6 @@ function mockIssue(identifier = "SYM-1"): Issue {
     priority: "High",
     createdAt: timestamp,
     updatedAt: timestamp,
-    url: `https://mock.local/issues/${identifier}`,
+    url: `https://linear.app/acme/issue/${identifier}`,
   };
 }

@@ -13,7 +13,7 @@ export type PromptTemplateInput = {
   workflow: WorkflowConfigSummary;
 };
 
-export const fallbackPrompt = "You are working on an issue from the mock tracker.";
+export const fallbackPrompt = "You are working on an issue from the configured Linear tracker.";
 
 const tokenPattern = /\{\{\s*([^}]+?)\s*\}\}/g;
 const pathPattern = /^[A-Za-z_$][A-Za-z0-9_$]*(\.[A-Za-z_$][A-Za-z0-9_$]*)*$/;

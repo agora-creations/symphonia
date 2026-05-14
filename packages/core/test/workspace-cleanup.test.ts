@@ -155,7 +155,7 @@ function run(identifier: string, status: Run["status"], updatedAt: string): Run 
     issueTitle: identifier,
     trackerKind: "linear",
     status,
-    provider: "mock",
+    provider: "codex",
     attempt: 1,
     retryOfRunId: null,
     workspacePath: join(root, identifier),

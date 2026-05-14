@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
-import { MockRunCancelledError } from "./mock-provider.js";
 import { checkCodexCommandHealth } from "./command-utils.js";
 import { CodexAppServerClient } from "./codex-client.js";
+import { ProviderRunCancelledError } from "./provider-errors.js";
 import { AgentProvider, ProviderRunContext } from "./provider.js";
 import { nowIso } from "./time.js";
 
@@ -44,7 +44,7 @@ export async function runCodexAgentProvider(context: ProviderRunContext): Promis
     });
   } catch (error) {
     if (context.signal.aborted) {
-      throw new MockRunCancelledError();
+      throw new ProviderRunCancelledError();
     }
 
     await context.emit({

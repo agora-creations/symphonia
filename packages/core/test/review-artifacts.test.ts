@@ -31,7 +31,7 @@ describe("review artifact refresh", () => {
     expect(result.snapshot).toMatchObject({
       runId: "run-1",
       issueIdentifier: "ENG-1",
-      trackerKind: "mock",
+      trackerKind: "linear",
       pr: null,
       commitStatus: null,
       error: null,
@@ -143,7 +143,7 @@ describe("review artifact refresh", () => {
 function workflowConfig(config: Record<string, unknown>) {
   return resolveWorkflowConfig({
     config: {
-      tracker: { kind: "mock" },
+      tracker: { kind: "linear", api_key: "linear-test-key", allow_workspace_wide: true },
       workspace: { root: ".symphonia/workspaces" },
       ...config,
     },
@@ -194,14 +194,14 @@ function run(): Run {
     issueId: "issue-1",
     issueIdentifier: "ENG-1",
     status: "succeeded",
-    provider: "mock",
+    provider: "codex",
     startedAt: timestamp,
     endedAt: timestamp,
     error: null,
   };
 }
 
-function issue(kind: "mock" | "linear" = "mock"): Issue {
+function issue(kind: "linear" = "linear"): Issue {
   return {
     id: "issue-1",
     identifier: "ENG-1",

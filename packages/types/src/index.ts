@@ -2,7 +2,7 @@ import { z } from "zod";
 
 const isoDateTime = z.string().datetime({ offset: true });
 
-export const TrackerKindSchema = z.enum(["mock", "linear"]);
+export const TrackerKindSchema = z.enum(["linear"]);
 export type TrackerKind = z.infer<typeof TrackerKindSchema>;
 
 export const IssueStateSchema = z.string().min(1);
@@ -74,7 +74,7 @@ export const RecoveryStateSchema = z.enum([
 ]);
 export type RecoveryState = z.infer<typeof RecoveryStateSchema>;
 
-export const ProviderIdSchema = z.enum(["mock", "codex", "claude", "cursor"]);
+export const ProviderIdSchema = z.enum(["codex", "claude", "cursor"]);
 export type ProviderId = z.infer<typeof ProviderIdSchema>;
 
 export const terminalRunStatuses: readonly RunStatus[] = [
@@ -97,7 +97,7 @@ export const RunSchema = z.object({
   issueId: z.string().min(1),
   issueIdentifier: z.string().min(1),
   issueTitle: z.string().nullable().default(null),
-  trackerKind: TrackerKindSchema.default("mock"),
+  trackerKind: TrackerKindSchema.default("linear"),
   status: RunStatusSchema,
   provider: ProviderIdSchema,
   attempt: z.number().int().positive().default(1),
@@ -450,10 +450,6 @@ export const WorkflowConfigSummarySchema = z.object({
   codexCommand: z.string().min(1),
   codexModel: z.string().min(1).nullable(),
   providers: z.object({
-    mock: z.object({
-      enabled: z.boolean(),
-      displayName: z.string().min(1),
-    }),
     codex: z.object({
       enabled: z.boolean(),
       command: z.string().min(1),
@@ -1630,7 +1626,7 @@ export const DaemonStatusSchema = z.object({
   dbPath: z.string().min(1),
   workspaceRoot: z.string().min(1).nullable(),
   workflowStatus: z.enum(["healthy", "missing", "invalid"]),
-  trackerStatus: z.enum(["mock", "healthy", "invalid_config", "unavailable", "stale", "unknown"]),
+  trackerStatus: z.enum(["healthy", "invalid_config", "unavailable", "stale", "unknown"]),
   providerSummary: z.array(ProviderHealthSchema.pick({ id: true, enabled: true, available: true, status: true })),
 });
 export type DaemonStatus = z.infer<typeof DaemonStatusSchema>;

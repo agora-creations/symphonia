@@ -109,10 +109,22 @@ ${checks.length > 0 ? checks.map((command) => `- \`${command}\``).join("\n") : "
 
 function workflowMd(context: HarnessScanContext): string {
   return `---
-provider: mock
+provider: codex
 
 tracker:
-  kind: mock
+  kind: linear
+  api_key: "$LINEAR_API_KEY"
+  allow_workspace_wide: true
+  read_only: true
+  active_states:
+    - "Todo"
+    - "In Progress"
+    - "Backlog"
+  terminal_states:
+    - "Done"
+    - "Closed"
+    - "Canceled"
+    - "Duplicate"
 
 workspace:
   root: ".symphonia/workspaces"
@@ -129,9 +141,9 @@ hooks:
   after_create: |
     printf "Workspace created at $(pwd)\\n"
   before_run: |
-    printf "Preparing safe mock run in $(pwd)\\n"
+    printf "Preparing provider run in $(pwd)\\n"
   after_run: |
-    printf "Finished safe mock run in $(pwd)\\n"
+    printf "Finished provider run in $(pwd)\\n"
 ---
 
 You are working on issue {{ issue.identifier }}.

@@ -1,7 +1,7 @@
 import { z } from "zod";
 
-export const ProviderIdSchema = z.enum(["mock", "codex", "claude", "cursor"]);
-export const TrackerKindSchema = z.enum(["mock", "linear"]);
+export const ProviderIdSchema = z.enum(["codex", "claude", "cursor"]);
+export const TrackerKindSchema = z.enum(["linear"]);
 
 const nullablePath = z.string().min(1).nullable();
 const envVarName = z

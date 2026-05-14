@@ -52,19 +52,3 @@ export type AgentProvider = {
   health(config?: CodexConfig | ClaudeConfig | CursorConfig): Promise<ProviderHealth>;
   start(context: ProviderRunContext): Promise<void>;
 };
-
-export const mockProviderHealth: ProviderHealth = {
-  id: "mock",
-  displayName: "Mock provider",
-  available: true,
-  command: null,
-  enabled: true,
-  configured: true,
-  model: null,
-  status: "available",
-  version: "built-in",
-  error: null,
-  hint: "Deterministic local mock provider for tests and demos.",
-  lastCheckedAt: null,
-  config: { builtIn: true },
-};

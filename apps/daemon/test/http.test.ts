@@ -16,9 +16,12 @@ beforeEach(() => {
   directory = mkdtempSync(join(tmpdir(), "symphonia-daemon-"));
   workflowPath = join(directory, "WORKFLOW.md");
   writeWorkflow();
-  process.env.SYMPHONIA_MOCK_DELAY_MS = "1";
 
-  const created = createDaemonServer(new EventStore(join(directory, "test.sqlite")), { workflowPath, cwd: directory });
+  const created = createDaemonServer(new EventStore(join(directory, "test.sqlite")), {
+    workflowPath,
+    cwd: directory,
+    linearFetch: fakeLinearFetch({ state: "Todo" }),
+  });
   daemon = created.daemon;
 });
 
@@ -40,14 +43,13 @@ describe("daemon API", () => {
     const status = daemon.refreshWorkflowStatus();
 
     expect(status.status).toBe("healthy");
-    expect(status.effectiveConfigSummary?.trackerKind).toBe("mock");
+    expect(status.effectiveConfigSummary?.trackerKind).toBe("linear");
     expect(JSON.stringify(status.effectiveConfigSummary)).not.toContain("apiKey");
   });
 
   it("reports provider health without crashing", async () => {
     const providers = await daemon.listProviderHealth();
 
-    expect(providers.some((provider) => provider.id === "mock" && provider.available)).toBe(true);
     expect(providers.some((provider) => provider.id === "codex")).toBe(true);
     expect(providers.some((provider) => provider.id === "claude" && provider.status === "disabled")).toBe(true);
     expect(providers.some((provider) => provider.id === "cursor" && provider.status === "disabled")).toBe(true);
@@ -63,15 +65,15 @@ describe("daemon API", () => {
     expect(cursorHealth.provider.id).toBe("cursor");
   });
 
-  it("reports tracker status and refreshes mock issue cache", async () => {
+  it("reports tracker status and refreshes real Linear issue cache through a test transport", async () => {
     const status = daemon.getTrackerStatus();
 
-    expect(status.kind).toBe("mock");
-    expect(status.config?.trackerKind).toBe("mock");
+    expect(status.kind).toBe("linear");
+    expect(status.config?.trackerKind).toBe("linear");
     expect(JSON.stringify(status)).not.toContain("apiKey");
 
     const issues = await daemon.refreshIssueCache();
-    expect(issues.some((issue) => issue.identifier === "SYM-1")).toBe(true);
+    expect(issues.some((issue) => issue.identifier === "ENG-101")).toBe(true);
     expect(daemon.getTrackerStatus().issueCount).toBeGreaterThan(0);
   });
 
@@ -172,7 +174,7 @@ describe("daemon API", () => {
     expect(JSON.stringify(status)).not.toContain("MISSING_LINEAR_API_KEY");
   });
 
-  it("refreshes fake linear issues and starts a mock run from a linear card", async () => {
+  it("refreshes Linear issues and starts a Codex run from a Linear card", async () => {
     const linearFetch = fakeLinearFetch({ state: "Todo" });
     const created = createDaemonServer(new EventStore(join(directory, "linear.sqlite")), {
       workflowPath,
@@ -181,16 +183,16 @@ describe("daemon API", () => {
     });
     daemon.close();
     daemon = created.daemon;
-    writeLinearWorkflow();
+    writeLinearWorkflow({ codexCommand: fakeCodexCommand("success") });
 
     const issues = await daemon.refreshIssueCache();
     expect(issues.map((issue) => issue.identifier)).toEqual(["ENG-101"]);
     expect(daemon.getTrackerStatus()).toMatchObject({ kind: "linear", status: "healthy", issueCount: 1 });
 
-    const run = await daemon.startRun("linear-issue-101", "mock");
+    const run = await daemon.startRun("linear-issue-101", "codex");
     await waitForTerminal(run.id, "succeeded");
 
-    expect(run.provider).toBe("mock");
+    expect(run.provider).toBe("codex");
     expect(daemon.getRunPrompt(run.id)).toContain("Linear-backed daemon test");
     expect(daemon.getRunPrompt(run.id)).toContain("https://linear.app/acme/issue/ENG-101");
     const workspaceEvent = getEvents(run.id).find((event) => event.type === "workspace.ready");
@@ -219,7 +221,6 @@ describe("daemon API", () => {
 
   it("reconciles running linear issues that become terminal", async () => {
     let linearState = "Todo";
-    process.env.SYMPHONIA_MOCK_DELAY_MS = "50";
     const created = createDaemonServer(new EventStore(join(directory, "linear-reconcile.sqlite")), {
       workflowPath,
       cwd: directory,
@@ -227,11 +228,11 @@ describe("daemon API", () => {
     });
     daemon.close();
     daemon = created.daemon;
-    writeLinearWorkflow();
+    writeLinearWorkflow({ codexCommand: fakeCodexCommand("wait") });
     await daemon.refreshIssueCache();
 
-    const run = await daemon.startRun("linear-issue-101", "mock");
-    await waitForEvent(run.id, "agent.message");
+    const run = await daemon.startRun("linear-issue-101", "codex");
+    await waitForEvent(run.id, "codex.turn.started");
 
     linearState = "Done";
     await daemon.refreshIssueCache({ reconcile: true });
@@ -241,8 +242,8 @@ describe("daemon API", () => {
     expect(events.some((event) => event.type === "tracker.reconciled" && event.action === "stopped_terminal")).toBe(true);
   });
 
-  it("runs workflow, workspace, prompt, hook, and mock provider events", async () => {
-    const created = await daemon.startRun("issue-frontend-board");
+  it("runs workflow, workspace, prompt, hook, and Codex provider events", async () => {
+    const created = await daemon.startRun("linear-issue-101");
 
     await waitForTerminal(created.id, "succeeded");
     await waitForEvent(created.id, "hook.succeeded", 3);
@@ -253,21 +254,21 @@ describe("daemon API", () => {
     expect(types.indexOf("workspace.ready")).toBeLessThan(types.indexOf("prompt.rendered"));
     expect(types).toContain("hook.started");
     expect(types).toContain("hook.succeeded");
-    expect(types).toContain("agent.message");
+    expect(types).toContain("codex.assistant.delta");
     expect(types).toContain("github.review_artifacts.refreshed");
 
     const workspaceEvent = events.find((event) => event.type === "workspace.ready");
-    expect(workspaceEvent?.type === "workspace.ready" ? workspaceEvent.workspace.path : "").toContain("SYM-1");
+    expect(workspaceEvent?.type === "workspace.ready" ? workspaceEvent.workspace.path : "").toContain("ENG-101");
     expect(existsSync(workspaceEvent?.type === "workspace.ready" ? workspaceEvent.workspace.path : "")).toBe(true);
 
     const hookEvent = events.find((event) => event.type === "hook.succeeded" && event.hook.stdout.includes("Preparing"));
     expect(hookEvent?.type === "hook.succeeded" ? hookEvent.hook.stdout : "").toContain("Preparing");
 
-    expect(daemon.getRunPrompt(created.id)).toContain("Build Linear-like board columns");
+    expect(daemon.getRunPrompt(created.id)).toContain("Linear-backed daemon test");
 
-    const workspace = daemon.getWorkspaceInfo("SYM-1");
+    const workspace = daemon.getWorkspaceInfo("ENG-101");
     expect(workspace.exists).toBe(true);
-    expect(daemon.listWorkspaces().some((item) => item.issueIdentifier === "SYM-1")).toBe(true);
+    expect(daemon.listWorkspaces().some((item) => item.issueIdentifier === "ENG-101")).toBe(true);
   });
 
   it("reloads invalid workflow status without crashing", async () => {
@@ -277,18 +278,17 @@ describe("daemon API", () => {
     expect(status.status).toBe("invalid");
     expect(status.error).toContain("workflow_yaml_invalid");
 
-    const created = await daemon.startRun("issue-frontend-board");
-    await waitForTerminal(created.id, "failed");
-    expect(getEvents(created.id).some((event) => event.type === "workflow.invalid")).toBe(true);
+    await expect(daemon.startRun("linear-issue-101")).rejects.toThrow("workflow_yaml_invalid");
   });
 
   it("keeps stop and retry behavior working", async () => {
-    process.env.SYMPHONIA_MOCK_DELAY_MS = "50";
-    const created = await daemon.startRun("issue-blocked-looking");
+    writeWorkflow({ codexCommand: fakeCodexCommand("wait") });
+    const created = await daemon.startRun("linear-issue-101");
 
     const stopped = await daemon.stopRun(created.id);
     expect(stopped.status).toBe("cancelled");
 
+    writeWorkflow({ codexCommand: fakeCodexCommand("success") });
     const retried = await daemon.retryRun(created.id);
     expect(retried.status).toBe("queued");
     await waitForTerminal(retried.id, "succeeded");
@@ -297,7 +297,7 @@ describe("daemon API", () => {
   it("runs the codex provider against a fake app-server", async () => {
     writeWorkflow({ codexCommand: fakeCodexCommand("success") });
 
-    const created = await daemon.startRun("issue-frontend-board", "codex");
+    const created = await daemon.startRun("linear-issue-101", "codex");
 
     expect(created.provider).toBe("codex");
     await waitForTerminal(created.id, "succeeded");
@@ -311,7 +311,7 @@ describe("daemon API", () => {
   it("runs the Claude provider against a fake CLI and refreshes artifacts", async () => {
     writeWorkflow({ provider: "claude", claudeCommand: fakeCliCommand("claude-success") });
 
-    const created = await daemon.startRun("issue-frontend-board", "claude");
+    const created = await daemon.startRun("linear-issue-101", "claude");
     await waitForTerminal(created.id, "succeeded");
 
     const types = getEvents(created.id).map((event) => event.type);
@@ -324,7 +324,7 @@ describe("daemon API", () => {
   it("runs the Cursor provider against a fake CLI and refreshes artifacts", async () => {
     writeWorkflow({ provider: "cursor", cursorCommand: fakeCliCommand("cursor-success") });
 
-    const created = await daemon.startRun("issue-frontend-board", "cursor");
+    const created = await daemon.startRun("linear-issue-101", "cursor");
     await waitForTerminal(created.id, "succeeded");
 
     const types = getEvents(created.id).map((event) => event.type);
@@ -336,13 +336,13 @@ describe("daemon API", () => {
 
   it("stops active Claude and Cursor fake CLI runs", async () => {
     writeWorkflow({ provider: "claude", claudeCommand: fakeCliCommand("claude-wait") });
-    const claudeRun = await daemon.startRun("issue-frontend-board", "claude");
+    const claudeRun = await daemon.startRun("linear-issue-101", "claude");
     await waitForEvent(claudeRun.id, "claude.system.init");
     await daemon.stopRun(claudeRun.id);
     await waitForTerminal(claudeRun.id, "cancelled");
 
     writeWorkflow({ provider: "cursor", cursorCommand: fakeCliCommand("cursor-wait") });
-    const cursorRun = await daemon.startRun("issue-blocked-looking", "cursor");
+    const cursorRun = await daemon.startRun("linear-issue-101", "cursor");
     await waitForEvent(cursorRun.id, "cursor.system.init");
     await daemon.stopRun(cursorRun.id);
     await waitForTerminal(cursorRun.id, "cancelled");
@@ -350,14 +350,14 @@ describe("daemon API", () => {
 
   it("retries failed Claude and Cursor fake CLI runs with the current workflow", async () => {
     writeWorkflow({ provider: "claude", claudeCommand: fakeCliCommand("claude-error-result") });
-    const failedClaude = await daemon.startRun("issue-frontend-board", "claude");
+    const failedClaude = await daemon.startRun("linear-issue-101", "claude");
     await waitForTerminal(failedClaude.id, "failed");
     writeWorkflow({ provider: "claude", claudeCommand: fakeCliCommand("claude-success") });
     const retriedClaude = await daemon.retryRun(failedClaude.id);
     await waitForTerminal(retriedClaude.id, "succeeded");
 
     writeWorkflow({ provider: "cursor", cursorCommand: fakeCliCommand("cursor-error-result") });
-    const failedCursor = await daemon.startRun("issue-blocked-looking", "cursor");
+    const failedCursor = await daemon.startRun("linear-issue-101", "cursor");
     await waitForTerminal(failedCursor.id, "failed");
     writeWorkflow({ provider: "cursor", cursorCommand: fakeCliCommand("cursor-success") });
     const retriedCursor = await daemon.retryRun(failedCursor.id);
@@ -365,14 +365,14 @@ describe("daemon API", () => {
   });
 
   it("persists and serves review artifact snapshots through daemon endpoints", async () => {
-    const created = await daemon.startRun("issue-frontend-board");
+    const created = await daemon.startRun("linear-issue-101");
 
     await waitForEvent(created.id, "github.review_artifacts.refreshed");
     const stored = daemon.getReviewArtifacts(created.id);
     expect(stored).toMatchObject({
       runId: created.id,
-      issueIdentifier: "SYM-1",
-      trackerKind: "mock",
+      issueIdentifier: "ENG-101",
+      trackerKind: "linear",
     });
 
     const fromEndpoint = await requestJson<{ reviewArtifacts: unknown }>("GET", `/runs/${created.id}/review-artifacts`);
@@ -388,7 +388,7 @@ describe("daemon API", () => {
   it("handles codex approval requests through the daemon registry", async () => {
     writeWorkflow({ codexCommand: fakeCodexCommand("approval") });
 
-    const created = await daemon.startRun("issue-frontend-board", "codex");
+    const created = await daemon.startRun("linear-issue-101", "codex");
     await waitForApproval(created.id);
 
     const pending = daemon.listApprovals(created.id);
@@ -404,22 +404,31 @@ describe("daemon API", () => {
   });
 
   it("reconstructs active persisted runs on startup and allows manual retry", async () => {
-    process.env.SYMPHONIA_MOCK_DELAY_MS = "50";
     const databasePath = join(directory, "restart.sqlite");
     daemon.close();
-    daemon = createDaemonServer(new EventStore(databasePath), { workflowPath, cwd: directory }).daemon;
+    daemon = createDaemonServer(new EventStore(databasePath), {
+      workflowPath,
+      cwd: directory,
+      linearFetch: fakeLinearFetch({ state: "Todo" }),
+    }).daemon;
 
-    const created = await daemon.startRun("issue-frontend-board", "mock");
-    await waitForEvent(created.id, "agent.message");
+    writeWorkflow({ codexCommand: fakeCodexCommand("wait") });
+    const created = await daemon.startRun("linear-issue-101", "codex");
+    await waitForEvent(created.id, "codex.turn.started");
     daemon.close();
 
-    daemon = createDaemonServer(new EventStore(databasePath), { workflowPath, cwd: directory }).daemon;
+    daemon = createDaemonServer(new EventStore(databasePath), {
+      workflowPath,
+      cwd: directory,
+      linearFetch: fakeLinearFetch({ state: "Todo" }),
+    }).daemon;
     const recovered = daemon.requireRun(created.id);
 
     expect(recovered.status).toBe("interrupted");
     expect(recovered.recoveryState).toBe("interrupted_by_restart");
     expect(getEvents(created.id).some((event) => event.type === "run.recovered")).toBe(true);
 
+    writeWorkflow({ codexCommand: fakeCodexCommand("success") });
     const retried = await daemon.retryRun(created.id);
     await waitForTerminal(retried.id, "succeeded");
     expect(daemon.requireRun(created.id).recoveryState).toBe("manually_retried");
@@ -428,13 +437,22 @@ describe("daemon API", () => {
   it("leaves terminal persisted runs unchanged on startup", async () => {
     const databasePath = join(directory, "terminal-restart.sqlite");
     daemon.close();
-    daemon = createDaemonServer(new EventStore(databasePath), { workflowPath, cwd: directory }).daemon;
+    daemon = createDaemonServer(new EventStore(databasePath), {
+      workflowPath,
+      cwd: directory,
+      linearFetch: fakeLinearFetch({ state: "Todo" }),
+    }).daemon;
 
-    const created = await daemon.startRun("issue-frontend-board", "mock");
+    writeWorkflow({ codexCommand: fakeCodexCommand("success") });
+    const created = await daemon.startRun("linear-issue-101", "codex");
     await waitForTerminal(created.id, "succeeded");
     daemon.close();
 
-    daemon = createDaemonServer(new EventStore(databasePath), { workflowPath, cwd: directory }).daemon;
+    daemon = createDaemonServer(new EventStore(databasePath), {
+      workflowPath,
+      cwd: directory,
+      linearFetch: fakeLinearFetch({ state: "Todo" }),
+    }).daemon;
 
     expect(daemon.requireRun(created.id).status).toBe("succeeded");
     expect(getEvents(created.id).some((event) => event.type === "run.recovered")).toBe(false);
@@ -443,14 +461,22 @@ describe("daemon API", () => {
   it("recovers stale pending approvals as non-actionable", async () => {
     const databasePath = join(directory, "approval-restart.sqlite");
     daemon.close();
-    daemon = createDaemonServer(new EventStore(databasePath), { workflowPath, cwd: directory }).daemon;
+    daemon = createDaemonServer(new EventStore(databasePath), {
+      workflowPath,
+      cwd: directory,
+      linearFetch: fakeLinearFetch({ state: "Todo" }),
+    }).daemon;
     writeWorkflow({ codexCommand: fakeCodexCommand("approval") });
 
-    const created = await daemon.startRun("issue-frontend-board", "codex");
+    const created = await daemon.startRun("linear-issue-101", "codex");
     await waitForApproval(created.id);
     daemon.close();
 
-    daemon = createDaemonServer(new EventStore(databasePath), { workflowPath, cwd: directory }).daemon;
+    daemon = createDaemonServer(new EventStore(databasePath), {
+      workflowPath,
+      cwd: directory,
+      linearFetch: fakeLinearFetch({ state: "Todo" }),
+    }).daemon;
 
     expect(daemon.listApprovals(created.id)).toHaveLength(0);
     expect(getEvents(created.id).some((event) => event.type === "approval.recovered")).toBe(true);
@@ -490,7 +516,7 @@ describe("daemon API", () => {
   it("fails codex runs gracefully when the command is unavailable", async () => {
     writeWorkflow({ codexCommand: "definitely-not-a-symphonia-command" });
 
-    const created = await daemon.startRun("issue-frontend-board", "codex");
+    const created = await daemon.startRun("linear-issue-101", "codex");
     await waitForTerminal(created.id, "failed");
 
     expect(getEvents(created.id).some((event) => event.type === "codex.error")).toBe(true);
@@ -499,7 +525,7 @@ describe("daemon API", () => {
   it("interrupts active codex turns when stopped", async () => {
     writeWorkflow({ codexCommand: fakeCodexCommand("wait") });
 
-    const created = await daemon.startRun("issue-frontend-board", "codex");
+    const created = await daemon.startRun("linear-issue-101", "codex");
     await waitForEvent(created.id, "codex.turn.started");
 
     await daemon.stopRun(created.id);
@@ -599,7 +625,7 @@ function writeWorkflow(
     codexCommand?: string;
     claudeCommand?: string;
     cursorCommand?: string;
-    provider?: "mock" | "codex" | "claude" | "cursor";
+    provider?: "codex" | "claude" | "cursor";
     githubToken?: string;
     cleanupEnabled?: boolean;
     cleanupDryRun?: boolean;
@@ -609,9 +635,21 @@ function writeWorkflow(
   writeFileSync(
     workflowPath,
     `---
-provider: ${options.provider ?? "mock"}
+provider: ${options.provider ?? "codex"}
 tracker:
-  kind: mock
+  kind: linear
+  endpoint: "https://api.linear.app/graphql"
+  api_key: "linear-secret"
+  team_key: "ENG"
+  active_states:
+    - "Todo"
+    - "In Progress"
+  terminal_states:
+    - "Done"
+    - "Canceled"
+  page_size: 5
+  max_pages: 2
+  read_only: true
 workspace:
   root: "./workspaces"
   cleanup:
@@ -638,7 +676,7 @@ ${options.githubToken ? `github:
   write:
     enabled: false
 ` : ""}codex:
-  command: ${JSON.stringify(options.codexCommand ?? "codex app-server")}
+  command: ${JSON.stringify(options.codexCommand ?? fakeCodexCommand("success"))}
   model: "fake-model"
   approval_policy: "on-request"
   turn_sandbox_policy: "workspaceWrite"
@@ -689,7 +727,7 @@ function writeLinearWorkflow(options: { codexCommand?: string; apiKey?: string; 
   writeFileSync(
     workflowPath,
     `---
-provider: mock
+provider: codex
 tracker:
   kind: linear
   endpoint: "https://api.linear.app/graphql"
@@ -707,7 +745,7 @@ tracker:
 workspace:
   root: "./workspaces"
 codex:
-  command: ${JSON.stringify(options.codexCommand ?? "codex app-server")}
+  command: ${JSON.stringify(options.codexCommand ?? fakeCodexCommand("success"))}
   model: "fake-model"
   approval_policy: "on-request"
   turn_sandbox_policy: "workspaceWrite"

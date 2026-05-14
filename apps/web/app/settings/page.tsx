@@ -196,7 +196,7 @@ export default function SettingsPage() {
             </div>
           </Section>
 
-          <Section title="Trackers And GitHub" description="Mock mode needs no credentials. Linear and GitHub use daemon-side environment variables.">
+          <Section title="Trackers And GitHub" description="Linear and GitHub use daemon-side environment variables; secret values are never stored in desktop settings.">
             <div className="grid gap-2 text-sm">
               <KeyValue label="Tracker" value={trackerStatus ? `${trackerStatus.kind} / ${trackerHealth ? (trackerHealth.healthy ? "healthy" : "unavailable") : "health unknown"}` : "Unavailable"} />
               <KeyValue label="Tracker last sync" value={trackerStatus?.lastSyncAt ?? "Never"} />
