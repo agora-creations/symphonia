@@ -24,6 +24,13 @@ export const IssueTrackerMetadataSchema = z.object({
 });
 export type IssueTrackerMetadata = z.infer<typeof IssueTrackerMetadataSchema>;
 
+export const IssueAssigneeSchema = z.object({
+  id: z.string().min(1),
+  name: z.string().min(1).nullable().optional(),
+  email: z.string().email().nullable().optional(),
+});
+export type IssueAssignee = z.infer<typeof IssueAssigneeSchema>;
+
 export const IssueSchema = z.object({
   id: z.string().min(1),
   identifier: z.string().min(1),
@@ -38,6 +45,7 @@ export const IssueSchema = z.object({
   updatedAt: isoDateTime,
   url: z.string().url(),
   tracker: IssueTrackerMetadataSchema.optional(),
+  assignee: IssueAssigneeSchema.nullable().optional(),
   lastFetchedAt: isoDateTime.nullable().optional(),
 });
 export type Issue = z.infer<typeof IssueSchema>;

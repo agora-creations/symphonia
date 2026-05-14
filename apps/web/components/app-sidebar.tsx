@@ -1,22 +1,31 @@
+"use client";
+
 import Link from "next/link";
 import { usePathname } from "next/navigation";
 import {
   Inbox,
   Layers,
+  Users,
+  FolderKanban,
   Settings,
   Search,
   ScanSearch,
   Plus,
   ChevronDown,
+  Hash,
   Moon,
   Sun,
 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { useTheme } from "@/components/theme-provider";
+import { useWorkspaceInsights } from "@/components/use-workspace-insights";
 
 const workspaceItems = [
   { to: "/inbox", label: "Inbox", icon: Inbox },
   { to: "/issues", label: "Issues", icon: Layers },
+  { to: "/projects", label: "Projects", icon: FolderKanban },
+  { to: "/members", label: "Members", icon: Users },
+  { to: "/teams", label: "Teams", icon: Hash },
   { to: "/harness", label: "Harness", icon: ScanSearch },
   { to: "/settings", label: "Settings", icon: Settings },
 ];
@@ -24,6 +33,7 @@ const workspaceItems = [
 export function AppSidebar() {
   const pathname = usePathname();
   const { theme, toggle } = useTheme();
+  const { insights, issues } = useWorkspaceInsights();
   const isActive = (to: string) => pathname === to || pathname.startsWith(to + "/");
 
   return (
@@ -64,13 +74,48 @@ export function AppSidebar() {
                 >
                 <Icon className="h-4 w-4" />
                 <span className="flex-1">{item.label}</span>
+                {item.to === "/issues" && issues.length > 0 && (
+                  <span className="text-[10px] tabular-nums text-muted-foreground">{issues.length}</span>
+                )}
               </Link>
             );
           })}
         </nav>
 
-        <div className="rounded-md border bg-sidebar-accent/30 px-3 py-2 text-[12px] text-muted-foreground">
-          Connect Linear in `WORKFLOW.md` to populate real issues.
+        <div>
+          <div className="mb-1 flex items-center justify-between px-2">
+            <span className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+              Your teams
+            </span>
+            <button
+              type="button"
+              disabled
+              title="Team creation needs a real workspace write API."
+              className="grid h-5 w-5 place-items-center rounded text-muted-foreground opacity-60"
+              aria-label="Add team"
+            >
+              <Plus className="h-3 w-3" />
+            </button>
+          </div>
+          <div className="space-y-0.5">
+            {insights.teams.map((team) => (
+              <div
+                key={team.id}
+                className="flex w-full items-center gap-2 rounded-md px-2 py-1.5 text-sm text-muted-foreground"
+                aria-label={`${team.name} team`}
+              >
+                <span className={cn("grid h-5 w-5 place-items-center rounded bg-muted text-[10px] font-bold", team.color)}>
+                  {team.key[0]}
+                </span>
+                <span className="flex-1 truncate text-left">{team.name}</span>
+              </div>
+            ))}
+            {insights.teams.length === 0 && (
+              <div className="rounded-md border bg-sidebar-accent/30 px-3 py-2 text-[12px] text-muted-foreground">
+                Connect Linear and refresh issues to populate real teams.
+              </div>
+            )}
+          </div>
         </div>
       </div>
 

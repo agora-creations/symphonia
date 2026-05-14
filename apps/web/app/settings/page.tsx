@@ -1,12 +1,31 @@
 "use client";
 
-import { useCallback, useEffect, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import type { ReactNode } from "react";
-import { CheckCircle2, Copy, ExternalLink, FolderOpen, KeyRound, LogOut, RefreshCw, RotateCcw, ScanSearch } from "lucide-react";
-import { MainLayout } from "@/components/main-layout";
 import {
-  getDaemonStatus,
+  Bell,
+  Building2,
+  Check,
+  CheckCircle2,
+  Copy,
+  CreditCard,
+  ExternalLink,
+  FolderOpen,
+  KeyRound,
+  LogOut,
+  Palette,
+  Plug,
+  RefreshCw,
+  RotateCcw,
+  ScanSearch,
+  User as UserIcon,
+} from "lucide-react";
+import { MainLayout } from "@/components/main-layout";
+import { useTheme } from "@/components/theme-provider";
+import {
+  disconnectAuth,
   getAuthStatus,
+  getDaemonStatus,
   getGithubHealth,
   getGithubStatus,
   getProviders,
@@ -18,13 +37,40 @@ import {
   refreshAuth,
   startAuth,
   validateAuth,
-  disconnectAuth,
 } from "@/lib/api";
 import { getDesktopApi, type DesktopDiagnostics, type DesktopSettings, type DesktopStatus } from "@/lib/desktop";
-import { type AuthProviderId, type AuthStartResult, type AuthStatus, type DaemonStatus, type GitHubHealth, type GitHubStatus, type IntegrationAuthConnection, type ProviderHealth, type TrackerHealth, type TrackerStatus, type WorkspaceCleanupPlan, type WorkspaceInventory } from "@symphonia/types";
+import { cn } from "@/lib/utils";
+import {
+  type AuthProviderId,
+  type AuthStartResult,
+  type AuthStatus,
+  type DaemonStatus,
+  type GitHubHealth,
+  type GitHubStatus,
+  type IntegrationAuthConnection,
+  type ProviderHealth,
+  type TrackerHealth,
+  type TrackerStatus,
+  type WorkspaceCleanupPlan,
+  type WorkspaceInventory,
+} from "@symphonia/types";
+
+type SectionId = "profile" | "appearance" | "notifications" | "workspace" | "integrations" | "security" | "billing";
+
+const sections: { id: SectionId; label: string; icon: typeof UserIcon }[] = [
+  { id: "profile", label: "Profile", icon: UserIcon },
+  { id: "appearance", label: "Appearance", icon: Palette },
+  { id: "notifications", label: "Notifications", icon: Bell },
+  { id: "workspace", label: "Workspace", icon: Building2 },
+  { id: "integrations", label: "Integrations", icon: Plug },
+  { id: "security", label: "Security", icon: KeyRound },
+  { id: "billing", label: "Billing", icon: CreditCard },
+];
 
 export default function SettingsPage() {
   const desktop = getDesktopApi();
+  const { theme, toggle } = useTheme();
+  const [active, setActive] = useState<SectionId>("profile");
   const [desktopStatus, setDesktopStatus] = useState<DesktopStatus | null>(null);
   const [desktopSettings, setDesktopSettings] = useState<DesktopSettings | null>(null);
   const [diagnostics, setDiagnostics] = useState<DesktopDiagnostics | null>(null);
@@ -40,6 +86,7 @@ export default function SettingsPage() {
   const [workspaceInventory, setWorkspaceInventory] = useState<WorkspaceInventory | null>(null);
   const [cleanupPlan, setCleanupPlan] = useState<WorkspaceCleanupPlan | null>(null);
   const [message, setMessage] = useState<string | null>(null);
+  const [slackConnected, setSlackConnected] = useState(false);
 
   const load = useCallback(async () => {
     setMessage(null);
@@ -79,6 +126,11 @@ export default function SettingsPage() {
   useEffect(() => {
     void load();
   }, [load]);
+
+  const connectedAccount = useMemo(() => {
+    const connected = authStatus?.providers.find((connection) => connection.status === "connected" && connection.accountLabel);
+    return connected?.accountLabel ?? null;
+  }, [authStatus]);
 
   async function choosePath(kind: "repositoryPath" | "workspaceRoot" | "workflowPath") {
     if (!desktop) return;
@@ -188,175 +240,277 @@ export default function SettingsPage() {
     <MainLayout>
       <div className="flex h-full flex-col">
         <header className="flex items-center justify-between border-b px-4 py-2.5">
-          <div>
-            <span className="text-sm font-semibold">Settings</span>
-            <p className="text-xs text-muted-foreground">Desktop shell, daemon, integrations, recovery, and diagnostics.</p>
-          </div>
-          <button type="button" onClick={() => void load()} className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted">
-            <RefreshCw className="h-4 w-4" />
+          <span className="text-sm font-semibold">Settings</span>
+          <button type="button" onClick={() => void load()} className="inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs hover:bg-muted">
+            <RefreshCw className="h-3.5 w-3.5" />
             Refresh
           </button>
         </header>
 
-        <div className="grid gap-4 p-4 xl:grid-cols-[1fr_1fr]">
-          <Section title="Desktop Shell" description={desktop ? "Electron desktop mode is active." : "Open this page in the desktop app for shell controls."}>
-            {desktopStatus ? (
-              <div className="grid gap-2 text-sm">
-                <KeyValue label="Version" value={`${desktopStatus.appVersion} / Electron ${desktopStatus.electronVersion}`} />
-                <KeyValue label="Platform" value={desktopStatus.platform} />
-                <KeyValue label="Settings file" value={desktopStatus.settingsPath} />
-                <KeyValue label="Daemon process" value={`${desktopStatus.daemon.state} ${desktopStatus.daemon.url ?? ""}`} />
-                <KeyValue label="Web process" value={`${desktopStatus.web.state} ${desktopStatus.web.url ?? ""}`} />
-              </div>
-            ) : (
-              <p className="text-sm text-muted-foreground">Desktop APIs are unavailable in browser-only mode.</p>
-            )}
-            <div className="mt-3 flex flex-wrap gap-2">
-              <button type="button" onClick={restartDaemon} disabled={!desktop} className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm disabled:opacity-50">
-                <RotateCcw className="h-4 w-4" />
-                Restart daemon
+        <div className="flex min-h-0 flex-1">
+          <nav className="hidden w-56 shrink-0 flex-col gap-0.5 border-r p-2 md:flex">
+            {sections.map((section) => {
+              const Icon = section.icon;
+              const isActive = active === section.id;
+              return (
+                <button
+                  key={section.id}
+                  type="button"
+                  onClick={() => setActive(section.id)}
+                  className={cn(
+                    "flex items-center gap-2 rounded-md px-2 py-1.5 text-left text-sm transition-colors",
+                    isActive ? "bg-accent font-medium text-foreground" : "text-muted-foreground hover:bg-accent/60 hover:text-foreground",
+                  )}
+                >
+                  <Icon className="h-4 w-4" />
+                  {section.label}
+                </button>
+              );
+            })}
+          </nav>
+
+          <div className="flex gap-1 overflow-x-auto border-b px-3 py-2 md:hidden">
+            {sections.map((section) => (
+              <button
+                key={section.id}
+                type="button"
+                onClick={() => setActive(section.id)}
+                className={cn(
+                  "whitespace-nowrap rounded-md px-2.5 py-1 text-xs",
+                  active === section.id ? "bg-accent font-medium text-foreground" : "text-muted-foreground hover:bg-accent/60",
+                )}
+              >
+                {section.label}
               </button>
-              <button type="button" onClick={restartWeb} disabled={!desktop} className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm disabled:opacity-50">
-                <RotateCcw className="h-4 w-4" />
-                Restart web
-              </button>
-              <button type="button" onClick={copyDiagnostics} disabled={!desktop} className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm disabled:opacity-50">
-                <Copy className="h-4 w-4" />
-                Copy diagnostics
-              </button>
-            </div>
-            {message && <p className="mt-3 text-sm text-muted-foreground">{message}</p>}
-          </Section>
+            ))}
+          </div>
 
-          <Section title="Local Settings" description="Settings are stored outside the repo and do not contain API keys. Use environment variables for secrets.">
-            {desktopSettings ? (
-              <div className="space-y-3">
-                <PathRow label="Repository" value={desktopSettings.repositoryPath} onChoose={() => void choosePath("repositoryPath")} />
-                <PathRow label="WORKFLOW.md" value={desktopSettings.workflowPath} onChoose={() => void choosePath("workflowPath")} />
-                <PathRow label="Workspace root" value={desktopSettings.workspaceRoot} onChoose={() => void choosePath("workspaceRoot")} />
-                <KeyValue label="Database" value={desktopSettings.databasePath ?? "Not set"} />
-                <KeyValue label="Default provider" value={desktopSettings.defaultProviderId} />
-                <KeyValue label="Default tracker" value={desktopSettings.defaultTrackerKind} />
-                <KeyValue label="Linear secret" value={`env:${desktopSettings.linearApiKeyEnvVar}`} />
-                <KeyValue label="GitHub secret" value={`env:${desktopSettings.githubTokenEnvVar}`} />
-                <KeyValue label="Cleanup" value={desktopSettings.cleanupEnabled ? (desktopSettings.cleanupDryRun ? "enabled, dry-run" : "enabled") : "disabled"} />
-              </div>
-            ) : (
-              <p className="text-sm text-muted-foreground">Desktop settings are not available in browser-only mode.</p>
-            )}
-          </Section>
-
-          <Section title="Harness Builder" description="Scan the selected repository and preview safe AGENTS.md, WORKFLOW.md, docs, and scripts changes.">
-            <div className="space-y-3 text-sm">
-              <KeyValue label="Repository" value={desktopSettings?.repositoryPath ?? daemonStatus?.workspaceRoot ?? "Use Harness Builder to choose a path"} />
-              <a href="/harness" className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted">
-                <ScanSearch className="h-4 w-4" />
-                Open Harness Builder
-              </a>
-            </div>
-          </Section>
-
-          <Section title="Daemon And Recovery" description="Recovery stays honest: old provider processes are not reattached after restart.">
-            <div className="grid gap-2 text-sm">
-              <KeyValue label="Daemon instance" value={daemonStatus?.daemonInstanceId ?? "Unavailable"} />
-              <KeyValue label="Recovered runs" value={String(daemonStatus?.recoveredRunsCount ?? 0)} />
-              <KeyValue label="Orphaned runs" value={String(daemonStatus?.orphanedRunsCount ?? 0)} />
-              <KeyValue label="Active runs" value={String(daemonStatus?.activeRunsCount ?? 0)} />
-              <KeyValue label="Workspace root" value={daemonStatus?.workspaceRoot ?? "Unavailable"} />
-            </div>
-          </Section>
-
-          <Section title="Integrations" description="Connect GitHub and Linear from Symphonia. Tokens stay daemon-side and are shown only as redacted sources.">
-            <div className="grid gap-3">
-              <IntegrationCard
-                provider="github"
-                title="GitHub"
-                description="Device flow for local desktop/browser usage, with GITHUB_TOKEN/GITHUB_PAT fallback."
-                connection={authStatus?.providers.find((connection) => connection.provider === "github") ?? null}
-                session={authSessions.github ?? null}
-                manualToken={manualTokens.github ?? ""}
-                onManualTokenChange={(value) => setManualTokens((current) => ({ ...current, github: value }))}
-                onConnect={() => void connectGithub()}
-                onPoll={() => void pollProvider("github")}
-                onManualToken={() => void submitManualToken("github")}
-                onValidate={() => void validateProvider("github")}
-                onRefresh={() => void refreshProvider("github")}
-                onDisconnect={() => void disconnectProvider("github")}
-              />
-              <IntegrationCard
-                provider="linear"
-                title="Linear"
-                description="PKCE loopback when SYMPHONIA_LINEAR_CLIENT_ID is configured, with LINEAR_API_KEY fallback."
-                connection={authStatus?.providers.find((connection) => connection.provider === "linear") ?? null}
-                session={authSessions.linear ?? null}
-                manualToken={manualTokens.linear ?? ""}
-                onManualTokenChange={(value) => setManualTokens((current) => ({ ...current, linear: value }))}
-                onConnect={() => void connectLinear()}
-                onPoll={() => void load()}
-                onManualToken={() => void submitManualToken("linear")}
-                onValidate={() => void validateProvider("linear")}
-                onRefresh={() => void refreshProvider("linear")}
-                onDisconnect={() => void disconnectProvider("linear")}
-              />
-            </div>
-          </Section>
-
-          <Section title="Providers" description="Provider health is checked by the daemon. Claude and Cursor use pre-run CLI permissions.">
-            <div className="grid gap-2">
-              {providers.map((provider) => (
-                <div key={provider.id} className="rounded-md border px-3 py-2 text-sm">
-                  <div className="flex items-center justify-between gap-2">
-                    <span className="font-medium">{provider.displayName}</span>
-                    <span className="text-xs text-muted-foreground">{provider.status}</span>
+          <main className="max-w-3xl flex-1 overflow-y-auto p-6">
+            {active === "profile" && (
+              <Section title="Profile" description="Local account context shown from connected integrations. No synthetic user profile is stored in the frontend.">
+                <div className="flex items-center gap-4">
+                  <span className="grid h-16 w-16 place-items-center rounded-full bg-sky-600 text-sm font-medium text-white">
+                    {initialsFor(connectedAccount ?? "Local operator")}
+                  </span>
+                  <div className="space-y-1">
+                    <button type="button" disabled className="rounded-md border px-3 py-1 text-xs opacity-50">
+                      Upload photo
+                    </button>
+                    <p className="text-xs text-muted-foreground">Profile writes need a real account service.</p>
                   </div>
-                  <p className="mt-1 text-xs text-muted-foreground">
-                    {provider.enabled ? "enabled" : "disabled"} / {provider.available ? "available" : "unavailable"} / {provider.command ?? "no command"}
-                  </p>
-                  {provider.error && <p className="mt-1 text-xs text-destructive">{provider.error}</p>}
                 </div>
-              ))}
-            </div>
-          </Section>
+                <Field label="Display name">
+                  <input value={connectedAccount ?? "Local operator"} readOnly className="w-full rounded-md border bg-background px-3 py-1.5 text-sm" />
+                </Field>
+                <Field label="Email">
+                  <input value="Not provided by current integrations" readOnly className="w-full rounded-md border bg-background px-3 py-1.5 text-sm text-muted-foreground" />
+                </Field>
+                <Field label="Short bio">
+                  <textarea value="No real profile backend is connected yet." readOnly rows={3} className="w-full resize-none rounded-md border bg-background px-3 py-1.5 text-sm text-muted-foreground" />
+                </Field>
+                <SaveBar disabled label="No profile writes available" />
+              </Section>
+            )}
 
-          <Section title="Trackers And GitHub" description="Linear and GitHub use daemon-side environment variables; secret values are never stored in desktop settings.">
-            <div className="grid gap-2 text-sm">
-              <KeyValue label="Tracker" value={trackerStatus ? `${trackerStatus.kind} / ${trackerHealth ? (trackerHealth.healthy ? "healthy" : "unavailable") : "health unknown"}` : "Unavailable"} />
-              <KeyValue label="Tracker last sync" value={trackerStatus?.lastSyncAt ?? "Never"} />
-              <KeyValue label="GitHub" value={githubStatus ? `${githubStatus.enabled ? "enabled" : "disabled"} / ${githubHealth ? (githubHealth.healthy ? "healthy" : "unavailable") : "health unknown"}` : "Unavailable"} />
-              <KeyValue label="GitHub repo" value={githubStatus?.config?.owner && githubStatus?.config?.repo ? `${githubStatus.config.owner}/${githubStatus.config.repo}` : "Not configured"} />
-            </div>
-          </Section>
+            {active === "appearance" && (
+              <Section title="Appearance" description="Tune the look and density of this local interface.">
+                <Field label="Theme">
+                  <div className="grid max-w-sm grid-cols-2 gap-2">
+                    {(["light", "dark"] as const).map((item) => (
+                      <button
+                        key={item}
+                        type="button"
+                        onClick={() => {
+                          if (theme !== item) toggle();
+                        }}
+                        className={cn("rounded-md border p-3 text-left transition-colors", theme === item ? "border-primary ring-2 ring-primary/20" : "hover:bg-accent")}
+                      >
+                        <div className={cn("mb-2 h-12 rounded border", item === "dark" ? "bg-zinc-900" : "bg-zinc-50")} />
+                        <span className="text-xs capitalize">{item}</span>
+                      </button>
+                    ))}
+                  </div>
+                </Field>
+                <Field label="Accent color">
+                  <div className="flex gap-2">
+                    {["bg-violet-500", "bg-sky-500", "bg-emerald-500", "bg-rose-500", "bg-amber-500"].map((color, index) => (
+                      <button key={color} type="button" className={cn("h-7 w-7 rounded-full ring-offset-2 ring-offset-background", color, index === 0 && "ring-2 ring-foreground")} aria-label={`${color} accent`} />
+                    ))}
+                  </div>
+                </Field>
+                <ToggleRow label="Compact density" description="Density preferences will be persisted when user settings are available." checked={false} disabled onChange={() => {}} />
+              </Section>
+            )}
 
-          <Section title="Workspace Cleanup" description="Cleanup is disabled and dry-run by default; destructive execution remains policy-gated.">
-            <div className="grid gap-2 text-sm">
-              <KeyValue label="Inventory" value={`${workspaceInventory?.workspaces.length ?? 0} workspaces`} />
-              <KeyValue label="Active" value={String(workspaceInventory?.counts.active ?? 0)} />
-              <KeyValue label="Protected" value={String(workspaceInventory?.counts.protected ?? 0)} />
-              <KeyValue label="Candidates" value={String(cleanupPlan?.candidates.length ?? 0)} />
-              <KeyValue label="Warnings" value={(cleanupPlan?.warnings ?? []).join("; ") || "None"} />
-            </div>
-          </Section>
+            {active === "notifications" && (
+              <Section title="Notifications" description="Notification settings are ready for real account data, but no notification backend is connected yet.">
+                <ToggleRow label="Mentions" description="Someone mentions you in a comment or thread." checked={false} disabled onChange={() => {}} />
+                <ToggleRow label="Assigned to me" description="You're assigned to an issue or project." checked={false} disabled onChange={() => {}} />
+                <ToggleRow label="Weekly digest" description="A weekly summary of your workspace." checked={false} disabled onChange={() => {}} />
+                <ToggleRow label="Product updates" description="Product update email preferences require a real account service." checked={false} disabled onChange={() => {}} />
+              </Section>
+            )}
 
-          <Section title="Diagnostics" description="Recent desktop, web, and daemon logs are bounded and redacted.">
-            <pre className="max-h-80 overflow-auto rounded-md border bg-muted/20 p-3 text-xs">
-              {diagnostics ? JSON.stringify(diagnostics, null, 2) : "Diagnostics unavailable outside desktop mode."}
-            </pre>
-          </Section>
+            {active === "workspace" && (
+              <Section title="Workspace" description="Local desktop, daemon, workflow, harness, and cleanup settings. Secrets stay outside settings JSON.">
+                {desktopStatus && (
+                  <div className="mb-4 rounded-md border p-3">
+                    <KeyValue label="Desktop" value={`${desktopStatus.appVersion} / Electron ${desktopStatus.electronVersion}`} />
+                    <KeyValue label="Daemon" value={`${desktopStatus.daemon.state} ${desktopStatus.daemon.url ?? ""}`} />
+                    <KeyValue label="Web" value={`${desktopStatus.web.state} ${desktopStatus.web.url ?? ""}`} />
+                    <KeyValue label="Settings file" value={desktopStatus.settingsPath} />
+                  </div>
+                )}
+                {desktopSettings ? (
+                  <div className="space-y-3">
+                    <PathRow label="Repository" value={desktopSettings.repositoryPath} onChoose={() => void choosePath("repositoryPath")} />
+                    <PathRow label="WORKFLOW.md" value={desktopSettings.workflowPath} onChoose={() => void choosePath("workflowPath")} />
+                    <PathRow label="Workspace root" value={desktopSettings.workspaceRoot} onChoose={() => void choosePath("workspaceRoot")} />
+                    <KeyValue label="Database" value={desktopSettings.databasePath ?? "Not set"} />
+                    <KeyValue label="Default provider" value={desktopSettings.defaultProviderId} />
+                    <KeyValue label="Default tracker" value={desktopSettings.defaultTrackerKind} />
+                    <KeyValue label="Cleanup" value={desktopSettings.cleanupEnabled ? (desktopSettings.cleanupDryRun ? "enabled, dry-run" : "enabled") : "disabled"} />
+                  </div>
+                ) : (
+                  <p className="text-sm text-muted-foreground">Desktop settings are unavailable in browser-only mode.</p>
+                )}
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button type="button" onClick={restartDaemon} disabled={!desktop} className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm disabled:opacity-50">
+                    <RotateCcw className="h-4 w-4" />
+                    Restart daemon
+                  </button>
+                  <button type="button" onClick={restartWeb} disabled={!desktop} className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm disabled:opacity-50">
+                    <RotateCcw className="h-4 w-4" />
+                    Restart web
+                  </button>
+                  <a href="/harness" className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted">
+                    <ScanSearch className="h-4 w-4" />
+                    Harness Builder
+                  </a>
+                </div>
+                <div className="mt-4 grid gap-2 text-sm">
+                  <KeyValue label="Daemon instance" value={daemonStatus?.daemonInstanceId ?? "Unavailable"} />
+                  <KeyValue label="Active runs" value={String(daemonStatus?.activeRunsCount ?? 0)} />
+                  <KeyValue label="Recovered runs" value={String(daemonStatus?.recoveredRunsCount ?? 0)} />
+                  <KeyValue label="Workspaces" value={`${workspaceInventory?.workspaces.length ?? 0} total / ${workspaceInventory?.counts.active ?? 0} active`} />
+                  <KeyValue label="Cleanup candidates" value={String(cleanupPlan?.candidates.length ?? 0)} />
+                </div>
+              </Section>
+            )}
+
+            {active === "integrations" && (
+              <Section title="Integrations" description="Connect Symphonia to the real tools your team already uses. GitHub and Linear are daemon-backed; Slack is a local prototype toggle.">
+                <IntegrationCard
+                  provider="github"
+                  title="GitHub"
+                  description="Device flow for local desktop/browser usage, with GITHUB_TOKEN/GITHUB_PAT fallback."
+                  connection={authStatus?.providers.find((connection) => connection.provider === "github") ?? null}
+                  session={authSessions.github ?? null}
+                  manualToken={manualTokens.github ?? ""}
+                  onManualTokenChange={(value) => setManualTokens((current) => ({ ...current, github: value }))}
+                  onConnect={() => void connectGithub()}
+                  onPoll={() => void pollProvider("github")}
+                  onManualToken={() => void submitManualToken("github")}
+                  onValidate={() => void validateProvider("github")}
+                  onRefresh={() => void refreshProvider("github")}
+                  onDisconnect={() => void disconnectProvider("github")}
+                />
+                <IntegrationCard
+                  provider="linear"
+                  title="Linear"
+                  description="PKCE loopback when SYMPHONIA_LINEAR_CLIENT_ID is configured, with LINEAR_API_KEY fallback."
+                  connection={authStatus?.providers.find((connection) => connection.provider === "linear") ?? null}
+                  session={authSessions.linear ?? null}
+                  manualToken={manualTokens.linear ?? ""}
+                  onManualTokenChange={(value) => setManualTokens((current) => ({ ...current, linear: value }))}
+                  onConnect={() => void connectLinear()}
+                  onPoll={() => void load()}
+                  onManualToken={() => void submitManualToken("linear")}
+                  onValidate={() => void validateProvider("linear")}
+                  onRefresh={() => void refreshProvider("linear")}
+                  onDisconnect={() => void disconnectProvider("linear")}
+                />
+                <div className="flex items-center justify-between rounded-md border p-3">
+                  <div className="min-w-0">
+                    <div className="text-sm font-medium">Slack</div>
+                    <div className="text-xs text-muted-foreground">Prototype-only notification toggle. No Slack API calls are wired.</div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setSlackConnected((current) => !current)}
+                    className={cn(
+                      "rounded-md border px-2.5 py-1 text-xs transition-colors",
+                      slackConnected ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-400" : "hover:bg-accent",
+                    )}
+                  >
+                    {slackConnected ? (
+                      <span className="flex items-center gap-1">
+                        <Check className="h-3 w-3" /> Connected
+                      </span>
+                    ) : (
+                      "Connect"
+                    )}
+                  </button>
+                </div>
+              </Section>
+            )}
+
+            {active === "security" && (
+              <Section title="Security" description="Token and diagnostic surfaces are redacted. Raw secrets never render in the settings UI.">
+                <div className="space-y-3">
+                  <KeyValue label="GitHub credential" value={authStatus?.providers.find((connection) => connection.provider === "github")?.redactedSource ?? "unavailable"} />
+                  <KeyValue label="Linear credential" value={authStatus?.providers.find((connection) => connection.provider === "linear")?.redactedSource ?? "unavailable"} />
+                  <KeyValue label="GitHub health" value={githubHealth ? (githubHealth.healthy ? "healthy" : `unavailable: ${githubHealth.error ?? "unknown"}`) : "unknown"} />
+                  <KeyValue label="Linear health" value={trackerHealth ? (trackerHealth.healthy ? "healthy" : `unavailable: ${trackerHealth.error ?? "unknown"}`) : "unknown"} />
+                  <KeyValue label="GitHub repo" value={githubStatus?.config?.owner && githubStatus?.config?.repo ? `${githubStatus.config.owner}/${githubStatus.config.repo}` : "Not configured"} />
+                  <KeyValue label="Tracker" value={trackerStatus ? `${trackerStatus.kind} / ${trackerStatus.status.replaceAll("_", " ")}` : "Unavailable"} />
+                </div>
+                <div className="mt-3 flex flex-wrap gap-2">
+                  <button type="button" onClick={copyDiagnostics} disabled={!desktop} className="inline-flex items-center gap-2 rounded-md border px-3 py-2 text-sm disabled:opacity-50">
+                    <Copy className="h-4 w-4" />
+                    Copy diagnostics
+                  </button>
+                </div>
+                {message && <p className="mt-3 text-sm text-muted-foreground">{message}</p>}
+                <Field label="Provider health">
+                  <div className="grid gap-2">
+                    {providers.map((provider) => (
+                      <div key={provider.id} className="rounded-md border px-3 py-2 text-sm">
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-medium">{provider.displayName}</span>
+                          <span className="text-xs text-muted-foreground">{provider.status}</span>
+                        </div>
+                        <p className="mt-1 text-xs text-muted-foreground">
+                          {provider.enabled ? "enabled" : "disabled"} / {provider.available ? "available" : "unavailable"} / {provider.command ?? "no command"}
+                        </p>
+                        {provider.error && <p className="mt-1 text-xs text-destructive">{provider.error}</p>}
+                      </div>
+                    ))}
+                  </div>
+                </Field>
+              </Section>
+            )}
+
+            {active === "billing" && (
+              <Section title="Billing" description="Billing is intentionally empty until a real account and subscription backend exists.">
+                <div className="rounded-md border p-4">
+                  <div className="flex items-center justify-between">
+                    <div>
+                      <div className="text-xs uppercase tracking-wider text-muted-foreground">Current plan</div>
+                      <div className="text-lg font-semibold">No billing account connected</div>
+                      <div className="text-xs text-muted-foreground">No synthetic subscription, invoice, or card data is rendered.</div>
+                    </div>
+                    <button type="button" disabled className="rounded-md border px-3 py-1.5 text-xs opacity-50">
+                      Manage plan
+                    </button>
+                  </div>
+                </div>
+              </Section>
+            )}
+          </main>
         </div>
       </div>
     </MainLayout>
-  );
-}
-
-function Section({ title, description, children }: { title: string; description: string; children: ReactNode }) {
-  return (
-    <section className="rounded-md border bg-card p-4">
-      <div className="mb-3">
-        <h2 className="text-sm font-semibold">{title}</h2>
-        <p className="mt-1 text-xs text-muted-foreground">{description}</p>
-      </div>
-      {children}
-    </section>
   );
 }
 
@@ -392,36 +546,30 @@ function IntegrationCard({
   const connected = connection?.status === "connected";
   const canOauthConnect = provider === "github" || Boolean(connection?.clientIdConfigured);
   return (
-    <div className="rounded-md border p-3">
-      <div className="flex flex-wrap items-start justify-between gap-3">
-        <div>
-          <div className="flex items-center gap-2">
-            <h3 className="text-sm font-semibold">{title}</h3>
-            <span className="rounded-sm border px-1.5 py-0.5 text-xs text-muted-foreground">{connection?.status ?? "unknown"}</span>
-          </div>
-          <p className="mt-1 text-xs text-muted-foreground">{description}</p>
+    <div className="mb-3 rounded-md border p-3">
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <div className="min-w-0">
+          <div className="text-sm font-medium">{title}</div>
+          <div className="text-xs text-muted-foreground">{description}</div>
         </div>
         <div className="flex flex-wrap gap-2">
-          <button type="button" onClick={onConnect} disabled={!canOauthConnect} className="inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs disabled:opacity-50">
-            <ExternalLink className="h-3.5 w-3.5" />
-            Connect
+          <button type="button" onClick={onConnect} disabled={!canOauthConnect} className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs transition-colors hover:bg-accent disabled:opacity-50">
+            <ExternalLink className="h-3 w-3" /> Connect
           </button>
-          <button type="button" onClick={onValidate} className="inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs">
-            <CheckCircle2 className="h-3.5 w-3.5" />
-            Validate
+          <button type="button" onClick={onValidate} className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs transition-colors hover:bg-accent">
+            <CheckCircle2 className="h-3 w-3" /> Validate
           </button>
-          <button type="button" onClick={onRefresh} className="inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs">
-            <RefreshCw className="h-3.5 w-3.5" />
-            Refresh
+          <button type="button" onClick={onRefresh} className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs transition-colors hover:bg-accent">
+            <RefreshCw className="h-3 w-3" /> Refresh
           </button>
-          <button type="button" onClick={onDisconnect} disabled={!connected && connection?.credentialSource !== "manual"} className="inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs disabled:opacity-50">
-            <LogOut className="h-3.5 w-3.5" />
-            Disconnect
+          <button type="button" onClick={onDisconnect} disabled={!connected && connection?.credentialSource !== "manual"} className="inline-flex items-center gap-1 rounded-md border px-2.5 py-1 text-xs transition-colors hover:bg-accent disabled:opacity-50">
+            <LogOut className="h-3 w-3" /> Disconnect
           </button>
         </div>
       </div>
 
       <div className="mt-3 grid gap-1 text-xs">
+        <KeyValue label="Status" value={connection?.status ?? "unknown"} />
         <KeyValue label="Method" value={connection?.method ?? "unavailable"} />
         <KeyValue label="Credential source" value={connection?.redactedSource ?? "unavailable"} />
         <KeyValue label="Account" value={connection?.accountLabel ?? "Not validated"} />
@@ -441,7 +589,7 @@ function IntegrationCard({
           <p className="mt-1 text-muted-foreground">Session {session.authSessionId}</p>
           {session.userCode && <p className="mt-1 select-all text-sm font-semibold">{session.userCode}</p>}
           {session.authorizationUrl && <p className="mt-1 break-all">{session.authorizationUrl}</p>}
-          <button type="button" onClick={onPoll} className="mt-2 rounded-md border px-2 py-1 text-xs">
+          <button type="button" onClick={onPoll} className="mt-2 rounded-md border px-2 py-1 text-xs hover:bg-accent">
             Check status
           </button>
         </div>
@@ -459,11 +607,74 @@ function IntegrationCard({
             className="rounded-md border bg-background px-2 py-1.5 text-xs"
           />
         </label>
-        <button type="button" onClick={onManualToken} className="mt-auto inline-flex items-center justify-center gap-2 rounded-md border px-2.5 py-1.5 text-xs">
+        <button type="button" onClick={onManualToken} className="mt-auto inline-flex items-center justify-center gap-2 rounded-md border px-2.5 py-1.5 text-xs hover:bg-accent">
           <KeyRound className="h-3.5 w-3.5" />
           Store manual token
         </button>
       </div>
+    </div>
+  );
+}
+
+function Section({ title, description, children }: { title: string; description: string; children: ReactNode }) {
+  return (
+    <section className="space-y-4">
+      <div>
+        <h2 className="text-lg font-semibold">{title}</h2>
+        <p className="mt-1 text-sm text-muted-foreground">{description}</p>
+      </div>
+      <div className="space-y-4">{children}</div>
+    </section>
+  );
+}
+
+function Field({ label, children }: { label: string; children: ReactNode }) {
+  return (
+    <label className="grid gap-1.5 text-sm">
+      <span className="font-medium">{label}</span>
+      {children}
+    </label>
+  );
+}
+
+function ToggleRow({
+  label,
+  description,
+  checked,
+  disabled = false,
+  onChange,
+}: {
+  label: string;
+  description: string;
+  checked: boolean;
+  disabled?: boolean;
+  onChange: (value: boolean) => void;
+}) {
+  return (
+    <div className="flex items-center justify-between gap-4 rounded-md border p-3">
+      <div>
+        <div className="text-sm font-medium">{label}</div>
+        <div className="text-xs text-muted-foreground">{description}</div>
+      </div>
+      <button
+        type="button"
+        disabled={disabled}
+        onClick={() => onChange(!checked)}
+        className={cn("h-5 w-9 rounded-full border p-0.5 transition-colors disabled:opacity-50", checked ? "bg-primary" : "bg-muted")}
+        aria-pressed={checked}
+      >
+        <span className={cn("block h-3.5 w-3.5 rounded-full bg-background transition-transform", checked && "translate-x-4")} />
+      </button>
+    </div>
+  );
+}
+
+function SaveBar({ disabled = false, label = "Save changes" }: { disabled?: boolean; label?: string }) {
+  return (
+    <div className="flex justify-end">
+      <button type="button" disabled={disabled} className="rounded-md bg-primary px-3 py-1.5 text-xs text-primary-foreground hover:opacity-90 disabled:opacity-50">
+        {label}
+      </button>
     </div>
   );
 }
@@ -490,4 +701,10 @@ function PathRow({ label, value, onChoose }: { label: string; value: string | nu
       </button>
     </div>
   );
+}
+
+function initialsFor(label: string) {
+  const parts = label.split(/\s+|[._-]/).filter(Boolean);
+  const initials = parts.length > 1 ? `${parts[0]?.[0] ?? ""}${parts[1]?.[0] ?? ""}` : label.slice(0, 2);
+  return initials.toUpperCase();
 }

@@ -127,6 +127,7 @@ describe("linear tracker adapter", () => {
         priority: 2,
         labels: ["Feature", "FRONTEND"],
         projectSlug: "orchestration",
+        assignee: { id: "user-1", name: "Ada Lovelace", email: "ada@example.com" },
       }),
       timestamp,
     );
@@ -137,6 +138,11 @@ describe("linear tracker adapter", () => {
       tracker: {
         kind: "linear",
         projectSlug: "orchestration",
+      },
+      assignee: {
+        id: "user-1",
+        name: "Ada Lovelace",
+        email: "ada@example.com",
       },
       lastFetchedAt: timestamp,
     });
@@ -235,6 +241,7 @@ function linearNode(input: {
   labels?: string[];
   teamKey?: string;
   projectSlug?: string | null;
+  assignee?: { id: string; name?: string | null; email?: string | null } | null;
   createdAt?: string;
   updatedAt?: string;
 }) {
@@ -256,6 +263,16 @@ function linearNode(input: {
     labels: {
       nodes: (input.labels ?? ["Frontend"]).map((name) => ({ name })),
     },
+    assignee:
+      input.assignee === undefined
+        ? null
+        : input.assignee
+          ? {
+              id: input.assignee.id,
+              name: input.assignee.name ?? null,
+              email: input.assignee.email ?? null,
+            }
+          : null,
     project: {
       id: "project-1",
       name: input.projectSlug ?? "orchestration",
