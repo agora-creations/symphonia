@@ -67,3 +67,39 @@ Harness scan result for this repository:
 - Linear/GitHub real-data validation still depends on local credentials/config.
 - No GitHub PR creation, auto-push, auto-merge, GitHub comments, Linear comments, or Linear state transitions are enabled by default.
 - No cloud/team harness sharing, OAuth onboarding, webhooks, code signing, notarization, auto-update, or Tauri support yet.
+
+## Inserted Next Milestone
+
+Recommended next milestone before any larger product milestone:
+
+`Milestone 10 — Real GitHub and Linear connection flows`
+
+Purpose:
+
+- Add real in-platform GitHub and Linear authentication/connect flows.
+- Keep environment-token fallbacks.
+- Add connect/disconnect UI, redacted status, health checks, secure token storage, and safe credential resolution.
+- Use connected tokens for existing GitHub review artifact and Linear tracker APIs.
+
+Design choice:
+
+- Do not store raw tokens in normal settings JSON.
+- Do not expose tokens to the renderer.
+- Prefer GitHub device flow or GitHub App user authorization for local/desktop usage.
+- Verify official Linear OAuth docs before implementing Linear auth endpoints, grant types, PKCE behavior, refresh behavior, redirect requirements, or scopes.
+- If Linear requires a client secret and does not support a safe public/native flow, do not embed the secret. Use user-provided local credentials, manual/env token fallback, or a future hosted token broker.
+
+Compatibility note:
+
+- The original milestone prompt must be reconciled with this real-data-only branch. If PR #8 lands, Milestone 10 should preserve Codex/Claude/Cursor, Linear, GitHub review artifacts, Harness Builder, desktop, SQLite/SSE, recovery, and cleanup behavior, but should not reintroduce runtime Mock provider/tracker behavior. Fake transports remain acceptable for tests.
+
+Validation expectation:
+
+- `pnpm test`
+- `pnpm lint`
+- `pnpm build`
+- `pnpm desktop:build`
+- `pnpm desktop:package`
+- `git diff --check`
+- web/daemon smoke
+- desktop smoke

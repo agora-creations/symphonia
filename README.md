@@ -170,3 +170,20 @@ Automated tests use fake CLIs, fake fetch transports, temp databases, temp works
 - Generated docs are starter/inferred and need human review.
 - Provider validation still depends on locally installed/authenticated provider CLIs.
 - No cloud accounts, team sharing, OAuth onboarding, GitHub App install flow, Linear webhooks, GitHub webhooks, code signing, notarization, auto-update, or Tauri support yet.
+
+## Next Milestone
+
+Milestone 10 should be `Real GitHub and Linear connection flows`.
+
+The next platform milestone should add in-platform GitHub and Linear connect/disconnect flows before any further product expansion. It should not jump straight to storing tokens in settings JSON. The intended direction is a local auth layer with secure token storage, redacted connection metadata, integration health checks, refresh/disconnect handling, and env/PAT fallback modes.
+
+Important guardrails:
+
+- Do not embed GitHub or Linear client secrets in the app bundle.
+- Do not expose raw tokens through renderer IPC, daemon APIs, events, logs, diagnostics, or settings export.
+- Keep `GITHUB_TOKEN`, `GITHUB_PAT`, and `LINEAR_API_KEY` fallback modes.
+- Prefer GitHub device flow or GitHub App user authorization for desktop/local usage.
+- Verify current official Linear OAuth docs before choosing Linear endpoints or grant types.
+- If Linear requires a client secret and has no safe public/native flow, use user-provided local app credentials, manual/env-token fallback, or defer to a future hosted token broker.
+- Do not enable GitHub or Linear writes by default.
+- Do not reintroduce runtime mock provider/tracker behavior; fake transports remain acceptable only inside tests.
