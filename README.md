@@ -114,11 +114,55 @@ pnpm harness:scan --path .
 pnpm harness:scan --path . --json
 ```
 
+## GitHub And Linear Connections
+
+Milestone 10 adds local integration auth surfaces in Settings -> Integrations:
+
+- GitHub device flow using `SYMPHONIA_GITHUB_CLIENT_ID`.
+- Linear OAuth PKCE using `SYMPHONIA_LINEAR_CLIENT_ID` and a configured loopback redirect URI.
+- Manual token fallback for local use.
+- Environment fallback through `GITHUB_TOKEN`, `GITHUB_PAT`, and `LINEAR_API_KEY`.
+- Validate, refresh, and disconnect actions.
+
+The daemon owns integration credentials. The renderer never receives a raw token after submission, and normal settings JSON stores only non-secret preferences. Desktop mode points the daemon at an encrypted local auth store next to the desktop settings file.
+
+GitHub auth follows the official device flow: Symphonia requests a device/user code, opens GitHub device authorization, then polls for completion. Device flow does not require embedding a client secret.
+
+Linear auth follows the current official OAuth PKCE path: Symphonia builds an authorization URL with a code challenge, receives the loopback callback at `/auth/linear/callback`, exchanges the code with `code_verifier`, and stores the resulting token locally. Do not embed a Linear client secret in the app bundle. If your Linear OAuth application requires a secret or a different redirect, configure it locally or use `LINEAR_API_KEY`.
+
+Verified references:
+
+- GitHub device flow and GitHub App user tokens: https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/generating-a-user-access-token-for-a-github-app
+- GitHub OAuth App device flow: https://docs.github.com/en/apps/oauth-apps/building-oauth-apps/authorizing-oauth-apps#device-flow
+- Linear OAuth 2.0 and PKCE: https://linear.app/developers/oauth-2-0-authentication
+
+Useful local auth variables:
+
+- `SYMPHONIA_GITHUB_CLIENT_ID`
+- `SYMPHONIA_LINEAR_CLIENT_ID`
+- `SYMPHONIA_LINEAR_REDIRECT_URI`
+- `SYMPHONIA_LINEAR_CLIENT_SECRET`, only for local developer-owned OAuth apps that require it
+- `SYMPHONIA_AUTH_STORE_PATH`
+- `SYMPHONIA_AUTH_STORAGE_KEY`, optional local encryption key override
+
 ## APIs
 
 Selected daemon endpoints:
 
 - `GET /health`
+- `GET /auth/status`
+- `GET /auth/connections`
+- `POST /auth/github/start`
+- `GET /auth/github/poll/:authSessionId`
+- `POST /auth/github/validate`
+- `POST /auth/github/refresh`
+- `POST /auth/github/disconnect`
+- `POST /auth/linear/start`
+- `GET /auth/linear/callback`
+- `POST /auth/linear/callback`
+- `POST /auth/linear/validate`
+- `POST /auth/linear/refresh`
+- `POST /auth/linear/disconnect`
 - `GET /workflow/status`
 - `POST /workflow/reload`
 - `GET /tracker/status`
@@ -163,10 +207,22 @@ Automated tests use fake CLIs, fake fetch transports, temp databases, temp works
 - Generated harness artifacts are never applied automatically.
 - Existing files are not overwritten without diff preview and explicit confirmation.
 - Scan payloads are bounded and avoid secret values.
+- Integration tokens are not stored in normal settings JSON.
+- Auth APIs and events return redacted connection metadata only.
+- Desktop external-link IPC is restricted to trusted GitHub, Linear, and local auth callback URLs.
 
 ## Known Limitations
 
 - Scoring is deterministic and heuristic, not a guarantee of agent success.
 - Generated docs are starter/inferred and need human review.
 - Provider validation still depends on locally installed/authenticated provider CLIs.
-- No cloud accounts, team sharing, OAuth onboarding, GitHub App install flow, Linear webhooks, GitHub webhooks, code signing, notarization, auto-update, or Tauri support yet.
+- OS keychain storage is not wired into the daemon-owned token path yet; local storage uses an encrypted file with a local key and should be treated as local-beta storage.
+- Linear workspace/team/project summaries are still minimal during auth validation; tracker configuration controls issue scope.
+- GitHub writes remain disabled by default, and GitHub PR creation remains deferred.
+- Linear writes remain disabled/deferred.
+- Provider auth for Codex, Claude, and Cursor remains separate from GitHub/Linear integration auth.
+- No cloud accounts, team sharing, GitHub App install flow, Linear webhooks, GitHub webhooks, code signing, notarization, auto-update, or Tauri support yet.
+
+## Next Milestone
+
+Milestone 11 should be `Safely enable explicit GitHub PR creation and Linear run comments with connected auth`.

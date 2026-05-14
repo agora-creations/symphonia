@@ -2,10 +2,11 @@
 
 import { useCallback, useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { Copy, FolderOpen, RefreshCw, RotateCcw, ScanSearch } from "lucide-react";
+import { CheckCircle2, Copy, ExternalLink, FolderOpen, KeyRound, LogOut, RefreshCw, RotateCcw, ScanSearch } from "lucide-react";
 import { MainLayout } from "@/components/main-layout";
 import {
   getDaemonStatus,
+  getAuthStatus,
   getGithubHealth,
   getGithubStatus,
   getProviders,
@@ -13,9 +14,14 @@ import {
   getTrackerStatus,
   getWorkspaceCleanupPlan,
   getWorkspaceInventory,
+  pollAuth,
+  refreshAuth,
+  startAuth,
+  validateAuth,
+  disconnectAuth,
 } from "@/lib/api";
 import { getDesktopApi, type DesktopDiagnostics, type DesktopSettings, type DesktopStatus } from "@/lib/desktop";
-import { type DaemonStatus, type GitHubHealth, type GitHubStatus, type ProviderHealth, type TrackerHealth, type TrackerStatus, type WorkspaceCleanupPlan, type WorkspaceInventory } from "@symphonia/types";
+import { type AuthProviderId, type AuthStartResult, type AuthStatus, type DaemonStatus, type GitHubHealth, type GitHubStatus, type IntegrationAuthConnection, type ProviderHealth, type TrackerHealth, type TrackerStatus, type WorkspaceCleanupPlan, type WorkspaceInventory } from "@symphonia/types";
 
 export default function SettingsPage() {
   const desktop = getDesktopApi();
@@ -28,14 +34,18 @@ export default function SettingsPage() {
   const [trackerHealth, setTrackerHealth] = useState<TrackerHealth | null>(null);
   const [githubStatus, setGithubStatus] = useState<GitHubStatus | null>(null);
   const [githubHealth, setGithubHealth] = useState<GitHubHealth | null>(null);
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
+  const [authSessions, setAuthSessions] = useState<Partial<Record<AuthProviderId, AuthStartResult>>>({});
+  const [manualTokens, setManualTokens] = useState<Partial<Record<AuthProviderId, string>>>({});
   const [workspaceInventory, setWorkspaceInventory] = useState<WorkspaceInventory | null>(null);
   const [cleanupPlan, setCleanupPlan] = useState<WorkspaceCleanupPlan | null>(null);
   const [message, setMessage] = useState<string | null>(null);
 
   const load = useCallback(async () => {
     setMessage(null);
-    const [daemon, providerList, tracker, trackerHealthResult, github, githubHealthResult, inventory, plan] = await Promise.allSettled([
+    const [daemon, auth, providerList, tracker, trackerHealthResult, github, githubHealthResult, inventory, plan] = await Promise.allSettled([
       getDaemonStatus(),
+      getAuthStatus(),
       getProviders(),
       getTrackerStatus(),
       getTrackerHealth(),
@@ -45,6 +55,7 @@ export default function SettingsPage() {
       getWorkspaceCleanupPlan(),
     ]);
     if (daemon.status === "fulfilled") setDaemonStatus(daemon.value);
+    if (auth.status === "fulfilled") setAuthStatus(auth.value);
     if (providerList.status === "fulfilled") setProviders(providerList.value);
     if (tracker.status === "fulfilled") setTrackerStatus(tracker.value);
     if (trackerHealthResult.status === "fulfilled") setTrackerHealth(trackerHealthResult.value);
@@ -95,6 +106,82 @@ export default function SettingsPage() {
     if (!payload) return;
     await navigator.clipboard.writeText(JSON.stringify(payload, null, 2));
     setMessage("Copied redacted diagnostics.");
+  }
+
+  async function openTrustedAuthUrl(url: string | null) {
+    if (!url) return;
+    if (desktop) {
+      await desktop.openExternalLink(url);
+      return;
+    }
+    window.open(url, "_blank", "noopener,noreferrer");
+  }
+
+  async function connectGithub() {
+    const result = await startAuth("github", {
+      method: "oauth_device",
+      requestedScopes: ["repo"],
+      redirectMode: "device",
+      repositoryPath: desktopSettings?.repositoryPath ?? null,
+      metadata: {},
+    });
+    setAuthSessions((current) => ({ ...current, github: result }));
+    await openTrustedAuthUrl(result.verificationUri ?? result.authorizationUrl);
+    await load();
+  }
+
+  async function connectLinear() {
+    const result = await startAuth("linear", {
+      method: "oauth_pkce",
+      requestedScopes: ["read"],
+      redirectMode: "loopback",
+      repositoryPath: desktopSettings?.repositoryPath ?? null,
+      metadata: {},
+    });
+    setAuthSessions((current) => ({ ...current, linear: result }));
+    await openTrustedAuthUrl(result.authorizationUrl);
+    await load();
+  }
+
+  async function submitManualToken(provider: AuthProviderId) {
+    const token = manualTokens[provider]?.trim();
+    if (!token) {
+      setMessage(`Enter a ${provider} token before saving manual token mode.`);
+      return;
+    }
+    await startAuth(provider, {
+      method: "manual_token",
+      requestedScopes: [],
+      redirectMode: "manual",
+      repositoryPath: desktopSettings?.repositoryPath ?? null,
+      metadata: { token },
+    });
+    setManualTokens((current) => ({ ...current, [provider]: "" }));
+    await load();
+  }
+
+  async function pollProvider(provider: AuthProviderId) {
+    const session = authSessions[provider];
+    if (!session) return;
+    await pollAuth(provider, session.authSessionId);
+    await load();
+  }
+
+  async function validateProvider(provider: AuthProviderId) {
+    await validateAuth(provider);
+    await load();
+  }
+
+  async function refreshProvider(provider: AuthProviderId) {
+    await refreshAuth(provider);
+    await load();
+  }
+
+  async function disconnectProvider(provider: AuthProviderId) {
+    const confirmed = window.confirm(`Disconnect ${provider} and delete locally stored credentials?`);
+    if (!confirmed) return;
+    await disconnectAuth(provider, { deleteStoredToken: true, revokeRemoteTokenIfSupported: false });
+    await load();
   }
 
   return (
@@ -179,6 +266,41 @@ export default function SettingsPage() {
             </div>
           </Section>
 
+          <Section title="Integrations" description="Connect GitHub and Linear from Symphonia. Tokens stay daemon-side and are shown only as redacted sources.">
+            <div className="grid gap-3">
+              <IntegrationCard
+                provider="github"
+                title="GitHub"
+                description="Device flow for local desktop/browser usage, with GITHUB_TOKEN/GITHUB_PAT fallback."
+                connection={authStatus?.providers.find((connection) => connection.provider === "github") ?? null}
+                session={authSessions.github ?? null}
+                manualToken={manualTokens.github ?? ""}
+                onManualTokenChange={(value) => setManualTokens((current) => ({ ...current, github: value }))}
+                onConnect={() => void connectGithub()}
+                onPoll={() => void pollProvider("github")}
+                onManualToken={() => void submitManualToken("github")}
+                onValidate={() => void validateProvider("github")}
+                onRefresh={() => void refreshProvider("github")}
+                onDisconnect={() => void disconnectProvider("github")}
+              />
+              <IntegrationCard
+                provider="linear"
+                title="Linear"
+                description="PKCE loopback when SYMPHONIA_LINEAR_CLIENT_ID is configured, with LINEAR_API_KEY fallback."
+                connection={authStatus?.providers.find((connection) => connection.provider === "linear") ?? null}
+                session={authSessions.linear ?? null}
+                manualToken={manualTokens.linear ?? ""}
+                onManualTokenChange={(value) => setManualTokens((current) => ({ ...current, linear: value }))}
+                onConnect={() => void connectLinear()}
+                onPoll={() => void load()}
+                onManualToken={() => void submitManualToken("linear")}
+                onValidate={() => void validateProvider("linear")}
+                onRefresh={() => void refreshProvider("linear")}
+                onDisconnect={() => void disconnectProvider("linear")}
+              />
+            </div>
+          </Section>
+
           <Section title="Providers" description="Provider health is checked by the daemon. Claude and Cursor use pre-run CLI permissions.">
             <div className="grid gap-2">
               {providers.map((provider) => (
@@ -235,6 +357,114 @@ function Section({ title, description, children }: { title: string; description:
       </div>
       {children}
     </section>
+  );
+}
+
+function IntegrationCard({
+  provider,
+  title,
+  description,
+  connection,
+  session,
+  manualToken,
+  onManualTokenChange,
+  onConnect,
+  onPoll,
+  onManualToken,
+  onValidate,
+  onRefresh,
+  onDisconnect,
+}: {
+  provider: AuthProviderId;
+  title: string;
+  description: string;
+  connection: IntegrationAuthConnection | null;
+  session: AuthStartResult | null;
+  manualToken: string;
+  onManualTokenChange: (value: string) => void;
+  onConnect: () => void;
+  onPoll: () => void;
+  onManualToken: () => void;
+  onValidate: () => void;
+  onRefresh: () => void;
+  onDisconnect: () => void;
+}) {
+  const connected = connection?.status === "connected";
+  const canOauthConnect = provider === "github" || Boolean(connection?.clientIdConfigured);
+  return (
+    <div className="rounded-md border p-3">
+      <div className="flex flex-wrap items-start justify-between gap-3">
+        <div>
+          <div className="flex items-center gap-2">
+            <h3 className="text-sm font-semibold">{title}</h3>
+            <span className="rounded-sm border px-1.5 py-0.5 text-xs text-muted-foreground">{connection?.status ?? "unknown"}</span>
+          </div>
+          <p className="mt-1 text-xs text-muted-foreground">{description}</p>
+        </div>
+        <div className="flex flex-wrap gap-2">
+          <button type="button" onClick={onConnect} disabled={!canOauthConnect} className="inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs disabled:opacity-50">
+            <ExternalLink className="h-3.5 w-3.5" />
+            Connect
+          </button>
+          <button type="button" onClick={onValidate} className="inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs">
+            <CheckCircle2 className="h-3.5 w-3.5" />
+            Validate
+          </button>
+          <button type="button" onClick={onRefresh} className="inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs">
+            <RefreshCw className="h-3.5 w-3.5" />
+            Refresh
+          </button>
+          <button type="button" onClick={onDisconnect} disabled={!connected && connection?.credentialSource !== "manual"} className="inline-flex items-center gap-2 rounded-md border px-2.5 py-1.5 text-xs disabled:opacity-50">
+            <LogOut className="h-3.5 w-3.5" />
+            Disconnect
+          </button>
+        </div>
+      </div>
+
+      <div className="mt-3 grid gap-1 text-xs">
+        <KeyValue label="Method" value={connection?.method ?? "unavailable"} />
+        <KeyValue label="Credential source" value={connection?.redactedSource ?? "unavailable"} />
+        <KeyValue label="Account" value={connection?.accountLabel ?? "Not validated"} />
+        <KeyValue label="Workspace" value={connection?.workspaceLabel ?? "Not reported"} />
+        <KeyValue label="Scopes" value={(connection?.scopes ?? []).join(", ") || "Unknown"} />
+        <KeyValue label="Storage" value={`${connection?.tokenStorage ?? "none"}${connection?.refreshSupported ? " / refreshable" : ""}`} />
+        <KeyValue label="Expires" value={connection?.tokenExpiresAt ?? "Unknown or non-expiring"} />
+        <KeyValue label="Last checked" value={connection?.lastValidatedAt ?? "Never"} />
+        <KeyValue label="Env fallback" value={connection?.envTokenPresent ? "detected" : "not detected"} />
+        <KeyValue label="Client id" value={connection?.clientIdConfigured ? "configured" : "not configured"} />
+        {connection?.lastError && <p className="text-xs text-destructive">{connection.lastError}</p>}
+      </div>
+
+      {session && (
+        <div className="mt-3 rounded-md border bg-muted/20 p-2 text-xs">
+          <p className="font-medium">Pending authorization</p>
+          <p className="mt-1 text-muted-foreground">Session {session.authSessionId}</p>
+          {session.userCode && <p className="mt-1 select-all text-sm font-semibold">{session.userCode}</p>}
+          {session.authorizationUrl && <p className="mt-1 break-all">{session.authorizationUrl}</p>}
+          <button type="button" onClick={onPoll} className="mt-2 rounded-md border px-2 py-1 text-xs">
+            Check status
+          </button>
+        </div>
+      )}
+
+      <div className="mt-3 grid gap-2 sm:grid-cols-[1fr_auto]">
+        <label className="grid gap-1 text-xs">
+          <span className="text-muted-foreground">Manual token fallback</span>
+          <input
+            value={manualToken}
+            onChange={(event) => onManualTokenChange(event.target.value)}
+            type="password"
+            autoComplete="off"
+            placeholder={`${title} token`}
+            className="rounded-md border bg-background px-2 py-1.5 text-xs"
+          />
+        </label>
+        <button type="button" onClick={onManualToken} className="mt-auto inline-flex items-center justify-center gap-2 rounded-md border px-2.5 py-1.5 text-xs">
+          <KeyRound className="h-3.5 w-3.5" />
+          Store manual token
+        </button>
+      </div>
+    </div>
   );
 }
 

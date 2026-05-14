@@ -6,10 +6,13 @@ import { pathToFileURL } from "node:url";
 import {
   applyRunEvent,
   applyHarnessArtifacts,
+  AuthFetch,
+  AuthManager,
   buildWorkspaceInventory,
   canStartRunForIssue,
   claudeProvider,
   codexProvider,
+  createDefaultAuthManager,
   createQueuedRun,
   createGitHubClient,
   createRetryRun,
@@ -47,6 +50,13 @@ import {
   ApprovalState,
   AgentEvent,
   AgentEventSchema,
+  AuthCallbackResult,
+  AuthConnectionStatus,
+  AuthMethod,
+  AuthPollResult,
+  AuthProviderId,
+  AuthProviderIdSchema,
+  AuthValidationResult,
   DaemonStatus,
   HookName,
   HookRun,
@@ -78,6 +88,10 @@ import {
   WorkspaceInfo,
   WorkspaceInventory,
 } from "@symphonia/types";
+import {
+  AuthDisconnectRequestSchema,
+  AuthStartRequestSchema,
+} from "@symphonia/types";
 
 type RunRecord = {
   run: Run;
@@ -103,6 +117,8 @@ export type SymphoniaDaemonOptions = {
   cwd?: string;
   linearFetch?: LinearFetch;
   githubFetch?: GitHubFetch;
+  authFetch?: AuthFetch;
+  authManager?: AuthManager;
 };
 
 export class SymphoniaDaemon {
@@ -127,12 +143,14 @@ export class SymphoniaDaemon {
   private orphanedRunsCount = 0;
   private latestWorkspaceInventory: WorkspaceInventory | null = null;
   private latestCleanupPlan: WorkspaceCleanupPlan | null = null;
+  private readonly authManager: AuthManager;
   private closed = false;
 
   constructor(
     private readonly eventStore: EventStore,
     private readonly options: SymphoniaDaemonOptions = {},
   ) {
+    this.authManager = options.authManager ?? createDefaultAuthManager({ fetch: options.authFetch });
     this.reconstructPersistedRuns();
   }
 
@@ -361,6 +379,92 @@ export class SymphoniaDaemon {
 
       if (request.method === "GET" && path === "/github/health") {
         return sendJson(response, 200, { github: await this.getGithubHealth() });
+      }
+
+      if (request.method === "GET" && path === "/auth/status") {
+        return sendJson(response, 200, { auth: this.authManager.getStatus() });
+      }
+
+      if (request.method === "GET" && path === "/auth/connections") {
+        return sendJson(response, 200, { connections: this.authManager.getConnections() });
+      }
+
+      const authConnectionMatch = path.match(/^\/auth\/(github|linear)$/);
+      if (request.method === "GET" && authConnectionMatch) {
+        const provider = parseAuthProvider(authConnectionMatch[1]!);
+        return sendJson(response, 200, { connection: this.authManager.getConnection(provider) });
+      }
+
+      const authStartMatch = path.match(/^\/auth\/(github|linear)\/start$/);
+      if (request.method === "POST" && authStartMatch) {
+        const provider = parseAuthProvider(authStartMatch[1]!);
+        const body = AuthStartRequestSchema.parse({ ...objectBody(await readJsonBody(request)), provider });
+        const result = await this.authManager.startAuth(body);
+        this.appendAuthStartEvents(result.authSessionId, result.provider, result.method, result.status, result.verificationUri);
+        return sendJson(response, 200, { result });
+      }
+
+      const authPollMatch = path.match(/^\/auth\/(github|linear)\/poll\/([^/]+)$/);
+      if (request.method === "GET" && authPollMatch) {
+        const provider = parseAuthProvider(authPollMatch[1]!);
+        const result = await this.authManager.pollAuth(provider, decodeURIComponent(authPollMatch[2]!));
+        this.appendAuthPollEvents(provider, result);
+        return sendJson(response, 200, { result });
+      }
+
+      const authCallbackMatch = path.match(/^\/auth\/(github|linear)\/callback$/);
+      if (request.method === "GET" && authCallbackMatch) {
+        const provider = parseAuthProvider(authCallbackMatch[1]!);
+        const result = await this.authManager.completeCallback(provider, {
+          code: url.searchParams.get("code") ?? undefined,
+          state: url.searchParams.get("state") ?? undefined,
+          error: url.searchParams.get("error") ?? undefined,
+        });
+        this.appendAuthCallbackEvents(provider, result);
+        return sendHtml(
+          response,
+          200,
+          `<html><body><h1>Symphonia ${provider} auth</h1><p>${escapeHtml(result.error ?? result.status)}</p><p>You can return to Symphonia.</p></body></html>`,
+        );
+      }
+
+      if (request.method === "POST" && authCallbackMatch) {
+        const provider = parseAuthProvider(authCallbackMatch[1]!);
+        const result = await this.authManager.completeCallback(provider, await readJsonBody(request));
+        this.appendAuthCallbackEvents(provider, result);
+        return sendJson(response, 200, { result });
+      }
+
+      const authRefreshMatch = path.match(/^\/auth\/(github|linear)\/refresh$/);
+      if (request.method === "POST" && authRefreshMatch) {
+        const provider = parseAuthProvider(authRefreshMatch[1]!);
+        const result = await this.authManager.refreshConnection(provider);
+        this.appendAuthValidationEvent(result, result.status === "connected" ? "auth.refreshed" : null);
+        return sendJson(response, 200, { result });
+      }
+
+      const authValidateMatch = path.match(/^\/auth\/(github|linear)\/validate$/);
+      if (request.method === "POST" && authValidateMatch) {
+        const provider = parseAuthProvider(authValidateMatch[1]!);
+        const result = await this.authManager.validateConnection(provider);
+        this.appendAuthValidationEvent(result);
+        return sendJson(response, 200, { result });
+      }
+
+      const authDisconnectMatch = path.match(/^\/auth\/(github|linear)\/disconnect$/);
+      if (request.method === "POST" && authDisconnectMatch) {
+        const provider = parseAuthProvider(authDisconnectMatch[1]!);
+        const body = AuthDisconnectRequestSchema.parse({ ...objectBody(await readJsonBody(request)), provider });
+        const connection = await this.authManager.disconnect(body);
+        this.appendDaemonEvent({
+          id: randomUUID(),
+          runId: "__daemon__",
+          type: "auth.disconnected",
+          timestamp: nowIso(),
+          provider,
+          deleteStoredToken: body.deleteStoredToken,
+        });
+        return sendJson(response, 200, { connection });
       }
 
       if (request.method === "GET" && (path === "/daemon/status" || path === "/recovery/status")) {
@@ -895,7 +999,7 @@ export class SymphoniaDaemon {
     const adapter = this.trackerAdapter(runtime.config.tracker.kind);
 
     try {
-      const fetched = await adapter.fetchIssues(this.trackerContext(runtime));
+      const fetched = await adapter.fetchIssues(await this.trackerContext(runtime));
       this.eventStore.upsertIssues(fetched.issues, fetched.fetchedAt);
       this.trackerLastSyncAt = fetched.fetchedAt;
       this.trackerLastError = fetched.diagnostics.join("\n") || null;
@@ -916,7 +1020,7 @@ export class SymphoniaDaemon {
 
     try {
       const issue = await this.trackerAdapter(runtime.config.tracker.kind).fetchIssue(
-        this.trackerContext(runtime),
+        await this.trackerContext(runtime),
         issueIdOrIdentifier,
       );
       if (issue) {
@@ -971,7 +1075,7 @@ export class SymphoniaDaemon {
   async getTrackerHealth(): Promise<TrackerHealth> {
     try {
       const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
-      return this.trackerAdapter(runtime.config.tracker.kind).health(this.trackerContext(runtime));
+      return this.trackerAdapter(runtime.config.tracker.kind).health(await this.trackerContext(runtime));
     } catch (error) {
       return {
         kind: "linear",
@@ -999,7 +1103,7 @@ export class SymphoniaDaemon {
         };
       }
 
-      const missingToken = !runtime.config.github.token;
+      const missingToken = !this.authManager.resolveCredential("github") && !runtime.config.github.token;
       const error = this.githubLastError ?? (missingToken ? "GitHub token is not configured; local artifacts still work." : null);
       const status = error
         ? this.githubLastArtifactRefreshAt
@@ -1041,13 +1145,14 @@ export class SymphoniaDaemon {
         return health;
       }
 
-      const client = createGitHubClient(runtime.config.github, this.options.githubFetch);
+      const credential = await this.resolveGithubCredential();
+      const client = createGitHubClient({ ...runtime.config.github, token: credential?.token ?? runtime.config.github.token }, this.options.githubFetch);
       if (!client) {
         const health: GitHubHealth = {
           enabled: true,
           healthy: false,
           checkedAt,
-          error: runtime.config.github.token
+          error: credential || runtime.config.github.token
             ? "GitHub owner/repo is not configured."
             : "GitHub token is not configured; local artifacts still work.",
           rateLimit: null,
@@ -1755,7 +1860,13 @@ export class SymphoniaDaemon {
         run: record.run,
         issue: record.issue,
         workspace: record.workspace,
-        workflowConfig: runtime.config,
+        workflowConfig: {
+          ...runtime.config,
+          github: {
+            ...runtime.config.github,
+            token: (await this.resolveGithubCredential())?.token ?? runtime.config.github.token,
+          },
+        },
         githubFetch: this.options.githubFetch,
         signal: record.controller.signal,
       });
@@ -1810,6 +1921,118 @@ export class SymphoniaDaemon {
   private appendDaemonEvent(event: AgentEvent): void {
     if (this.closed) return;
     this.eventStore.append(AgentEventSchema.parse(event));
+  }
+
+  private appendAuthStartEvents(
+    authSessionId: string,
+    provider: AuthProviderId,
+    method: AuthMethod,
+    status: AuthConnectionStatus,
+    verificationUri: string | null,
+  ): void {
+    this.appendDaemonEvent({
+      id: randomUUID(),
+      runId: "__daemon__",
+      type: "auth.started",
+      timestamp: nowIso(),
+      provider,
+      method,
+      authSessionId,
+    });
+    if (status === "pending_user") {
+      this.appendDaemonEvent({
+        id: randomUUID(),
+        runId: "__daemon__",
+        type: "auth.pending_user",
+        timestamp: nowIso(),
+        provider,
+        method,
+        authSessionId,
+        verificationUri,
+      });
+    }
+  }
+
+  private appendAuthPollEvents(provider: AuthProviderId, result: AuthPollResult): void {
+    if (result.status === "connected" && result.connection) {
+      this.appendDaemonEvent({
+        id: randomUUID(),
+        runId: "__daemon__",
+        type: "auth.connected",
+        timestamp: nowIso(),
+        connection: result.connection,
+      });
+      return;
+    }
+    if (result.status === "failed" || result.status === "expired") {
+      this.appendDaemonEvent({
+        id: randomUUID(),
+        runId: "__daemon__",
+        type: "auth.failed",
+        timestamp: nowIso(),
+        provider,
+        method: result.connection?.method ?? "oauth_device",
+        authSessionId: result.authSessionId,
+        error: result.error ?? "Auth flow failed.",
+      });
+    }
+  }
+
+  private appendAuthCallbackEvents(provider: AuthProviderId, result: AuthCallbackResult): void {
+    if (result.status === "connected" && result.connection) {
+      this.appendDaemonEvent({
+        id: randomUUID(),
+        runId: "__daemon__",
+        type: "auth.connected",
+        timestamp: nowIso(),
+        connection: result.connection,
+      });
+      return;
+    }
+    if (result.status === "failed") {
+      this.appendDaemonEvent({
+        id: randomUUID(),
+        runId: "__daemon__",
+        type: "auth.failed",
+        timestamp: nowIso(),
+        provider,
+        method: result.connection?.method ?? "oauth_pkce",
+        authSessionId: null,
+        error: result.error ?? "Auth callback failed.",
+      });
+    }
+  }
+
+  private appendAuthValidationEvent(result: AuthValidationResult, successEvent: "auth.refreshed" | null = null): void {
+    if (result.status === "connected") {
+      const connection = this.authManager.getConnection(result.provider);
+      if (successEvent === "auth.refreshed") {
+        this.appendDaemonEvent({
+          id: randomUUID(),
+          runId: "__daemon__",
+          type: "auth.refreshed",
+          timestamp: nowIso(),
+          connection,
+        });
+      }
+      this.appendDaemonEvent({
+        id: randomUUID(),
+        runId: "__daemon__",
+        type: "auth.validation_succeeded",
+        timestamp: nowIso(),
+        result,
+      });
+      return;
+    }
+    this.appendDaemonEvent({
+      id: randomUUID(),
+      runId: "__daemon__",
+      type: "auth.validation_failed",
+      timestamp: nowIso(),
+      provider: result.provider,
+      error: result.error ?? "Auth validation failed.",
+      credentialSource: result.credentialSource,
+    });
   }
 
   private streamRunEvents(runId: string, request: IncomingMessage, response: ServerResponse): void {
@@ -1882,10 +2105,25 @@ export class SymphoniaDaemon {
     return this.options.linearFetch ? createLinearTrackerAdapter({ fetch: this.options.linearFetch }) : linearTrackerAdapter;
   }
 
-  private trackerContext(runtime: WorkflowRuntime, signal?: AbortSignal) {
+  private async resolveGithubCredential() {
+    let credential = this.authManager.resolveCredential("github");
+    if (!credential) {
+      const refresh = await this.authManager.refreshConnection("github");
+      if (refresh.status === "connected") credential = this.authManager.resolveCredential("github");
+    }
+    return credential;
+  }
+
+  private async trackerContext(runtime: WorkflowRuntime, signal?: AbortSignal) {
+    let credential = this.authManager.resolveCredential("linear");
+    if (credential?.connection.status === "expired") {
+      await this.authManager.refreshConnection("linear");
+      credential = this.authManager.resolveCredential("linear");
+    }
     return {
       workflowConfig: runtime.config,
       trackerConfig: runtime.config.tracker,
+      credentialToken: credential?.authorizationHeader ?? runtime.config.tracker.apiKey ?? undefined,
       signal,
     };
   }
@@ -2120,6 +2358,14 @@ function normalizeError(error: unknown): ApiError {
   return new ApiError(500, "Unknown error");
 }
 
+function parseAuthProvider(value: string): AuthProviderId {
+  return AuthProviderIdSchema.parse(value);
+}
+
+function objectBody(input: unknown): Record<string, unknown> {
+  return typeof input === "object" && input !== null && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
+}
+
 function normalizeHarnessError(error: unknown): ApiError {
   if (error instanceof ApiError) return error;
   if (error instanceof HarnessScannerError || error instanceof HarnessApplyError) return new ApiError(400, error.message);
@@ -2148,6 +2394,19 @@ function setCorsHeaders(response: ServerResponse): void {
 function sendJson(response: ServerResponse, status: number, body: JsonValue): void {
   response.writeHead(status, { "Content-Type": "application/json; charset=utf-8" });
   response.end(JSON.stringify(body));
+}
+
+function sendHtml(response: ServerResponse, status: number, body: string): void {
+  response.writeHead(status, { "Content-Type": "text/html; charset=utf-8" });
+  response.end(body);
+}
+
+function escapeHtml(value: string): string {
+  return value
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;");
 }
 
 async function readJsonBody(request: IncomingMessage): Promise<unknown> {

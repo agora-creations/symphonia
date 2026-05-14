@@ -2,11 +2,11 @@
 
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { CheckCircle2, Database, FileText, FolderOpen, RefreshCw, ScanSearch, ShieldCheck } from "lucide-react";
-import { applyHarnessArtifacts, runHarnessScan } from "@/lib/api";
+import { CheckCircle2, Database, ExternalLink, FileText, FolderOpen, RefreshCw, ScanSearch, ShieldCheck } from "lucide-react";
+import { applyHarnessArtifacts, getAuthStatus, runHarnessScan, startAuth, validateAuth } from "@/lib/api";
 import { getDesktopApi, type DesktopSettings, type DesktopStatus } from "@/lib/desktop";
 import { cn } from "@/lib/utils";
-import type { HarnessApplyResult, HarnessScanResult } from "@symphonia/types";
+import type { AuthStatus, HarnessApplyResult, HarnessScanResult } from "@symphonia/types";
 
 export function DesktopSetupGate() {
   const [desktopStatus, setDesktopStatus] = useState<DesktopStatus | null>(null);
@@ -20,15 +20,17 @@ export function DesktopSetupGate() {
   const [harnessConfirmation, setHarnessConfirmation] = useState("");
   const [harnessApplyResult, setHarnessApplyResult] = useState<HarnessApplyResult | null>(null);
   const [harnessBusy, setHarnessBusy] = useState<"scan" | "apply" | null>(null);
+  const [authStatus, setAuthStatus] = useState<AuthStatus | null>(null);
   const desktop = getDesktopApi();
 
   useEffect(() => {
     if (!desktop) return;
     let alive = true;
-    void Promise.all([desktop.getDesktopStatus(), desktop.getSettings()]).then(([status, loadedSettings]) => {
+    void Promise.allSettled([desktop.getDesktopStatus(), desktop.getSettings(), getAuthStatus()]).then((results) => {
       if (!alive) return;
-      setDesktopStatus(status);
-      setSettings(loadedSettings);
+      if (results[0].status === "fulfilled") setDesktopStatus(results[0].value);
+      if (results[1].status === "fulfilled") setSettings(results[1].value);
+      if (results[2].status === "fulfilled") setAuthStatus(results[2].value);
     });
     return () => {
       alive = false;
@@ -68,6 +70,25 @@ export function DesktopSetupGate() {
     const result = await desktop.createStarterWorkflow(settings.repositoryPath);
     setStarterWorkflow(result.existed ? `Existing WORKFLOW.md kept at ${result.path}` : `Created starter WORKFLOW.md at ${result.path}`);
     setSettings(await desktop.getSettings());
+  }
+
+  async function connectGithubFromSetup() {
+    const result = await startAuth("github", {
+      method: "oauth_device",
+      requestedScopes: ["repo"],
+      redirectMode: "device",
+      repositoryPath: settings?.repositoryPath ?? null,
+      metadata: {},
+    });
+    if (result.verificationUri) await desktop?.openExternalLink(result.verificationUri);
+    setMessage(result.userCode ? `GitHub device code: ${result.userCode}` : result.instructions.join(" "));
+    setAuthStatus(await getAuthStatus());
+  }
+
+  async function validateIntegration(provider: "github" | "linear") {
+    const result = await validateAuth(provider);
+    setMessage(result.error ?? `${provider} validation ${result.status}.`);
+    setAuthStatus(await getAuthStatus());
   }
 
   async function runHarnessReadinessScan() {
@@ -300,6 +321,47 @@ export function DesktopSetupGate() {
                 )}
               </div>
             )}
+          </div>
+
+          <div className="mt-4 rounded-md border bg-muted/20 p-4">
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div>
+                <p className="text-sm font-medium">Optional integrations</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Connect now or skip. Environment-token fallbacks remain available and no writes are enabled here.
+                </p>
+                <p className="mt-2 text-xs text-muted-foreground">
+                  GitHub: {authStatus?.providers.find((item) => item.provider === "github")?.status ?? "unknown"} / Linear:{" "}
+                  {authStatus?.providers.find((item) => item.provider === "linear")?.status ?? "unknown"}
+                </p>
+              </div>
+              <div className="flex flex-wrap gap-2">
+                <button
+                  type="button"
+                  onClick={connectGithubFromSetup}
+                  className="inline-flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted"
+                >
+                  <ExternalLink className="h-4 w-4" />
+                  Connect GitHub
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void validateIntegration("linear")}
+                  className="inline-flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted"
+                >
+                  <CheckCircle2 className="h-4 w-4" />
+                  Validate Linear
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void validateIntegration("github")}
+                  className="inline-flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted"
+                >
+                  <CheckCircle2 className="h-4 w-4" />
+                  Validate GitHub
+                </button>
+              </div>
+            </div>
           </div>
 
           {message && <p className="mt-4 rounded-md border px-3 py-2 text-sm text-muted-foreground">{message}</p>}

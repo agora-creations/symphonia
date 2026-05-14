@@ -115,6 +115,20 @@ describe("EventStore", () => {
     });
   });
 
+  it("skips legacy incompatible run records instead of crashing startup", () => {
+    const current = runRecord("run-current", "queued");
+    store.saveRun(current);
+    insertRawRunPayload({
+      ...current,
+      id: "run-legacy",
+      trackerKind: "mock",
+      provider: "mock",
+    });
+
+    expect(store.getRun("run-legacy")).toBeNull();
+    expect(store.listRuns().map((item) => item.id)).toEqual(["run-current"]);
+  });
+
   it("saves harness scans, fetches latest scan, records preview metadata, and stores apply history", () => {
     const first = harnessScan("scan-1", 42, "D");
     const second = harnessScan("scan-2", 82, "B");
@@ -244,6 +258,61 @@ function runRecord(id: string, status: Run["status"]): Run {
     createdByDaemonInstanceId: "daemon-old",
     lastSeenDaemonInstanceId: "daemon-old",
   };
+}
+
+function insertRawRunPayload(payload: Record<string, unknown>): void {
+  const database = (store as unknown as {
+    db: {
+      prepare: (sql: string) => { run: (params: Record<string, unknown>) => unknown };
+    };
+  }).db;
+  database
+    .prepare(
+      `
+        insert into run_records (
+          run_id,
+          issue_id,
+          issue_identifier,
+          tracker_kind,
+          provider,
+          status,
+          started_at,
+          updated_at,
+          ended_at,
+          last_event_at,
+          recovery_state,
+          payload_json
+        )
+        values (
+          @runId,
+          @issueId,
+          @issueIdentifier,
+          @trackerKind,
+          @provider,
+          @status,
+          @startedAt,
+          @updatedAt,
+          @endedAt,
+          @lastEventAt,
+          @recoveryState,
+          @payloadJson
+        )
+      `,
+    )
+    .run({
+      runId: payload.id,
+      issueId: payload.issueId,
+      issueIdentifier: payload.issueIdentifier,
+      trackerKind: payload.trackerKind,
+      provider: payload.provider,
+      status: payload.status,
+      startedAt: payload.startedAt,
+      updatedAt: payload.updatedAt,
+      endedAt: payload.endedAt,
+      lastEventAt: payload.lastEventAt,
+      recoveryState: payload.recoveryState,
+      payloadJson: JSON.stringify(payload),
+    });
 }
 
 function harnessScan(id: string, percentage: number, grade: HarnessScanResult["grade"]): HarnessScanResult {

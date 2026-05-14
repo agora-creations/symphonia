@@ -1,5 +1,5 @@
 import { existsSync } from "node:fs";
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import type { DesktopDiagnostics, DesktopSettings, DesktopStatus, ManagedProcessStatus } from "../shared/schemas.js";
 import { LogBuffer } from "./log-buffer.js";
 import { getRepoRootFromModule, nowIso } from "./path-utils.js";
@@ -71,6 +71,7 @@ export class DesktopServices {
       SYMPHONIA_DAEMON_PORT: String(settings.daemonPortPreference ?? 4100),
       SYMPHONIA_WORKFLOW_PATH: settings.workflowPath ?? undefined,
       SYMPHONIA_DB_PATH: settings.databasePath ?? undefined,
+      SYMPHONIA_AUTH_STORE_PATH: resolve(dirname(this.settingsStore.settingsPath), "auth-tokens.enc.json"),
       SYMPHONIA_PROVIDER: settings.defaultProviderId,
     };
     return this.daemon.start(env);
@@ -82,6 +83,7 @@ export class DesktopServices {
       SYMPHONIA_DAEMON_PORT: String(settings.daemonPortPreference ?? 4100),
       SYMPHONIA_WORKFLOW_PATH: settings.workflowPath ?? undefined,
       SYMPHONIA_DB_PATH: settings.databasePath ?? undefined,
+      SYMPHONIA_AUTH_STORE_PATH: resolve(dirname(this.settingsStore.settingsPath), "auth-tokens.enc.json"),
       SYMPHONIA_PROVIDER: settings.defaultProviderId,
     });
   }

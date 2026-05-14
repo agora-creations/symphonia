@@ -186,7 +186,14 @@ async function fetchLinearIssue(
 }
 
 function getClient(context: TrackerContext, options: LinearTrackerOptions): LinearGraphqlClient {
-  return options.client ?? createLinearClient(context.trackerConfig, options.fetch);
+  if (options.client) return options.client;
+  return createLinearClient(
+    {
+      ...context.trackerConfig,
+      apiKey: context.credentialToken ?? context.trackerConfig.apiKey,
+    },
+    options.fetch,
+  );
 }
 
 function ensureWritesAllowed(context: TrackerContext): void {

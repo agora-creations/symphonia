@@ -215,14 +215,6 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
   const pollIntervalMs = readOptionalPositiveInteger(trackerRaw, "pollIntervalMs", "poll_interval_ms");
   const writeRaw = readObject(trackerRaw, "write");
 
-  if (trackerKind === "linear" && !apiKey) {
-    throw new WorkflowError(
-      "workflow_linear_api_key_missing",
-      "tracker.api_key is required for linear tracker config.",
-      definition.workflowPath,
-    );
-  }
-
   if (trackerKind === "linear" && !teamKey && !teamId && !projectSlug && !projectId && !allowWorkspaceWide) {
     throw new WorkflowError(
       "workflow_linear_scope_missing",

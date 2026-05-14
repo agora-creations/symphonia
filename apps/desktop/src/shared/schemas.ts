@@ -96,8 +96,10 @@ export const ExternalUrlSchema = z
   .url()
   .refine((value) => {
     const parsed = new URL(value);
-    return parsed.protocol === "https:" || parsed.protocol === "http:";
-  }, "Only http(s) URLs can be opened externally.");
+    if (parsed.protocol !== "https:" && parsed.protocol !== "http:") return false;
+    if (parsed.hostname === "github.com" || parsed.hostname === "linear.app") return true;
+    return parsed.hostname === "127.0.0.1" && parsed.pathname.startsWith("/auth/");
+  }, "Only trusted GitHub, Linear, and local auth callback URLs can be opened externally.");
 
 export const RevealPathRequestSchema = z.object({
   path: z.string().min(1),

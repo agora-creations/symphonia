@@ -2,6 +2,11 @@ import { describe, expect, it } from "vitest";
 import {
   ApprovalStateSchema,
   AgentEventSchema,
+  AuthDisconnectRequestSchema,
+  AuthStartRequestSchema,
+  AuthStartResultSchema,
+  AuthValidationResultSchema,
+  IntegrationAuthConnectionSchema,
   ReviewArtifactSnapshotSchema,
   HookRunSchema,
   HarnessApplyRequestSchema,
@@ -125,6 +130,90 @@ describe("shared schemas", () => {
         timestamp,
         toolName: "shell",
         status: "not-a-status",
+      }),
+    ).toThrow();
+  });
+
+  it("parses auth connections, requests, results, validation, and redacted events", () => {
+    const connection = IntegrationAuthConnectionSchema.parse({
+      id: "github-connected",
+      provider: "github",
+      method: "oauth_device",
+      status: "connected",
+      accountLabel: "octocat",
+      accountId: "123",
+      workspaceLabel: null,
+      workspaceId: null,
+      scopes: ["repo"],
+      permissions: [],
+      tokenStorage: "encrypted_local_file",
+      tokenExpiresAt: timestamp,
+      refreshTokenExpiresAt: null,
+      connectedAt: timestamp,
+      lastValidatedAt: timestamp,
+      lastError: null,
+      redactedSource: "connected:abc123...7890",
+      credentialSource: "connected",
+      refreshSupported: true,
+      envTokenPresent: false,
+      clientIdConfigured: true,
+      clientSecretConfigured: false,
+    });
+    expect(JSON.stringify(connection)).not.toContain("ghu_");
+
+    const request = AuthStartRequestSchema.parse({
+      provider: "linear",
+      method: "oauth_pkce",
+      requestedScopes: ["read"],
+      redirectMode: "loopback",
+      repositoryPath: "/tmp/repo",
+      metadata: { clientId: "linear-client" },
+    });
+    expect(request.method).toBe("oauth_pkce");
+
+    const start = AuthStartResultSchema.parse({
+      authSessionId: "session-1",
+      provider: "github",
+      method: "oauth_device",
+      status: "pending_user",
+      authorizationUrl: "https://github.com/login/device",
+      verificationUri: "https://github.com/login/device",
+      userCode: "ABCD-1234",
+      expiresAt: timestamp,
+      pollIntervalMs: 5000,
+      instructions: ["Enter the code."],
+    });
+    expect(start.status).toBe("pending_user");
+
+    const validation = AuthValidationResultSchema.parse({
+      provider: "github",
+      status: "connected",
+      account: { id: "123", label: "octocat", workspaceId: null, workspaceLabel: null },
+      scopes: ["repo"],
+      permissions: [],
+      expiresAt: timestamp,
+      error: null,
+      credentialSource: "connected",
+      redactedSource: "connected:abc123...7890",
+    });
+    expect(validation.account?.label).toBe("octocat");
+
+    expect(AuthDisconnectRequestSchema.parse({ provider: "github" }).deleteStoredToken).toBe(true);
+
+    expect(
+      AgentEventSchema.parse({
+        id: "auth-event",
+        runId: "__daemon__",
+        type: "auth.connected",
+        timestamp,
+        connection,
+      }).type,
+    ).toBe("auth.connected");
+
+    expect(() =>
+      IntegrationAuthConnectionSchema.parse({
+        ...connection,
+        provider: "dropbox",
       }),
     ).toThrow();
   });
