@@ -24,6 +24,8 @@ import {
   GitHubPrExecutionRequest,
   GitHubPrExecutionResponse,
   GitHubPrExecutionResultResponseSchema,
+  GitHubPrPreflightResponseSchema,
+  GitHubPrPreflightResult,
   GitHubStatus,
   GitHubStatusResponseSchema,
   HarnessApplyRequest,
@@ -276,6 +278,26 @@ export async function getWritesStatus(): Promise<WritesStatus> {
 export async function getRunWriteActions(runId: string): Promise<IntegrationWriteActionsResponse> {
   const response = await request(`/runs/${runId}/write-actions`);
   return IntegrationWriteActionsResponseSchema.parse(response);
+}
+
+export async function getGithubPrPreflight(
+  runId: string,
+  input: {
+    previewId?: string | null;
+    payloadHash?: string | null;
+    idempotencyKey?: string | null;
+    targetRepository?: string | null;
+    baseBranch?: string | null;
+    headBranch?: string | null;
+  } = {},
+): Promise<GitHubPrPreflightResult> {
+  const params = new URLSearchParams();
+  for (const [key, value] of Object.entries(input)) {
+    if (typeof value === "string" && value.length > 0) params.set(key, value);
+  }
+  const query = params.size > 0 ? `?${params.toString()}` : "";
+  const response = await request(`/runs/${runId}/github/pr/preflight${query}`);
+  return GitHubPrPreflightResponseSchema.parse(response).preflight;
 }
 
 export async function createGithubDraftPr(runId: string, input: GitHubPrExecutionRequest): Promise<GitHubPrExecutionResponse> {

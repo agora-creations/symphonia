@@ -27,6 +27,7 @@ import {
   getConnectedStatus,
   executeWorkspaceCleanup,
   getDaemonStatus,
+  getGithubPrPreflight,
   getGithubStatus,
   getIssues,
   getProviders,
@@ -66,6 +67,7 @@ import {
   type IssueState,
   type GitHubStatus,
   type GitHubPrExecutionResponse,
+  type GitHubPrPreflightResult,
   type IntegrationWriteActionsResponse,
   type IntegrationWritePolicy,
   type IntegrationWritePreview,
@@ -1710,32 +1712,49 @@ function WriteActionsPanel({
   const [executingPreviewId, setExecutingPreviewId] = useState<string | null>(null);
   const [confirmationByPreview, setConfirmationByPreview] = useState<Record<string, string>>({});
   const [executionResult, setExecutionResult] = useState<GitHubPrExecutionResponse | null>(null);
+  const [preflightByPreview, setPreflightByPreview] = useState<Record<string, GitHubPrPreflightResult>>({});
 
   const loadWriteActions = useCallback(async () => {
     if (!run) {
       setWriteActionResponse(null);
       setHistory([]);
+      setPreflightByPreview({});
       return;
     }
     const response = await getRunWriteActions(run.id);
     setWriteActionResponse(response);
     setHistory(response.writeActions);
+    const githubPreflights = await Promise.all(
+      response.previews
+        .filter((preview) => preview.kind === "github_pr_create")
+        .map(async (preview) => [
+          preview.id,
+          await getGithubPrPreflight(run.id, {
+            previewId: preview.id,
+            payloadHash: preview.payloadHash,
+            idempotencyKey: preview.idempotencyKey,
+            targetRepository: preview.targetRepository,
+            baseBranch: preview.baseBranch,
+            headBranch: preview.targetBranch,
+          }),
+        ] as const),
+    );
+    setPreflightByPreview(Object.fromEntries(githubPreflights));
   }, [run]);
 
   useEffect(() => {
     setWriteActionResponse(null);
     setHistory([]);
     setError(null);
-    void Promise.all([getWritesStatus(), run ? getRunWriteActions(run.id) : Promise.resolve(null)])
-      .then(([loadedStatus, loadedActions]) => {
+    setPreflightByPreview({});
+    void Promise.all([getWritesStatus(), run ? loadWriteActions().then(() => null) : Promise.resolve(null)])
+      .then(([loadedStatus]) => {
         setStatus(loadedStatus);
-        setWriteActionResponse(loadedActions);
-        setHistory(loadedActions?.writeActions ?? []);
       })
       .catch((caught) => {
         setError(caught instanceof Error ? caught.message : "Failed to load write actions.");
       });
-  }, [run]);
+  }, [loadWriteActions, run]);
 
   const handleRefresh = useCallback(async () => {
     if (!run) return;
@@ -1840,6 +1859,7 @@ function WriteActionsPanel({
                   confirmationValue={confirmationByPreview[preview.id] ?? ""}
                   executionResult={executionResult?.previewId === preview.id ? executionResult : null}
                   executing={executingPreviewId === preview.id}
+                  preflight={preflightByPreview[preview.id] ?? null}
                   onConfirmationChange={(value) => setConfirmationByPreview((current) => ({ ...current, [preview.id]: value }))}
                   onCreateDraftPr={() => void handleCreateDraftPr(preview)}
                 />
@@ -1947,6 +1967,7 @@ function WritePreviewContractCard({
   executionResult,
   onConfirmationChange,
   onCreateDraftPr,
+  preflight,
   preview,
 }: {
   confirmationValue: string;
@@ -1954,14 +1975,17 @@ function WritePreviewContractCard({
   executionResult: GitHubPrExecutionResponse | null;
   onConfirmationChange: (value: string) => void;
   onCreateDraftPr: () => void;
+  preflight: GitHubPrPreflightResult | null;
   preview: WriteActionPreviewContract;
 }) {
   const canCreateDraftPr =
     preview.kind === "github_pr_create" &&
     preview.status === "preview_available" &&
     preview.blockingReasons.length === 0 &&
+    preflight?.canExecute === true &&
     confirmationValue === preview.confirmationPhrase;
   const isGithubPr = preview.kind === "github_pr_create";
+  const preflightBlocks = preflight?.blockingReasons ?? [];
   return (
     <article className="rounded-md border p-3">
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -2032,7 +2056,9 @@ function WritePreviewContractCard({
       {preview.blockingReasons.length > 0 && <StatusList title="Blocking reasons" tone="danger" items={preview.blockingReasons} />}
       {preview.riskWarnings.length > 0 && <StatusList title="Risk warnings" tone="warning" items={preview.riskWarnings} />}
 
-      {isGithubPr && preview.blockingReasons.length === 0 && preview.status === "preview_available" && (
+      {isGithubPr && preflight && <GitHubPrPreflightPanel preflight={preflight} />}
+
+      {isGithubPr && preview.blockingReasons.length === 0 && preview.status === "preview_available" && preflight?.canExecute === true && (
         <div className="mt-3 rounded-md border p-3">
           <label className="text-xs font-medium" htmlFor={`${preview.id}-confirmation`}>
             Type {preview.confirmationPhrase} to create a draft PR
@@ -2059,9 +2085,10 @@ function WritePreviewContractCard({
         </div>
       )}
 
-      {isGithubPr && (preview.blockingReasons.length > 0 || preview.status !== "preview_available") && (
+      {isGithubPr && (preview.blockingReasons.length > 0 || preview.status !== "preview_available" || preflight?.canExecute !== true) && (
         <p className="mt-3 rounded-md border p-3 text-xs text-muted-foreground">
-          Draft PR creation is unavailable until the GitHub write gate, evidence, repository, branch, and confirmation requirements are satisfied.
+          Draft PR creation is unavailable until preflight, GitHub write gate, evidence, repository, branch, and confirmation requirements are satisfied.
+          {preflightBlocks.length > 0 ? ` Preflight blocks: ${preflightBlocks.slice(0, 3).join(" ")}` : ""}
         </p>
       )}
 
@@ -2086,6 +2113,43 @@ function PreviewKeyValue({ label, value }: { label: string; value: string }) {
     <div>
       <dt className="text-muted-foreground">{label}</dt>
       <dd className="mt-1 break-all font-medium">{value}</dd>
+    </div>
+  );
+}
+
+function GitHubPrPreflightPanel({ preflight }: { preflight: GitHubPrPreflightResult }) {
+  return (
+    <div className="mt-3 rounded-md border bg-background">
+      <div className="flex flex-wrap items-center justify-between gap-2 border-b px-3 py-2">
+        <h5 className="text-xs font-medium">PR preflight</h5>
+        <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", writePreviewStatusClass(preflight.status === "passed" ? "preview_available" : preflight.status === "warning" ? "blocked" : "unavailable"))}>
+          {preflight.status.replaceAll("_", " ")}
+        </span>
+      </div>
+      <dl className="grid gap-2 p-3 text-xs sm:grid-cols-2">
+        <PreviewKeyValue label="Can execute" value={preflight.canExecute ? "yes" : "no"} />
+        <PreviewKeyValue label="Workspace" value={preflight.workspace.isIsolatedRunWorkspace ? "isolated" : preflight.workspace.isMainCheckout ? "main checkout" : "not isolated"} />
+        <PreviewKeyValue label="Run ownership" value={preflight.workspace.belongsToRun ? "matches run" : "mismatch"} />
+        <PreviewKeyValue label="Remote" value={preflight.repository.matchesTarget ? "matches target" : "mismatch or unavailable"} />
+        <PreviewKeyValue label="Branch" value={preflight.branches.headSafe ? "safe" : "blocked"} />
+        <PreviewKeyValue label="Write mode" value={preflight.writeMode.githubMode.replaceAll("_", " ")} />
+        <PreviewKeyValue label="Diff parity" value={preflight.diff.matchesApprovalEvidence ? "matches evidence" : "mismatch"} />
+        <PreviewKeyValue
+          label="Files"
+          value={`${preflight.diff.liveChangedFiles.length} live / ${preflight.diff.evidenceChangedFiles.length} evidence`}
+        />
+        <PreviewKeyValue label="Review" value={preflight.reviewArtifact.status} />
+        <PreviewKeyValue label="Preview hash" value={preflight.preview.matches ? "matches" : "mismatch"} />
+        <PreviewKeyValue label="Remote state" value={preflight.remoteState.ambiguous ? "ambiguous" : "clear"} />
+      </dl>
+      {preflight.diff.missingFromLiveDiff.length > 0 && (
+        <StatusList title="Missing from live diff" tone="danger" items={preflight.diff.missingFromLiveDiff.slice(0, 8)} />
+      )}
+      {preflight.diff.extraInLiveDiff.length > 0 && (
+        <StatusList title="Extra in live diff" tone="danger" items={preflight.diff.extraInLiveDiff.slice(0, 8)} />
+      )}
+      {preflight.blockingReasons.length > 0 && <StatusList title="Preflight blocking reasons" tone="danger" items={preflight.blockingReasons} />}
+      {preflight.warnings.length > 0 && <StatusList title="Preflight warnings" tone="warning" items={preflight.warnings} />}
     </div>
   );
 }

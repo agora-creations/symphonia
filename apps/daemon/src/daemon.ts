@@ -1,8 +1,10 @@
+import { execFile } from "node:child_process";
 import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, realpathSync, rmSync } from "node:fs";
 import { createServer, IncomingMessage, Server, ServerResponse } from "node:http";
 import { basename, dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
+import { promisify } from "node:util";
 import rootPackage from "../../../package.json" with { type: "json" };
 import {
   applyRunEvent,
@@ -51,6 +53,7 @@ import {
   WorkspaceError,
   WorkspaceManager,
   isInsideWorkspaceRoot,
+  inspectGitRepository,
 } from "@symphonia/core";
 import { EventStore } from "@symphonia/db";
 import {
@@ -82,6 +85,8 @@ import {
   GitHubPrExecutionRequest,
   GitHubPrExecutionResponse,
   GitHubPrExecutionResponseSchema,
+  GitHubPrPreflightResult,
+  GitHubPrPreflightResultSchema,
   GitHubStatus,
   HarnessApplyRequestSchema,
   HarnessApplyResult,
@@ -142,6 +147,8 @@ type JsonValue = Record<string, unknown> | unknown[] | string | number | boolean
 
 const defaultPort = 4100;
 const daemonVersion = typeof rootPackage.version === "string" ? rootPackage.version : "0.1.0";
+const execFileAsync = promisify(execFile);
+const preflightGitTimeoutMs = 10_000;
 
 export type SymphoniaDaemonOptions = {
   workflowPath?: string;
@@ -690,6 +697,13 @@ export class SymphoniaDaemon {
       if (request.method === "POST" && githubPrPreviewMatch) {
         const preview = await this.previewGithubPr(githubPrPreviewMatch[1]!, await readJsonBody(request));
         return sendJson(response, 200, { preview });
+      }
+
+      const githubPrPreflightMatch = path.match(/^\/runs\/([^/]+)\/github\/pr\/preflight$/);
+      if (request.method === "GET" && githubPrPreflightMatch) {
+        const query = Object.fromEntries(url.searchParams.entries());
+        const preflight = await this.getGithubPrPreflight(githubPrPreflightMatch[1]!, query);
+        return sendJson(response, 200, { preflight });
       }
 
       const githubPrCreateMatch = path.match(/^\/runs\/([^/]+)\/github\/pr\/create$/);
@@ -1981,6 +1995,262 @@ export class SymphoniaDaemon {
     return preview;
   }
 
+  async getGithubPrPreflight(runId: string, input: unknown = {}): Promise<GitHubPrPreflightResult> {
+    const record = this.requireRecord(runId);
+    const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+    const body = objectBody(input);
+    const requestedPreviewId = stringBody(body, "previewId");
+    const requestedPayloadHash = stringBody(body, "payloadHash");
+    const requestedIdempotencyKey = stringBody(body, "idempotencyKey");
+    const requestedTargetRepository = stringBody(body, "targetRepository");
+    const requestedBaseBranch = stringBody(body, "baseBranch");
+    const requestedHeadBranch = stringBody(body, "headBranch");
+    const checkedAt = nowIso();
+    const evidence = this.getRunApprovalEvidence(runId);
+    const previews = await this.getWriteActionPreviews(runId);
+    const previewContract =
+      (requestedPreviewId
+        ? previews.find((preview) => preview.id === requestedPreviewId && preview.kind === "github_pr_create")
+        : previews.find((preview) => preview.kind === "github_pr_create")) ?? null;
+    const expectedPayloadHash = previewContract?.payloadHash ?? null;
+    const idempotencyKey = requestedIdempotencyKey ?? previewContract?.idempotencyKey ?? null;
+    const existingExecution = idempotencyKey ? this.eventStore.findLocalWriteExecutionByIdempotencyKey(idempotencyKey) : null;
+    const workspacePath = evidence.workspacePath ?? record.run.workspacePath;
+    const workspaceRealPath = workspacePath ? this.normalizeRepositoryPath(workspacePath) : null;
+    const workspaceRootRealPath = this.normalizeRepositoryPath(runtime.config.workspace.root);
+    const workspaceExists = Boolean(workspacePath && existsSync(workspacePath));
+    const mainCheckoutPath = this.getCurrentRepositoryPath();
+    const expectedWorkspacePath = this.normalizeRepositoryPath(new WorkspaceManager(runtime.config.workspace.root).getIssueWorkspace(record.issue.identifier).path);
+    const belongsToRun = Boolean(workspaceRealPath && workspaceRealPath === expectedWorkspacePath);
+    const workspaceInsideRoot = Boolean(workspaceRealPath && isInsideWorkspaceRoot(workspaceRootRealPath, workspaceRealPath));
+    const inspection =
+      workspacePath && workspaceExists
+        ? await inspectGitRepository(workspacePath, {
+            remoteName: runtime.config.github.remoteName,
+            defaultBaseBranch: runtime.config.github.defaultBaseBranch,
+          })
+        : null;
+    const gitTopLevel = workspacePath && workspaceExists ? await preflightGitValue(workspacePath, ["rev-parse", "--show-toplevel"]) : null;
+    const gitTopLevelRealPath = gitTopLevel ? this.normalizeRepositoryPath(gitTopLevel) : null;
+    const isGitRepository = Boolean(inspection?.git.isGitRepo && gitTopLevelRealPath);
+    const isMainCheckout = Boolean(
+      workspaceRealPath && (workspaceRealPath === mainCheckoutPath || gitTopLevelRealPath === mainCheckoutPath),
+    );
+    const isIsolatedRunWorkspace = Boolean(workspaceRealPath && gitTopLevelRealPath && workspaceRealPath === gitTopLevelRealPath && !isMainCheckout);
+    const remoteUrlRaw = workspacePath && isGitRepository ? await preflightGitValue(workspacePath, ["remote", "get-url", runtime.config.github.remoteName]) : null;
+    const targetRepository =
+      requestedTargetRepository ??
+      previewContract?.targetRepository ??
+      (runtime.config.github.owner && runtime.config.github.repo ? `${runtime.config.github.owner}/${runtime.config.github.repo}` : null);
+    const repositoryMatchesTarget = Boolean(
+      remoteUrlRaw &&
+        runtime.config.github.owner &&
+        runtime.config.github.repo &&
+        targetRepository === `${runtime.config.github.owner}/${runtime.config.github.repo}` &&
+        preflightRemoteUrlMatchesRepository(remoteUrlRaw, runtime.config.github.owner, runtime.config.github.repo),
+    );
+    const baseBranch = requestedBaseBranch ?? previewContract?.baseBranch ?? runtime.config.github.defaultBaseBranch;
+    const headBranch = requestedHeadBranch ?? previewContract?.targetBranch ?? inspection?.git.currentBranch ?? null;
+    const currentBranch = inspection?.git.currentBranch ?? null;
+    const headExistsLocal =
+      workspacePath && isGitRepository && headBranch
+        ? (await preflightGit(workspacePath, ["show-ref", "--verify", "--quiet", `refs/heads/${headBranch}`])).ok
+        : null;
+    const remoteBranchResult =
+      workspacePath && isGitRepository && headBranch
+        ? await preflightGit(workspacePath, ["ls-remote", "--heads", runtime.config.github.remoteName, headBranch])
+        : null;
+    const headExistsRemote = remoteBranchResult ? (remoteBranchResult.ok ? remoteBranchResult.stdout.trim().length > 0 : null) : null;
+    const policy = githubWritePolicy(runtime.config.github);
+    const githubMode = githubPreflightWriteMode(runtime.config.github.enabled, policy, runtime.config.github.write.allowCreatePr);
+    const headOwnedByExecution = Boolean(
+      existingExecution &&
+        existingExecution.payloadHash === expectedPayloadHash &&
+        existingExecution.idempotencyKey === idempotencyKey &&
+        existingExecution.status === "succeeded" &&
+        existingExecution.headBranch === headBranch,
+    );
+    const credential = await this.resolveGithubCredential();
+    const githubClient = this.githubClientForRuntime(runtime, credential?.token ?? null);
+    const warnings: string[] = [];
+    const blockers: string[] = [];
+    let existingPr: GitHubPrPreflightResult["remoteState"]["existingPr"] = null;
+    if (githubClient && headBranch) {
+      try {
+        existingPr = (await githubClient.listPullRequests({ headBranch, state: "open" }))[0] ?? null;
+      } catch (error) {
+        blockers.push(error instanceof Error ? `Existing PR state could not be verified: ${error.message}` : "Existing PR state could not be verified.");
+      }
+    } else if (headBranch) {
+      blockers.push("Existing PR state could not be verified because GitHub client is unavailable.");
+    }
+
+    const diff = comparePreflightChangedFiles(inspection?.diff.files ?? [], evidence.changedFiles);
+    const disallowedFiles = disallowedPreflightFiles(diff.liveChangedFiles.map((file) => file.path));
+    const previewPayloadMatches = requestedPayloadHash ? requestedPayloadHash === expectedPayloadHash : Boolean(expectedPayloadHash);
+    const baseIsProtectedOrDefault = Boolean(
+      baseBranch &&
+        (baseBranch === runtime.config.github.defaultBaseBranch ||
+          runtime.config.github.write.protectedBranches.some((branch) => branch.toLowerCase() === baseBranch.toLowerCase())),
+    );
+    const headSafe = Boolean(
+      headBranch &&
+        baseBranch &&
+        headBranch !== baseBranch &&
+        !runtime.config.github.write.protectedBranches.some((branch) => branch.toLowerCase() === headBranch.toLowerCase()) &&
+        isSafePreflightBranchName(headBranch),
+    );
+    const idempotencyMatch = Boolean(
+      existingExecution &&
+        existingExecution.payloadHash === expectedPayloadHash &&
+        existingExecution.idempotencyKey === idempotencyKey &&
+        existingExecution.status === "succeeded",
+    );
+    const remoteAmbiguous = Boolean((headExistsRemote === true && !headOwnedByExecution) || (existingPr && !idempotencyMatch) || headExistsRemote === null);
+
+    if (!previewContract) blockers.push("GitHub PR preview was not found for this run.");
+    if (requestedPreviewId && previewContract && previewContract.id !== requestedPreviewId) blockers.push("Requested preview id does not match the current GitHub PR preview.");
+    if (requestedPayloadHash && !previewPayloadMatches) blockers.push("Preview payload hash does not match the current GitHub PR preview.");
+    if (requestedIdempotencyKey && previewContract && previewContract.idempotencyKey !== requestedIdempotencyKey) {
+      blockers.push("Idempotency key does not match the current GitHub PR preview.");
+    }
+    if (requestedTargetRepository && previewContract?.targetRepository !== requestedTargetRepository) {
+      blockers.push("Target repository does not match the current GitHub PR preview.");
+    }
+    if (requestedBaseBranch && previewContract?.baseBranch !== requestedBaseBranch) blockers.push("Base branch does not match the current GitHub PR preview.");
+    if (requestedHeadBranch && previewContract?.targetBranch !== requestedHeadBranch) blockers.push("Head branch does not match the current GitHub PR preview.");
+    if (previewContract?.blockingReasons.length) blockers.push(...previewContract.blockingReasons);
+    if (evidence.finalRunState !== "succeeded") blockers.push(`Run must be succeeded before creating a PR; current state is ${evidence.finalRunState}.`);
+    if (evidence.missingEvidenceReasons.length > 0) blockers.push(...evidence.missingEvidenceReasons);
+    if (evidence.reviewArtifactStatus !== "ready") blockers.push("Review artifact must be ready before creating a PR.");
+    if (!workspacePath) blockers.push("Run workspace path is unavailable.");
+    if (workspacePath && !workspaceExists) blockers.push("Run workspace path does not exist.");
+    if (workspacePath && !workspaceInsideRoot) blockers.push("Run workspace path is outside the configured workspace root.");
+    if (workspacePath && !belongsToRun) blockers.push("Run workspace path does not match the selected run issue workspace.");
+    if (workspacePath && !isGitRepository) blockers.push(inspection?.git.error ?? "Run workspace is not a git repository.");
+    if (workspacePath && isMainCheckout) blockers.push("Run workspace resolves to the main Symphonia checkout, which is not eligible for PR writes.");
+    if (workspacePath && !isIsolatedRunWorkspace) blockers.push("Run workspace is not an isolated git repository rooted at the workspace path.");
+    if (!remoteUrlRaw) blockers.push(`Git remote ${runtime.config.github.remoteName} is unavailable.`);
+    if (remoteUrlRaw && !repositoryMatchesTarget) blockers.push("Workspace git remote does not match the target GitHub repository.");
+    if (!baseBranch) blockers.push("Base branch is unavailable.");
+    if (!headBranch) blockers.push("GitHub PR head branch is unavailable.");
+    if (headBranch && currentBranch !== headBranch) blockers.push(`Workspace branch ${currentBranch || "unknown"} does not match PR head ${headBranch}.`);
+    if (headBranch && !headSafe) blockers.push(`Head branch ${headBranch} is not safe for PR creation.`);
+    if (headExistsLocal === false) blockers.push(`Head branch ${headBranch} does not exist locally.`);
+    if (remoteBranchResult && !remoteBranchResult.ok) {
+      blockers.push(remoteBranchResult.error ?? "Remote branch state could not be verified.");
+    }
+    if (headExistsRemote === true && !headOwnedByExecution) {
+      blockers.push(`Remote branch ${headBranch} already exists and is not tied to this execution idempotency record.`);
+    }
+    if (existingPr && !idempotencyMatch) {
+      blockers.push(`Existing PR #${existingPr.number} already exists for ${headBranch} and is not tied to this execution idempotency record.`);
+    }
+    if (!diff.matchesApprovalEvidence) {
+      blockers.push("Live workspace diff does not match approval evidence.");
+    }
+    if (diff.extraInLiveDiff.length > 0) {
+      blockers.push(`Workspace has changes not represented by approval evidence: ${diff.extraInLiveDiff.slice(0, 8).join(", ")}.`);
+    }
+    if (diff.missingFromLiveDiff.length > 0) {
+      blockers.push(`Approval evidence has files missing from live diff: ${diff.missingFromLiveDiff.slice(0, 8).join(", ")}.`);
+    }
+    if (disallowedFiles.length > 0) {
+      blockers.push(`Workspace diff includes disallowed local files: ${disallowedFiles.slice(0, 8).join(", ")}.`);
+    }
+    if (diff.liveChangedFiles.length > 0 && !runtime.config.github.write.allowPush) {
+      blockers.push("Workspace has unpublished local changes and github.write.allow_push is false.");
+    }
+    if (!runtime.config.github.enabled) blockers.push("GitHub integration is disabled.");
+    if (runtime.config.github.readOnly) blockers.push("GitHub read_only is true.");
+    if (!policy.enabled) blockers.push("GitHub writes are disabled.");
+    if (!runtime.config.github.write.allowCreatePr) blockers.push("GitHub PR creation is disabled.");
+    if (!policy.requireConfirmation) blockers.push("GitHub PR creation must require manual confirmation.");
+    if (!runtime.config.github.owner || !runtime.config.github.repo) blockers.push("GitHub owner/repo is not configured.");
+    if (!credential) blockers.push("GitHub credentials are unavailable.");
+    if (!githubClient) blockers.push("GitHub client is unavailable for the configured repository.");
+    if (existingExecution && existingExecution.payloadHash !== expectedPayloadHash) {
+      blockers.push(`Idempotency key already exists for a different payload hash: ${existingExecution.payloadHash}.`);
+    }
+    if (existingExecution && (existingExecution.status === "pending" || existingExecution.status === "in_progress")) {
+      blockers.push("A write execution with this idempotency key is already in progress.");
+    }
+    if (headExistsRemote === false && !runtime.config.github.write.allowPush) {
+      warnings.push("Remote branch does not exist and github.write.allow_push is false.");
+    }
+    if (githubMode === "read_only") warnings.push("GitHub write mode is read-only; manual write mode is required before execution.");
+
+    const uniqueBlockers = uniqueStrings(blockers);
+    const uniqueWarnings = uniqueStrings(warnings);
+    const status =
+      uniqueBlockers.length > 0
+        ? previewContract || workspacePath
+          ? "blocked"
+          : "unavailable"
+        : uniqueWarnings.length > 0
+          ? "warning"
+          : "passed";
+
+    return GitHubPrPreflightResultSchema.parse({
+      runId,
+      previewId: previewContract?.id ?? requestedPreviewId,
+      actionKind: "github_pr_create",
+      status,
+      canExecute: uniqueBlockers.length === 0,
+      workspace: {
+        path: workspacePath,
+        exists: workspaceExists,
+        isGitRepository,
+        isIsolatedRunWorkspace,
+        belongsToRun,
+        isMainCheckout,
+        gitTopLevel: gitTopLevelRealPath,
+      },
+      repository: {
+        expectedOwner: runtime.config.github.owner,
+        expectedName: runtime.config.github.repo,
+        remoteUrl: redactPreflightRemoteUrl(remoteUrlRaw),
+        matchesTarget: repositoryMatchesTarget,
+      },
+      branches: {
+        baseBranch,
+        headBranch,
+        baseIsProtectedOrDefault,
+        headExistsLocal,
+        headExistsRemote,
+        headOwnedByExecution,
+        headSafe,
+      },
+      diff,
+      reviewArtifact: {
+        status: evidence.reviewArtifactStatus,
+        identifier: evidence.reviewArtifactIdentifier,
+        path: evidence.reviewArtifactPath,
+      },
+      preview: {
+        payloadHash: requestedPayloadHash ?? expectedPayloadHash,
+        expectedPayloadHash,
+        matches: previewPayloadMatches,
+      },
+      remoteState: {
+        existingBranch: headExistsRemote,
+        existingPr,
+        existingPrUrl: existingPr?.url ?? null,
+        idempotencyMatch,
+        ambiguous: remoteAmbiguous,
+      },
+      writeMode: {
+        githubMode,
+        allowPush: runtime.config.github.write.allowPush,
+        allowPrCreate: runtime.config.github.write.allowCreatePr,
+      },
+      blockingReasons: uniqueBlockers,
+      warnings: uniqueWarnings,
+      requiredConfirmation: previewContract?.confirmationPhrase ?? policy.confirmationPhrase,
+      checkedAt,
+    });
+  }
+
   async createGithubPr(runId: string, _input: unknown) {
     const record = this.requireRecord(runId);
     const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
@@ -2063,6 +2333,7 @@ export class SymphoniaDaemon {
     const previewContract = previews.find((preview) => preview.id === request.previewId && preview.kind === "github_pr_create") ?? null;
     if (!previewContract) {
       const reason = "GitHub PR preview was not found for this run.";
+      const preflight = await this.getGithubPrPreflight(runId, request);
       return githubPrExecutionResponse({
         status: "blocked",
         request,
@@ -2077,11 +2348,14 @@ export class SymphoniaDaemon {
         blockingReasons: [reason],
         errorSummary: reason,
         executionRecord: existingExecution ?? null,
+        preflight,
       });
     }
 
     const evidence = this.getRunApprovalEvidence(runId);
     const blockers = this.githubPrExecutionBlockers(request, previewContract, evidence, runtime);
+    const preflight = await this.getGithubPrPreflight(runId, request);
+    blockers.push(...preflight.blockingReasons);
     const credential = await this.resolveGithubCredential();
     const githubClient = this.githubClientForRuntime(runtime, credential?.token ?? null);
     if (!credential) blockers.push("GitHub credentials are unavailable.");
@@ -2119,6 +2393,7 @@ export class SymphoniaDaemon {
         blockingReasons: uniqueStrings(blockers),
         errorSummary: uniqueStrings(blockers).join("; "),
         executionRecord: existingExecution ?? null,
+        preflight,
       });
     }
 
@@ -2243,6 +2518,7 @@ export class SymphoniaDaemon {
         blockingReasons: branchPreparation.errors,
         errorSummary,
         executionRecord,
+        preflight,
       });
     }
 
@@ -2297,6 +2573,7 @@ export class SymphoniaDaemon {
       blockingReasons: writeResult.errors,
       errorSummary: writeResult.errors[0] ?? null,
       executionRecord,
+      preflight,
     });
   }
 
@@ -3803,6 +4080,121 @@ function uniqueStrings(values: string[]): string[] {
   return [...new Set(values.filter((value) => value.trim().length > 0))];
 }
 
+function comparePreflightChangedFiles(liveChangedFiles: ChangedFile[], evidenceChangedFiles: ChangedFile[]): GitHubPrPreflightResult["diff"] {
+  const livePaths = new Set(liveChangedFiles.flatMap(preflightChangedFilePaths));
+  const evidencePaths = new Set(evidenceChangedFiles.flatMap(preflightChangedFilePaths));
+  const matchedFiles = [...evidencePaths].filter((path) => livePaths.has(path)).sort();
+  const missingFromLiveDiff = [...evidencePaths].filter((path) => !livePaths.has(path)).sort();
+  const extraInLiveDiff = [...livePaths].filter((path) => !evidencePaths.has(path)).sort();
+
+  return {
+    liveChangedFiles,
+    evidenceChangedFiles,
+    matchedFiles,
+    missingFromLiveDiff,
+    extraInLiveDiff,
+    hasUnrelatedDirtyFiles: extraInLiveDiff.length > 0,
+    matchesApprovalEvidence: evidencePaths.size > 0 && missingFromLiveDiff.length === 0 && extraInLiveDiff.length === 0,
+  };
+}
+
+function preflightChangedFilePaths(file: ChangedFile): string[] {
+  return [file.path, file.oldPath].filter(isPreflightString).map(normalizePreflightPath).filter(isPreflightString);
+}
+
+function normalizePreflightPath(path: string): string {
+  return path.replace(/\\/g, "/").replace(/^\.\/+/, "").replace(/\/+/g, "/").trim();
+}
+
+function disallowedPreflightFiles(paths: string[]): string[] {
+  return paths
+    .map(normalizePreflightPath)
+    .filter((path) => {
+      const lower = path.toLowerCase();
+      return (
+        lower === ".env" ||
+        lower.startsWith(".env.") ||
+        lower.includes("/.env") ||
+        lower.startsWith(".data/") ||
+        lower.includes("/.data/") ||
+        lower.endsWith(".sqlite") ||
+        lower.endsWith(".sqlite3") ||
+        lower.includes("auth-token") ||
+        lower.includes("auth_tokens") ||
+        lower.includes("node_modules/") ||
+        lower.includes(".desktop-package/")
+      );
+    });
+}
+
+function isSafePreflightBranchName(branch: string): boolean {
+  if (branch.length < 3 || branch.length > 180) return false;
+  if (branch.startsWith("-") || branch.startsWith("/") || branch.endsWith("/") || branch.includes("..")) return false;
+  if (branch.includes("@{") || branch.includes("\\") || /\s/.test(branch)) return false;
+  return /^[A-Za-z0-9._/-]+$/.test(branch);
+}
+
+function githubPreflightWriteMode(
+  enabled: boolean,
+  policy: IntegrationWritePolicy,
+  allowPrCreate: boolean,
+): GitHubPrPreflightResult["writeMode"]["githubMode"] {
+  if (!enabled) return "unavailable";
+  if (policy.readOnly) return "read_only";
+  if (!policy.enabled) return "disabled";
+  if (!allowPrCreate || !policy.allowedKinds.includes("github_pr_create")) return "blocked";
+  return policy.requireConfirmation ? "manual_enabled" : "enabled";
+}
+
+async function preflightGit(
+  cwd: string,
+  args: string[],
+): Promise<{ ok: boolean; stdout: string; stderr: string; error: string | null }> {
+  try {
+    const { stdout, stderr } = await execFileAsync("git", args, {
+      cwd,
+      timeout: preflightGitTimeoutMs,
+      maxBuffer: 1_000_000,
+    });
+    return { ok: true, stdout: String(stdout), stderr: String(stderr), error: null };
+  } catch (error) {
+    const failure = error as { stdout?: string | Buffer; stderr?: string | Buffer; message?: string };
+    return {
+      ok: false,
+      stdout: String(failure.stdout ?? ""),
+      stderr: String(failure.stderr ?? ""),
+      error: String(failure.stderr || failure.message || "git command failed").trim(),
+    };
+  }
+}
+
+async function preflightGitValue(cwd: string, args: string[]): Promise<string | null> {
+  const result = await preflightGit(cwd, args);
+  if (!result.ok) return null;
+  const value = result.stdout.trim();
+  return value.length > 0 ? value : null;
+}
+
+function redactPreflightRemoteUrl(url: string | null): string | null {
+  if (!url) return null;
+  return url.replace(/(https?:\/\/)([^/@\s]+)@/i, "$1");
+}
+
+function preflightRemoteUrlMatchesRepository(remoteUrl: string, owner: string, repo: string): boolean {
+  const normalized = remoteUrl.trim().replace(/\\/g, "/").replace(/\.git$/i, "").toLowerCase();
+  const slug = `${owner}/${repo}`.toLowerCase();
+  return (
+    normalized.endsWith(slug) ||
+    normalized.includes(`github.com/${slug}`) ||
+    normalized.includes(`github.com:${slug}`) ||
+    normalized.includes(`/${slug}`)
+  );
+}
+
+function isPreflightString(value: string | null): value is string {
+  return typeof value === "string" && value.trim().length > 0;
+}
+
 function githubPrExecutionResponse(input: {
   status: GitHubPrExecutionResponse["status"];
   request: GitHubPrExecutionRequest;
@@ -3811,6 +4203,7 @@ function githubPrExecutionResponse(input: {
   blockingReasons: string[];
   errorSummary: string | null;
   executionRecord: LocalWriteExecutionRecord | null;
+  preflight?: GitHubPrPreflightResult | null;
 }): GitHubPrExecutionResponse {
   const execution = input.executionRecord;
   return GitHubPrExecutionResponseSchema.parse({
@@ -3830,6 +4223,7 @@ function githubPrExecutionResponse(input: {
     idempotency: input.idempotency,
     approvalRecord: execution?.approvalRecord ?? null,
     executionRecord: execution,
+    preflight: input.preflight ?? null,
     createdAt: execution?.startedAt ?? null,
     completedAt: execution?.completedAt ?? null,
   });
