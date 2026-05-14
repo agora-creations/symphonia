@@ -1,4 +1,5 @@
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
@@ -230,6 +231,182 @@ describe("daemon API", () => {
     expect(issues[0]?.identifier).toBe("ENG-101");
     expect(authorization).toBe("Bearer lin_connected_secret");
     expect(JSON.stringify(issues)).not.toContain("lin_connected_secret");
+  });
+
+  it("reports write policies disabled by default", async () => {
+    const status = await requestJson<{ writes: { github: { enabled: boolean; readOnly: boolean }; linear: { enabled: boolean; readOnly: boolean } } }>(
+      "GET",
+      "/writes/status",
+    );
+
+    expect(status.writes.github).toMatchObject({ enabled: false, readOnly: true });
+    expect(status.writes.linear).toMatchObject({ enabled: false, readOnly: true });
+  });
+
+  it("previews and creates a GitHub draft PR only with explicit confirmation", async () => {
+    process.env.GITHUB_TOKEN = "ghu_write_secret";
+    const created = createDaemonServer(new EventStore(join(directory, "github-writes.sqlite")), {
+      workflowPath,
+      cwd: directory,
+      githubFetch: fakeGitHubWriteFetch(),
+      linearFetch: fakeLinearFetch({ state: "Todo" }),
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeWorkflow({
+      codexCommand: fakeCodexCommand("success"),
+      githubEnabled: true,
+      githubReadOnly: false,
+      githubWriteEnabled: true,
+      githubAllowCreatePr: true,
+    });
+    prepareGitWorkspace(join(directory, "workspaces", "ENG-101"));
+    await daemon.refreshIssueCache();
+
+    const run = await daemon.startRun("linear-issue-101", "codex");
+    await waitForTerminal(run.id, "succeeded");
+    const workspacePath = daemon.requireRun(run.id).workspacePath;
+    expect(workspacePath).toBeTruthy();
+    await requestJson("POST", `/runs/${run.id}/review-artifacts/refresh`);
+
+    const previewed = await requestJson<{ preview: { id: string; blockers: string[]; confirmationPhrase: string; githubPr: { title: string } | null } }>(
+      "POST",
+      `/runs/${run.id}/github/pr/preview`,
+      {},
+    );
+    expect(previewed.preview.blockers).toEqual([]);
+    expect(previewed.preview.confirmationPhrase).toBe("CREATE GITHUB PR");
+    expect(previewed.preview.githubPr?.title).toContain("ENG-101");
+    expect(JSON.stringify(previewed)).not.toContain("ghu_write_secret");
+
+    const startedBeforeInvalid = getEvents(run.id).filter((event) => event.type === "integration.write.started").length;
+    const rejected = await requestRaw("POST", `/runs/${run.id}/github/pr/create`, {
+      previewId: previewed.preview.id,
+      confirmation: "wrong",
+      dryRun: false,
+      idempotencyKey: "github-pr-test",
+    });
+    expect(rejected.statusCode).toBe(400);
+    expect(getEvents(run.id).filter((event) => event.type === "integration.write.started")).toHaveLength(startedBeforeInvalid);
+
+    const createdPr = await requestJson<{ result: { status: string; externalUrl: string | null; githubPr: { number: number } | null } }>(
+      "POST",
+      `/runs/${run.id}/github/pr/create`,
+      {
+        previewId: previewed.preview.id,
+        confirmation: "CREATE GITHUB PR",
+        dryRun: false,
+        idempotencyKey: "github-pr-test",
+      },
+    );
+    expect(createdPr.result).toMatchObject({ status: "succeeded", externalUrl: "https://github.com/agora-creations/symphonia/pull/42" });
+    expect(createdPr.result.githubPr?.number).toBe(42);
+
+    const startedAfterCreate = getEvents(run.id).filter((event) => event.type === "integration.write.started").length;
+    const replay = await requestJson<{ result: { status: string; externalId: string | null } }>("POST", `/runs/${run.id}/github/pr/create`, {
+      previewId: previewed.preview.id,
+      confirmation: "CREATE GITHUB PR",
+      dryRun: false,
+      idempotencyKey: "github-pr-test",
+    });
+    expect(replay.result).toMatchObject({ status: "succeeded", externalId: "42" });
+    expect(getEvents(run.id).filter((event) => event.type === "integration.write.started")).toHaveLength(startedAfterCreate);
+
+    const history = await requestJson<{ writeActions: Array<{ status: string }> }>("GET", `/runs/${run.id}/write-actions`);
+    expect(history.writeActions.map((action) => action.status)).toEqual(expect.arrayContaining(["pending_confirmation", "succeeded"]));
+    expect(getEvents(run.id).map((event) => event.type)).toEqual(expect.arrayContaining(["integration.write.succeeded", "github.pr.created"]));
+    expect(JSON.stringify({ createdPr, history, events: getEvents(run.id) })).not.toContain("ghu_write_secret");
+  });
+
+  it("previews and posts Linear comments only with explicit confirmation", async () => {
+    process.env.LINEAR_API_KEY = "lin_write_secret";
+    const created = createDaemonServer(new EventStore(join(directory, "linear-writes.sqlite")), {
+      workflowPath,
+      cwd: directory,
+      linearFetch: fakeLinearFetch({ state: "Todo" }),
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeLinearWorkflow({
+      codexCommand: fakeCodexCommand("success"),
+      linearReadOnly: false,
+      linearWriteEnabled: true,
+      linearAllowComments: true,
+    });
+    await daemon.refreshIssueCache();
+
+    const run = await daemon.startRun("linear-issue-101", "codex");
+    await waitForTerminal(run.id, "succeeded");
+
+    const previewed = await requestJson<{ preview: { id: string; blockers: string[]; confirmationPhrase: string; bodyPreview: string } }>(
+      "POST",
+      `/runs/${run.id}/linear/comment/preview`,
+      {},
+    );
+    expect(previewed.preview.blockers).toEqual([]);
+    expect(previewed.preview.confirmationPhrase).toBe("POST LINEAR COMMENT");
+    expect(previewed.preview.bodyPreview).toContain(`symphonia-run-id: ${run.id}`);
+    expect(JSON.stringify(previewed)).not.toContain("lin_write_secret");
+
+    const startedBeforeInvalid = getEvents(run.id).filter((event) => event.type === "integration.write.started").length;
+    const rejected = await requestRaw("POST", `/runs/${run.id}/linear/comment/create`, {
+      previewId: previewed.preview.id,
+      confirmation: "wrong",
+      dryRun: false,
+      idempotencyKey: "linear-comment-test",
+    });
+    expect(rejected.statusCode).toBe(400);
+    expect(getEvents(run.id).filter((event) => event.type === "integration.write.started")).toHaveLength(startedBeforeInvalid);
+
+    const posted = await requestJson<{ result: { status: string; externalId: string | null; linearComment: { id: string } | null } }>(
+      "POST",
+      `/runs/${run.id}/linear/comment/create`,
+      {
+        previewId: previewed.preview.id,
+        confirmation: "POST LINEAR COMMENT",
+        dryRun: false,
+        idempotencyKey: "linear-comment-test",
+      },
+    );
+    expect(posted.result).toMatchObject({ status: "succeeded", externalId: "comment-1" });
+    expect(posted.result.linearComment?.id).toBe("comment-1");
+
+    const startedAfterPost = getEvents(run.id).filter((event) => event.type === "integration.write.started").length;
+    const replay = await requestJson<{ result: { status: string; externalId: string | null } }>("POST", `/runs/${run.id}/linear/comment/create`, {
+      previewId: previewed.preview.id,
+      confirmation: "POST LINEAR COMMENT",
+      dryRun: false,
+      idempotencyKey: "linear-comment-test",
+    });
+    expect(replay.result).toMatchObject({ status: "succeeded", externalId: "comment-1" });
+    expect(getEvents(run.id).filter((event) => event.type === "integration.write.started")).toHaveLength(startedAfterPost);
+
+    const secondPreview = await requestJson<{ preview: { id: string } }>("POST", `/runs/${run.id}/linear/comment/preview`, {});
+    const reusedKey = await requestRaw("POST", `/runs/${run.id}/linear/comment/create`, {
+      previewId: secondPreview.preview.id,
+      confirmation: "POST LINEAR COMMENT",
+      dryRun: false,
+      idempotencyKey: "linear-comment-test",
+    });
+    expect(reusedKey.statusCode).toBe(409);
+    expect(reusedKey.body).toContain("already used for a different write action");
+
+    const dryRunPreview = await requestJson<{ preview: { id: string } }>("POST", `/runs/${run.id}/linear/comment/preview`, {});
+    const failedBeforeDryRun = getEvents(run.id).filter((event) => event.type === "integration.write.failed").length;
+    const cancelled = await requestJson<{ result: { status: string } }>("POST", `/runs/${run.id}/linear/comment/create`, {
+      previewId: dryRunPreview.preview.id,
+      confirmation: "POST LINEAR COMMENT",
+      dryRun: true,
+      idempotencyKey: "linear-dry-run-test",
+    });
+    expect(cancelled.result.status).toBe("cancelled");
+    expect(getEvents(run.id).map((event) => event.type)).toContain("integration.write.cancelled");
+    expect(getEvents(run.id).filter((event) => event.type === "integration.write.failed")).toHaveLength(failedBeforeDryRun);
+
+    const history = await requestJson<{ writeActions: Array<{ status: string }> }>("GET", `/runs/${run.id}/write-actions`);
+    expect(history.writeActions.map((action) => action.status)).toEqual(expect.arrayContaining(["pending_confirmation", "succeeded", "cancelled"]));
+    expect(getEvents(run.id).map((event) => event.type)).toEqual(expect.arrayContaining(["integration.write.succeeded", "linear.comment.created"]));
+    expect(JSON.stringify({ posted, history, events: getEvents(run.id) })).not.toContain("lin_write_secret");
   });
 
   it("serves harness scan, preview, dry-run apply, confirmed apply, and stale preview errors", async () => {
@@ -705,7 +882,7 @@ async function requestJson<T>(method: "GET" | "POST", path: string, payload?: un
   const response = await requestRaw(method, path, payload);
 
   expect(response.statusCode).toBeGreaterThanOrEqual(200);
-  expect(response.statusCode).toBeLessThan(300);
+  expect(response.statusCode, response.body).toBeLessThan(300);
   return JSON.parse(response.body) as T;
 }
 
@@ -756,6 +933,10 @@ function writeWorkflow(
     provider?: "codex" | "claude" | "cursor";
     githubToken?: string;
     githubEnabled?: boolean;
+    githubReadOnly?: boolean;
+    githubWriteEnabled?: boolean;
+    githubAllowCreatePr?: boolean;
+    githubAllowPush?: boolean;
     cleanupEnabled?: boolean;
     cleanupDryRun?: boolean;
     cleanupAfterMs?: number;
@@ -798,11 +979,21 @@ ${options.githubToken ? `  token: ${JSON.stringify(options.githubToken)}\n` : ""
   repo: "symphonia"
   default_base_branch: "main"
   remote_name: "origin"
-  read_only: true
+  read_only: ${options.githubReadOnly === false ? "false" : "true"}
   page_size: 5
   max_pages: 2
   write:
-    enabled: false
+    enabled: ${options.githubWriteEnabled ? "true" : "false"}
+    require_confirmation: true
+    allow_push: ${options.githubAllowPush ? "true" : "false"}
+    allow_create_pr: ${options.githubAllowCreatePr ? "true" : "false"}
+    allow_comment: false
+    allow_request_reviewers: false
+    draft_pr_by_default: true
+    protected_branches:
+      - "main"
+      - "master"
+      - "production"
 ` : ""}codex:
   command: ${JSON.stringify(options.codexCommand ?? fakeCodexCommand("success"))}
   model: "fake-model"
@@ -851,7 +1042,16 @@ Title:
   );
 }
 
-function writeLinearWorkflow(options: { codexCommand?: string; apiKey?: string | null; teamKey?: string } = {}): void {
+function writeLinearWorkflow(
+  options: {
+    codexCommand?: string;
+    apiKey?: string | null;
+    teamKey?: string;
+    linearReadOnly?: boolean;
+    linearWriteEnabled?: boolean;
+    linearAllowComments?: boolean;
+  } = {},
+): void {
   writeFileSync(
     workflowPath,
     `---
@@ -868,7 +1068,12 @@ ${options.apiKey === null ? "" : `  api_key: ${JSON.stringify(options.apiKey ?? 
     - "Canceled"
   page_size: 5
   max_pages: 2
-  read_only: true
+  read_only: ${options.linearReadOnly === false ? "false" : "true"}
+  write:
+    enabled: ${options.linearWriteEnabled ? "true" : "false"}
+    require_confirmation: true
+    allow_comments: ${options.linearAllowComments ? "true" : "false"}
+    allow_state_transitions: false
 workspace:
   root: "./workspaces"
 codex:
@@ -929,6 +1134,21 @@ function fakeLinearFetch(options: { state?: string; getState?: () => string }): 
       return jsonResponse({ data: { issue: node } });
     }
 
+    if (body.query.includes("SymphoniaLinearCommentCreate") || body.query.includes("commentCreate")) {
+      return jsonResponse({
+        data: {
+          commentCreate: {
+            success: true,
+            comment: {
+              id: "comment-1",
+              url: "https://linear.app/acme/issue/ENG-101#comment-1",
+              createdAt: "2026-05-13T08:11:00.000Z",
+            },
+          },
+        },
+      });
+    }
+
     return jsonResponse({
       data: {
         issues: {
@@ -977,6 +1197,72 @@ function fakeGitHubFetch(): GitHubFetch {
     }
     return jsonResponse({ message: `Unexpected GitHub URL: ${input}` }, 404);
   };
+}
+
+function fakeGitHubWriteFetch(): GitHubFetch {
+  let created = false;
+  return async (input, init) => {
+    const url = new URL(input);
+    const method = init?.method ?? "GET";
+    if (url.pathname === "/repos/agora-creations/symphonia/pulls" && method === "POST") {
+      created = true;
+      return jsonResponse(fakePullRequest(), 201);
+    }
+    if (url.pathname === "/repos/agora-creations/symphonia/pulls") {
+      return jsonResponse(created ? [fakePullRequest()] : []);
+    }
+    if (url.pathname.includes("/files")) {
+      return jsonResponse([]);
+    }
+    if (url.pathname.includes("/status")) {
+      return jsonResponse({ state: "success", total_count: 0, sha: "abc123", statuses: [] });
+    }
+    if (url.pathname.includes("/check-runs")) {
+      return jsonResponse({ total_count: 0, check_runs: [] });
+    }
+    if (url.pathname.includes("/actions/runs")) {
+      return jsonResponse({ total_count: 0, workflow_runs: [] });
+    }
+    if (url.pathname === "/repos/agora-creations/symphonia") {
+      return jsonResponse({
+        id: 1,
+        name: "symphonia",
+        full_name: "agora-creations/symphonia",
+        default_branch: "main",
+      });
+    }
+    return jsonResponse({ message: `Unexpected GitHub URL: ${input}` }, 404);
+  };
+}
+
+function fakePullRequest() {
+  return {
+    id: 42,
+    number: 42,
+    title: "ENG-101: Linear-backed daemon test",
+    html_url: "https://github.com/agora-creations/symphonia/pull/42",
+    state: "open",
+    draft: true,
+    merged: false,
+    mergeable: null,
+    head: { ref: "feature/eng-101-write-test", sha: "abc123" },
+    base: { ref: "main", sha: "base123" },
+    user: { login: "octocat" },
+    created_at: "2026-05-13T08:12:00.000Z",
+    updated_at: "2026-05-13T08:12:00.000Z",
+  };
+}
+
+function prepareGitWorkspace(workspacePath: string): void {
+  mkdirSync(workspacePath, { recursive: true });
+  writeFileSync(join(workspacePath, "README.md"), "# Workspace\n");
+  execFileSync("git", ["init"], { cwd: workspacePath, stdio: "ignore" });
+  execFileSync("git", ["config", "user.email", "symphonia@example.com"], { cwd: workspacePath, stdio: "ignore" });
+  execFileSync("git", ["config", "user.name", "Symphonia Test"], { cwd: workspacePath, stdio: "ignore" });
+  execFileSync("git", ["checkout", "-b", "feature/eng-101-write-test"], { cwd: workspacePath, stdio: "ignore" });
+  execFileSync("git", ["add", "README.md"], { cwd: workspacePath, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", "Initial workspace commit"], { cwd: workspacePath, stdio: "ignore" });
+  writeFileSync(join(workspacePath, "change.txt"), "write-action validation\n");
 }
 
 function authorizationHeader(init?: RequestInit): string {

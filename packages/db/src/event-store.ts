@@ -8,6 +8,10 @@ import {
   HarnessApplyResultSchema,
   HarnessScanResult,
   HarnessScanResultSchema,
+  IntegrationWritePreview,
+  IntegrationWritePreviewSchema,
+  IntegrationWriteResult,
+  IntegrationWriteResultSchema,
   Issue,
   IssueSchema,
   ReviewArtifactSnapshot,
@@ -44,7 +48,12 @@ type HarnessApplyRow = {
   payload_json: string;
 };
 
+type WriteActionRow = {
+  payload_json: string;
+};
+
 const maxHarnessPayloadBytes = 2_000_000;
+const maxWriteActionPayloadBytes = 500_000;
 
 function parseRunPayload(payloadJson: string): Run | null {
   try {
@@ -585,6 +594,176 @@ export class EventStore {
     return rows.map((row) => JSON.parse(row.payload_json) as unknown);
   }
 
+  saveIntegrationWritePreview(preview: IntegrationWritePreview): void {
+    const parsed = IntegrationWritePreviewSchema.parse(preview);
+    const payloadJson = boundedWriteActionPayload(parsed);
+    this.db
+      .prepare(
+        `
+          insert into integration_write_actions (
+            action_id,
+            preview_id,
+            provider,
+            kind,
+            run_id,
+            issue_id,
+            status,
+            external_id,
+            external_url,
+            idempotency_key,
+            created_at,
+            executed_at,
+            payload_json
+          )
+          values (
+            @actionId,
+            @previewId,
+            @provider,
+            @kind,
+            @runId,
+            @issueId,
+            @status,
+            null,
+            null,
+            null,
+            @createdAt,
+            null,
+            @payloadJson
+          )
+          on conflict(action_id) do update set
+            provider = excluded.provider,
+            kind = excluded.kind,
+            run_id = excluded.run_id,
+            issue_id = excluded.issue_id,
+            status = excluded.status,
+            created_at = excluded.created_at,
+            payload_json = excluded.payload_json
+        `,
+      )
+      .run({
+        actionId: parsed.id,
+        previewId: parsed.id,
+        provider: parsed.provider,
+        kind: parsed.kind,
+        runId: parsed.runId,
+        issueId: parsed.issueId,
+        status: parsed.status,
+        createdAt: parsed.createdAt,
+        payloadJson,
+      });
+  }
+
+  getIntegrationWritePreview(previewId: string): IntegrationWritePreview | null {
+    const row = this.db
+      .prepare(
+        `
+          select payload_json
+          from integration_write_actions
+          where preview_id = ? and action_id = preview_id
+          order by created_at desc
+          limit 1
+        `,
+      )
+      .get(previewId) as WriteActionRow | undefined;
+
+    return row ? IntegrationWritePreviewSchema.parse(JSON.parse(row.payload_json)) : null;
+  }
+
+  saveIntegrationWriteResult(result: IntegrationWriteResult, idempotencyKey: string | null = null): void {
+    const parsed = IntegrationWriteResultSchema.parse(result);
+    const payloadJson = boundedWriteActionPayload(parsed);
+    this.db
+      .prepare(
+        `
+          insert into integration_write_actions (
+            action_id,
+            preview_id,
+            provider,
+            kind,
+            run_id,
+            issue_id,
+            status,
+            external_id,
+            external_url,
+            idempotency_key,
+            created_at,
+            executed_at,
+            payload_json
+          )
+          values (
+            @actionId,
+            @previewId,
+            @provider,
+            @kind,
+            @runId,
+            @issueId,
+            @status,
+            @externalId,
+            @externalUrl,
+            @idempotencyKey,
+            @createdAt,
+            @executedAt,
+            @payloadJson
+          )
+          on conflict(action_id) do update set
+            status = excluded.status,
+            external_id = excluded.external_id,
+            external_url = excluded.external_url,
+            idempotency_key = excluded.idempotency_key,
+            executed_at = excluded.executed_at,
+            payload_json = excluded.payload_json
+        `,
+      )
+      .run({
+        actionId: parsed.id,
+        previewId: parsed.previewId,
+        provider: parsed.provider,
+        kind: parsed.kind,
+        runId: String(parsed.redactedRequestSummary.runId ?? parsed.target.issueIdentifier ?? parsed.previewId),
+        issueId: parsed.target.issueId,
+        status: parsed.status,
+        externalId: parsed.externalId,
+        externalUrl: parsed.externalUrl,
+        idempotencyKey,
+        createdAt: parsed.executedAt,
+        executedAt: parsed.executedAt,
+        payloadJson,
+      });
+  }
+
+  listIntegrationWriteActionsForRun(runId: string): Array<IntegrationWritePreview | IntegrationWriteResult> {
+    const rows = this.db
+      .prepare(
+        `
+          select payload_json
+          from integration_write_actions
+          where run_id = ?
+          order by coalesce(executed_at, created_at) desc, action_id asc
+        `,
+      )
+      .all(runId) as WriteActionRow[];
+
+    return rows.map((row) => parseWriteActionPayload(row.payload_json)).filter(isDefined);
+  }
+
+  findIntegrationWriteResultByIdempotencyKey(idempotencyKey: string): IntegrationWriteResult | null {
+    const row = this.db
+      .prepare(
+        `
+          select payload_json
+          from integration_write_actions
+          where idempotency_key = ? and executed_at is not null
+          order by executed_at desc
+          limit 1
+        `,
+      )
+      .get(idempotencyKey) as WriteActionRow | undefined;
+
+    if (!row) return null;
+    const parsed = parseWriteActionPayload(row.payload_json);
+    return parsed && "previewId" in parsed && "executedAt" in parsed ? IntegrationWriteResultSchema.parse(parsed) : null;
+  }
+
   close(): void {
     this.db.close();
   }
@@ -684,6 +863,32 @@ export class EventStore {
 
       create index if not exists idx_harness_apply_history_repository
       on harness_apply_history (repository_path, applied_at);
+
+      create table if not exists integration_write_actions (
+        action_id text primary key,
+        preview_id text not null,
+        provider text not null,
+        kind text not null,
+        run_id text not null,
+        issue_id text,
+        status text not null,
+        external_id text,
+        external_url text,
+        idempotency_key text,
+        created_at text not null,
+        executed_at text,
+        payload_json text not null
+      );
+
+      create index if not exists idx_integration_write_actions_run
+      on integration_write_actions (run_id, created_at);
+
+      create index if not exists idx_integration_write_actions_preview
+      on integration_write_actions (preview_id);
+
+      create unique index if not exists idx_integration_write_actions_idempotency
+      on integration_write_actions (idempotency_key)
+      where idempotency_key is not null;
     `);
   }
 }
@@ -694,6 +899,29 @@ function boundedHarnessPayload(value: unknown): string {
     throw new Error("Harness payload exceeded SQLite storage limit.");
   }
   return payloadJson;
+}
+
+function boundedWriteActionPayload(value: unknown): string {
+  const payloadJson = JSON.stringify(value);
+  if (Buffer.byteLength(payloadJson, "utf8") > maxWriteActionPayloadBytes) {
+    throw new Error("Integration write action payload exceeded SQLite storage limit.");
+  }
+  if (/Bearer\s+[A-Za-z0-9._-]+/.test(payloadJson) || /gh[pousr]_[A-Za-z0-9_]+/.test(payloadJson)) {
+    throw new Error("Integration write action payload appears to contain a raw token.");
+  }
+  return payloadJson;
+}
+
+function parseWriteActionPayload(payloadJson: string): IntegrationWritePreview | IntegrationWriteResult | null {
+  const value = JSON.parse(payloadJson) as unknown;
+  const result = IntegrationWriteResultSchema.safeParse(value);
+  if (result.success) return result.data;
+  const preview = IntegrationWritePreviewSchema.safeParse(value);
+  return preview.success ? preview.data : null;
+}
+
+function isDefined<T>(value: T | null | undefined): value is T {
+  return value !== null && value !== undefined;
 }
 
 export function getDatabasePathFromEnv(): string {

@@ -2,7 +2,15 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AgentEvent, HarnessScanResult, Issue, ReviewArtifactSnapshot, Run } from "@symphonia/types";
+import {
+  AgentEvent,
+  HarnessScanResult,
+  IntegrationWritePreview,
+  IntegrationWriteResult,
+  Issue,
+  ReviewArtifactSnapshot,
+  Run,
+} from "@symphonia/types";
 import { EventStore } from "../src";
 
 let directory: string;
@@ -157,6 +165,19 @@ describe("EventStore", () => {
     });
 
     expect(store.listHarnessApplyHistory("/tmp/repo")).toHaveLength(1);
+  });
+
+  it("saves and fetches integration write previews, results, and idempotency history", () => {
+    const preview = writePreview("preview-1", "run-1");
+    const result = writeResult("result-1", preview);
+
+    store.saveIntegrationWritePreview(preview);
+    store.saveIntegrationWriteResult(result, "idem-1");
+
+    expect(store.getIntegrationWritePreview("preview-1")?.kind).toBe("github_pr_create");
+    expect(store.listIntegrationWriteActionsForRun("run-1").map((action) => action.id)).toEqual(["result-1", "preview-1"]);
+    expect(store.findIntegrationWriteResultByIdempotencyKey("idem-1")?.externalId).toBe("42");
+    expect(JSON.stringify(store.listIntegrationWriteActionsForRun("run-1"))).not.toContain("ghu_secret");
   });
 });
 
@@ -379,5 +400,85 @@ function harnessScan(id: string, percentage: number, grade: HarnessScanResult["g
       bytesRead: 10,
       truncated: false,
     },
+  };
+}
+
+function writePreview(id: string, runId: string): IntegrationWritePreview {
+  return {
+    id,
+    provider: "github",
+    kind: "github_pr_create",
+    runId,
+    issueId: "issue-ENG-1",
+    issueIdentifier: "ENG-1",
+    status: "pending_confirmation",
+    title: "GitHub draft pull request",
+    summary: "Draft PR for ENG-1",
+    bodyPreview: "PR body\n\n<!-- symphonia-run-id: run-1 -->",
+    target: {
+      provider: "github",
+      owner: "agora-creations",
+      repo: "symphonia",
+      issueId: "issue-ENG-1",
+      issueIdentifier: "ENG-1",
+      branch: "feature/ENG-1",
+      baseBranch: "main",
+      url: null,
+    },
+    credentialSource: "connected",
+    requiredPermissions: ["Pull requests: write"],
+    warnings: [],
+    blockers: [],
+    confirmationRequired: true,
+    confirmationPhrase: "CREATE GITHUB PR",
+    createdAt: "2026-05-13T08:08:00.000Z",
+    expiresAt: "2026-05-13T08:23:00.000Z",
+    githubPr: {
+      runId,
+      owner: "agora-creations",
+      repo: "symphonia",
+      baseBranch: "main",
+      headBranch: "feature/ENG-1",
+      headSha: "0123456789012345678901234567890123456789",
+      title: "ENG-1: Durable run",
+      body: "PR body\n\n<!-- symphonia-run-id: run-1 -->",
+      draft: true,
+      existingPr: null,
+      changedFilesSummary: { filesChanged: 0, additions: 0, deletions: 0, files: [] },
+      blockers: [],
+      warnings: [],
+    },
+    githubBranchPush: null,
+    linearComment: null,
+  };
+}
+
+function writeResult(id: string, preview: IntegrationWritePreview): IntegrationWriteResult {
+  return {
+    id,
+    previewId: preview.id,
+    provider: "github",
+    kind: "github_pr_create",
+    status: "succeeded",
+    target: { ...preview.target, url: "https://github.com/agora-creations/symphonia/pull/42" },
+    externalUrl: "https://github.com/agora-creations/symphonia/pull/42",
+    externalId: "42",
+    warnings: [],
+    errors: [],
+    executedAt: "2026-05-13T08:09:00.000Z",
+    redactedRequestSummary: { runId: preview.runId, credentialSource: "connected" },
+    redactedResponseSummary: { number: 42 },
+    githubPr: {
+      number: 42,
+      id: 1042,
+      url: "https://github.com/agora-creations/symphonia/pull/42",
+      state: "open",
+      draft: true,
+      title: "ENG-1: Durable run",
+      baseBranch: "main",
+      headBranch: "feature/ENG-1",
+      createdAt: "2026-05-13T08:09:00.000Z",
+    },
+    linearComment: null,
   };
 }

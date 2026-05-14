@@ -32,6 +32,12 @@ import {
   HarnessStatus,
   HarnessStatusResponseSchema,
   HealthResponseSchema,
+  IntegrationWriteActionsResponseSchema,
+  IntegrationWriteExecutionRequest,
+  IntegrationWritePreview,
+  IntegrationWritePreviewResponseSchema,
+  IntegrationWriteResult,
+  IntegrationWriteResultResponseSchema,
   IssuesResponseSchema,
   ProviderHealth,
   ProviderHealthResponseSchema,
@@ -61,6 +67,8 @@ import {
   WorkspaceInventoryResponseSchema,
   WorkspaceResponseSchema,
   WorkspacesResponseSchema,
+  WritesStatus,
+  WritesStatusResponseSchema,
 } from "@symphonia/types";
 import { getDesktopDaemonUrl } from "@/lib/desktop";
 
@@ -245,6 +253,55 @@ export async function getReviewArtifacts(runId: string): Promise<ReviewArtifactS
 export async function refreshReviewArtifacts(runId: string): Promise<ReviewArtifactSnapshot | null> {
   const response = await request(`/runs/${runId}/review-artifacts/refresh`, { method: "POST" });
   return ReviewArtifactResponseSchema.parse(response).reviewArtifacts;
+}
+
+export async function getWritesStatus(): Promise<WritesStatus> {
+  const response = await request("/writes/status");
+  return WritesStatusResponseSchema.parse(response).writes;
+}
+
+export async function getRunWriteActions(runId: string): Promise<Array<IntegrationWritePreview | IntegrationWriteResult>> {
+  const response = await request(`/runs/${runId}/write-actions`);
+  return IntegrationWriteActionsResponseSchema.parse(response).writeActions;
+}
+
+export async function previewGithubPr(
+  runId: string,
+  input: { title?: string; body?: string; draft?: boolean; baseBranch?: string } = {},
+): Promise<IntegrationWritePreview> {
+  const response = await request(`/runs/${runId}/github/pr/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return IntegrationWritePreviewResponseSchema.parse(response).preview;
+}
+
+export async function createGithubPr(runId: string, input: IntegrationWriteExecutionRequest): Promise<IntegrationWriteResult> {
+  const response = await request(`/runs/${runId}/github/pr/create`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return IntegrationWriteResultResponseSchema.parse(response).result;
+}
+
+export async function previewLinearComment(runId: string, input: { body?: string } = {}): Promise<IntegrationWritePreview> {
+  const response = await request(`/runs/${runId}/linear/comment/preview`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return IntegrationWritePreviewResponseSchema.parse(response).preview;
+}
+
+export async function createLinearComment(runId: string, input: IntegrationWriteExecutionRequest): Promise<IntegrationWriteResult> {
+  const response = await request(`/runs/${runId}/linear/comment/create`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return IntegrationWriteResultResponseSchema.parse(response).result;
 }
 
 export async function getWorkflowStatus(): Promise<WorkflowStatus> {

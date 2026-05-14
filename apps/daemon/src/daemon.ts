@@ -10,15 +10,21 @@ import {
   AuthManager,
   buildWorkspaceInventory,
   canStartRunForIssue,
+  buildGitHubPrPreview,
+  buildLinearCommentPreview,
   claudeProvider,
   codexProvider,
   createDefaultAuthManager,
   createQueuedRun,
   createGitHubClient,
+  createLinearClient,
   createRetryRun,
   cursorProvider,
+  executeGitHubPrCreate,
+  executeLinearCommentCreate,
   getWorkflowStatus,
   createLinearTrackerAdapter,
+  githubWritePolicy,
   GitHubFetch,
   HarnessApplyError,
   HarnessScannerError,
@@ -26,6 +32,7 @@ import {
   isIssueTerminal,
   LinearFetch,
   linearTrackerAdapter,
+  linearWritePolicy,
   loadWorkflowRuntime,
   nowIso,
   planWorkspaceCleanup,
@@ -38,6 +45,7 @@ import {
   runCursorAgentProvider,
   runHook,
   scanHarnessRepository,
+  validateIntegrationWriteExecution,
   WorkflowError,
   WorkflowRuntime,
   WorkspaceError,
@@ -72,6 +80,9 @@ import {
   HarnessScanRequestSchema,
   HarnessScanResult,
   HarnessStatus,
+  IntegrationWriteExecutionRequestSchema,
+  IntegrationWritePreview,
+  IntegrationWriteResult,
   ReviewArtifactSnapshot,
   Run,
   RunSchema,
@@ -381,6 +392,10 @@ export class SymphoniaDaemon {
         return sendJson(response, 200, { github: await this.getGithubHealth() });
       }
 
+      if (request.method === "GET" && path === "/writes/status") {
+        return sendJson(response, 200, { writes: this.getWritesStatus() });
+      }
+
       if (request.method === "GET" && path === "/auth/status") {
         return sendJson(response, 200, { auth: this.authManager.getStatus() });
       }
@@ -629,6 +644,37 @@ export class SymphoniaDaemon {
         const runId = runReviewArtifactsMatch[1]!;
         this.requireRun(runId);
         return sendJson(response, 200, { reviewArtifacts: this.getReviewArtifacts(runId) });
+      }
+
+      const runWriteActionsMatch = path.match(/^\/runs\/([^/]+)\/write-actions$/);
+      if (request.method === "GET" && runWriteActionsMatch) {
+        const runId = runWriteActionsMatch[1]!;
+        this.requireRun(runId);
+        return sendJson(response, 200, { writeActions: this.eventStore.listIntegrationWriteActionsForRun(runId) });
+      }
+
+      const githubPrPreviewMatch = path.match(/^\/runs\/([^/]+)\/github\/pr\/preview$/);
+      if (request.method === "POST" && githubPrPreviewMatch) {
+        const preview = await this.previewGithubPr(githubPrPreviewMatch[1]!, await readJsonBody(request));
+        return sendJson(response, 200, { preview });
+      }
+
+      const githubPrCreateMatch = path.match(/^\/runs\/([^/]+)\/github\/pr\/create$/);
+      if (request.method === "POST" && githubPrCreateMatch) {
+        const result = await this.createGithubPr(githubPrCreateMatch[1]!, await readJsonBody(request));
+        return sendJson(response, result.status === "succeeded" || result.status === "cancelled" ? 200 : 400, { result });
+      }
+
+      const linearCommentPreviewMatch = path.match(/^\/runs\/([^/]+)\/linear\/comment\/preview$/);
+      if (request.method === "POST" && linearCommentPreviewMatch) {
+        const preview = await this.previewLinearComment(linearCommentPreviewMatch[1]!, await readJsonBody(request));
+        return sendJson(response, 200, { preview });
+      }
+
+      const linearCommentCreateMatch = path.match(/^\/runs\/([^/]+)\/linear\/comment\/create$/);
+      if (request.method === "POST" && linearCommentCreateMatch) {
+        const result = await this.createLinearComment(linearCommentCreateMatch[1]!, await readJsonBody(request));
+        return sendJson(response, result.status === "succeeded" || result.status === "cancelled" ? 200 : 400, { result });
       }
 
       const runPromptMatch = path.match(/^\/runs\/([^/]+)\/prompt$/);
@@ -1424,6 +1470,111 @@ export class SymphoniaDaemon {
     return this.refreshReviewArtifactsForRecord(record, runtime);
   }
 
+  getWritesStatus() {
+    const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+    return {
+      github: githubWritePolicy(runtime.config.github),
+      linear: linearWritePolicy(runtime.config.tracker),
+    };
+  }
+
+  async previewGithubPr(runId: string, input: unknown): Promise<IntegrationWritePreview> {
+    const record = this.requireRecord(runId);
+    const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+    const body = objectBody(input);
+    const credential = await this.resolveGithubCredential();
+    const githubClient = this.githubClientForRuntime(runtime, credential?.token ?? null);
+    const reviewArtifacts =
+      this.eventStore.getReviewArtifactSnapshot(runId) ?? (await this.refreshReviewArtifactsForRecord(record, runtime));
+    const preview = await buildGitHubPrPreview({
+      run: record.run,
+      issue: record.issue,
+      workflowConfig: runtime.config,
+      reviewArtifacts,
+      credential,
+      githubClient,
+      titleOverride: stringBody(body, "title"),
+      bodyOverride: stringBody(body, "body"),
+      draftOverride: booleanBody(body, "draft"),
+      baseBranchOverride: stringBody(body, "baseBranch"),
+    });
+    this.eventStore.saveIntegrationWritePreview(preview);
+    this.appendWritePreviewEvents(preview);
+    return preview;
+  }
+
+  async createGithubPr(runId: string, input: unknown) {
+    this.requireRun(runId);
+    const request = IntegrationWriteExecutionRequestSchema.parse(input);
+    const preview = this.eventStore.getIntegrationWritePreview(request.previewId);
+    if (!preview || preview.runId !== runId) throw new ApiError(404, "GitHub PR preview not found for this run.");
+    validateIntegrationWriteExecution(preview, request, "github_pr_create", "github");
+    const existing = this.getMatchingIdempotencyResult(preview, request);
+    if (existing) return existing;
+    const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+    const credential = await this.resolveGithubCredential();
+    this.appendWriteStartedEvent(preview);
+    const result = await executeGitHubPrCreate({
+      preview,
+      request,
+      workflowConfig: runtime.config,
+      credential,
+      githubClient: this.githubClientForRuntime(runtime, credential?.token ?? null),
+      existingResult: null,
+    });
+    this.eventStore.saveIntegrationWriteResult(result, request.idempotencyKey ?? null);
+    this.appendWriteResultEvents(preview, result);
+    if (result.status === "succeeded") {
+      await this.refreshReviewArtifactsForRun(runId).catch(() => null);
+    }
+    return result;
+  }
+
+  async previewLinearComment(runId: string, input: unknown): Promise<IntegrationWritePreview> {
+    const record = this.requireRecord(runId);
+    const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+    const body = objectBody(input);
+    const credential = this.authManager.resolveCredential("linear");
+    const preview = buildLinearCommentPreview({
+      run: record.run,
+      issue: record.issue,
+      workflowConfig: runtime.config,
+      credential,
+      bodyOverride: stringBody(body, "body"),
+    });
+    this.eventStore.saveIntegrationWritePreview(preview);
+    this.appendWritePreviewEvents(preview);
+    return preview;
+  }
+
+  async createLinearComment(runId: string, input: unknown) {
+    this.requireRun(runId);
+    const request = IntegrationWriteExecutionRequestSchema.parse(input);
+    const preview = this.eventStore.getIntegrationWritePreview(request.previewId);
+    if (!preview || preview.runId !== runId) throw new ApiError(404, "Linear comment preview not found for this run.");
+    validateIntegrationWriteExecution(preview, request, "linear_comment_create", "linear");
+    const existing = this.getMatchingIdempotencyResult(preview, request);
+    if (existing) return existing;
+    const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+    let credential = this.authManager.resolveCredential("linear");
+    if (credential?.connection.status === "expired") {
+      await this.authManager.refreshConnection("linear");
+      credential = this.authManager.resolveCredential("linear");
+    }
+    this.appendWriteStartedEvent(preview);
+    const result = await executeLinearCommentCreate({
+      preview,
+      request,
+      workflowConfig: runtime.config,
+      credential,
+      linearClient: this.linearClientForRuntime(runtime, credential?.authorizationHeader ?? null),
+      existingResult: null,
+    });
+    this.eventStore.saveIntegrationWriteResult(result, request.idempotencyKey ?? null);
+    this.appendWriteResultEvents(preview, result);
+    return result;
+  }
+
   listWorkspaces(): WorkspaceInfo[] {
     const known = [...this.workspaces.values()];
     try {
@@ -1920,7 +2071,9 @@ export class SymphoniaDaemon {
 
   private appendDaemonEvent(event: AgentEvent): void {
     if (this.closed) return;
-    this.eventStore.append(AgentEventSchema.parse(event));
+    const parsed = AgentEventSchema.parse(event);
+    this.eventStore.append(parsed);
+    this.broadcast(parsed);
   }
 
   private appendAuthStartEvents(
@@ -2035,6 +2188,178 @@ export class SymphoniaDaemon {
     });
   }
 
+  private appendWritePreviewEvents(preview: IntegrationWritePreview): void {
+    this.appendDaemonEvent({
+      id: randomUUID(),
+      runId: preview.runId,
+      type: "integration.write.previewed",
+      timestamp: nowIso(),
+      preview,
+    });
+    if (preview.blockers.length > 0) {
+      this.appendDaemonEvent({
+        id: randomUUID(),
+        runId: preview.runId,
+        type: "integration.write.blocked",
+        timestamp: nowIso(),
+        preview,
+      });
+      return;
+    }
+    this.appendDaemonEvent({
+      id: randomUUID(),
+      runId: preview.runId,
+      type: "integration.write.confirmation_required",
+      timestamp: nowIso(),
+      previewId: preview.id,
+      provider: preview.provider,
+      kind: preview.kind,
+    });
+    if (preview.githubPr) {
+      this.appendDaemonEvent({
+        id: randomUUID(),
+        runId: preview.runId,
+        type: "github.pr.previewed",
+        timestamp: nowIso(),
+        preview: preview.githubPr,
+      });
+    }
+    if (preview.linearComment) {
+      this.appendDaemonEvent({
+        id: randomUUID(),
+        runId: preview.runId,
+        type: "linear.comment.previewed",
+        timestamp: nowIso(),
+        preview: preview.linearComment,
+      });
+    }
+  }
+
+  private appendWriteStartedEvent(preview: IntegrationWritePreview): void {
+    this.appendDaemonEvent({
+      id: randomUUID(),
+      runId: preview.runId,
+      type: "integration.write.started",
+      timestamp: nowIso(),
+      previewId: preview.id,
+      provider: preview.provider,
+      kind: preview.kind,
+      target: preview.target,
+    });
+  }
+
+  private getMatchingIdempotencyResult(
+    preview: IntegrationWritePreview,
+    request: { idempotencyKey: string | null },
+  ): IntegrationWriteResult | null {
+    if (!request.idempotencyKey) return null;
+    const existing = this.eventStore.findIntegrationWriteResultByIdempotencyKey(request.idempotencyKey);
+    if (!existing) return null;
+
+    const existingRunId = stringFromRecord(existing.redactedRequestSummary, "runId");
+    if (
+      existing.previewId !== preview.id ||
+      existing.provider !== preview.provider ||
+      existing.kind !== preview.kind ||
+      existingRunId !== preview.runId
+    ) {
+      throw new ApiError(409, "Idempotency key was already used for a different write action.");
+    }
+
+    return existing;
+  }
+
+  private appendWriteResultEvents(preview: IntegrationWritePreview, result: IntegrationWriteResult): void {
+    if (result.status === "succeeded") {
+      this.appendDaemonEvent({
+        id: randomUUID(),
+        runId: preview.runId,
+        type: "integration.write.succeeded",
+        timestamp: nowIso(),
+        result,
+      });
+      if (result.githubPr) {
+        this.appendDaemonEvent({
+          id: randomUUID(),
+          runId: preview.runId,
+          type: "github.pr.created",
+          timestamp: nowIso(),
+          pr: {
+            id: result.githubPr.id,
+            number: result.githubPr.number,
+            title: result.githubPr.title,
+            url: result.githubPr.url,
+            state: result.githubPr.state,
+            draft: result.githubPr.draft,
+            merged: false,
+            mergeable: null,
+            baseBranch: result.githubPr.baseBranch,
+            headBranch: result.githubPr.headBranch,
+            headSha: preview.githubPr?.headSha ?? null,
+            baseSha: null,
+            author: null,
+            createdAt: result.githubPr.createdAt,
+            updatedAt: result.executedAt,
+          },
+        });
+      }
+      if (result.linearComment) {
+        this.appendDaemonEvent({
+          id: randomUUID(),
+          runId: preview.runId,
+          type: "linear.comment.created",
+          timestamp: nowIso(),
+          result: result.linearComment,
+        });
+      }
+      return;
+    }
+    if (result.status === "cancelled") {
+      this.appendDaemonEvent({
+        id: randomUUID(),
+        runId: preview.runId,
+        type: "integration.write.cancelled",
+        timestamp: nowIso(),
+        previewId: preview.id,
+        provider: preview.provider,
+        kind: preview.kind,
+        reason: result.errors[0] ?? "Integration write was cancelled.",
+      });
+      return;
+    }
+    const error = result.errors[0] ?? "Integration write failed.";
+    this.appendDaemonEvent({
+      id: randomUUID(),
+      runId: preview.runId,
+      type: "integration.write.failed",
+      timestamp: nowIso(),
+      previewId: preview.id,
+      provider: preview.provider,
+      kind: preview.kind,
+      error,
+    });
+    if (preview.kind === "github_pr_create") {
+      this.appendDaemonEvent({
+        id: randomUUID(),
+        runId: preview.runId,
+        type: "github.pr.create_failed",
+        timestamp: nowIso(),
+        previewId: preview.id,
+        error,
+      });
+    }
+    if (preview.kind === "linear_comment_create") {
+      this.appendDaemonEvent({
+        id: randomUUID(),
+        runId: preview.runId,
+        type: "linear.comment.create_failed",
+        timestamp: nowIso(),
+        previewId: preview.id,
+        error,
+      });
+    }
+  }
+
   private streamRunEvents(runId: string, request: IncomingMessage, response: ServerResponse): void {
     this.requireRun(runId);
 
@@ -2112,6 +2437,28 @@ export class SymphoniaDaemon {
       if (refresh.status === "connected") credential = this.authManager.resolveCredential("github");
     }
     return credential;
+  }
+
+  private githubClientForRuntime(runtime: WorkflowRuntime, token: string | null) {
+    return createGitHubClient(
+      {
+        ...runtime.config.github,
+        token: token ?? runtime.config.github.token,
+      },
+      this.options.githubFetch,
+    );
+  }
+
+  private linearClientForRuntime(runtime: WorkflowRuntime, token: string | null) {
+    const apiKey = token ?? runtime.config.tracker.apiKey;
+    if (!apiKey) return null;
+    return createLinearClient(
+      {
+        ...runtime.config.tracker,
+        apiKey,
+      },
+      this.options.linearFetch,
+    );
   }
 
   private async trackerContext(runtime: WorkflowRuntime, signal?: AbortSignal) {
@@ -2364,6 +2711,21 @@ function parseAuthProvider(value: string): AuthProviderId {
 
 function objectBody(input: unknown): Record<string, unknown> {
   return typeof input === "object" && input !== null && !Array.isArray(input) ? (input as Record<string, unknown>) : {};
+}
+
+function stringFromRecord(input: Record<string, unknown>, key: string): string | null {
+  const value = input[key];
+  return typeof value === "string" ? value : null;
+}
+
+function stringBody(input: Record<string, unknown>, key: string): string | null {
+  const value = input[key];
+  return typeof value === "string" && value.trim().length > 0 ? value : null;
+}
+
+function booleanBody(input: Record<string, unknown>, key: string): boolean | null {
+  const value = input[key];
+  return typeof value === "boolean" ? value : null;
 }
 
 function normalizeHarnessError(error: unknown): ApiError {

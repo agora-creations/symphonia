@@ -145,6 +145,65 @@ Useful local auth variables:
 - `SYMPHONIA_AUTH_STORE_PATH`
 - `SYMPHONIA_AUTH_STORAGE_KEY`, optional local encryption key override
 
+## GitHub PRs And Linear Comments
+
+Milestone 11 adds explicit write actions for completed or cancelled runs:
+
+- Preview a GitHub draft PR from run, issue, workspace, git, and review-artifact data.
+- Create the draft PR only after the configured confirmation phrase is typed.
+- Preview a Linear run comment from the run and issue context.
+- Post the Linear comment only after the configured confirmation phrase is typed.
+- Persist redacted preview/result history in SQLite.
+- Emit write events in the run timeline.
+- Refresh GitHub review artifacts after PR creation.
+
+Writes are still off by default. Enable them in `WORKFLOW.md` only for a safe repository and issue:
+
+```yaml
+github:
+  enabled: true
+  read_only: false
+  write:
+    enabled: true
+    require_confirmation: true
+    allow_create_pr: true
+    allow_push: false
+    draft_pr_by_default: true
+    protected_branches:
+      - main
+      - master
+      - production
+
+tracker:
+  kind: linear
+  read_only: false
+  write:
+    enabled: true
+    require_confirmation: true
+    allow_comments: true
+    allow_state_transitions: false
+```
+
+GitHub PR creation requires a connected, env, or manual token with pull-request write permission for the configured repo. Symphonia never auto-pushes, never force-pushes, never pushes protected/default branches, and never auto-merges. If a branch has not been pushed to GitHub, PR creation will fail at GitHub and the UI reports the error; push remains an explicit/manual step.
+
+Linear comments require a connected, env, or manual Linear credential that can access and comment on the issue. Symphonia does not create Linear issues and does not transition Linear issue states.
+
+Confirmation phrases:
+
+- GitHub PR: `CREATE GITHUB PR`
+- Linear comment: `POST LINEAR COMMENT`
+
+Troubleshooting:
+
+- `writes disabled`: enable the provider write block and the specific action flag.
+- `read_only true`: set `github.read_only: false` or `tracker.read_only: false` for the beta workflow.
+- `no token`: connect in Settings -> Integrations or set `GITHUB_TOKEN`/`GITHUB_PAT`/`LINEAR_API_KEY`.
+- `branch is protected`: create a throwaway branch before previewing a PR.
+- `existing PR found`: refresh review artifacts and use the existing PR instead of creating another one.
+- `token lacks permission`: use a token/app installation with repo PR write access or Linear comment permission.
+- `GraphQL error`: inspect the redacted daemon response; token values are intentionally omitted.
+- `rate limit`: wait for the reported GitHub reset window or reduce refresh frequency.
+
 ## APIs
 
 Selected daemon endpoints:
@@ -180,6 +239,12 @@ Selected daemon endpoints:
 - `GET /github/status`
 - `GET /github/health`
 - `POST /runs/:runId/review-artifacts/refresh`
+- `GET /writes/status`
+- `GET /runs/:runId/write-actions`
+- `POST /runs/:runId/github/pr/preview`
+- `POST /runs/:runId/github/pr/create`
+- `POST /runs/:runId/linear/comment/preview`
+- `POST /runs/:runId/linear/comment/create`
 - `POST /harness/scan`
 - `POST /harness/previews`
 - `POST /harness/apply`
@@ -202,7 +267,8 @@ Automated tests use fake CLIs, fake fetch transports, temp databases, temp works
 
 - Linear is read-only by default.
 - GitHub is read-only by default.
-- GitHub PR creation, push, comments, auto-merge, and Linear writes remain gated/deferred.
+- GitHub PR creation and Linear comments are previewed, confirmation-gated, and disabled by default.
+- GitHub branch push, GitHub comments, reviewer requests, auto-merge, GitHub issue creation, Linear issue creation, and Linear state transitions remain deferred.
 - Workspace cleanup is disabled and dry-run by default.
 - Generated harness artifacts are never applied automatically.
 - Existing files are not overwritten without diff preview and explicit confirmation.
@@ -218,11 +284,12 @@ Automated tests use fake CLIs, fake fetch transports, temp databases, temp works
 - Provider validation still depends on locally installed/authenticated provider CLIs.
 - OS keychain storage is not wired into the daemon-owned token path yet; local storage uses an encrypted file with a local key and should be treated as local-beta storage.
 - Linear workspace/team/project summaries are still minimal during auth validation; tracker configuration controls issue scope.
-- GitHub writes remain disabled by default, and GitHub PR creation remains deferred.
-- Linear writes remain disabled/deferred.
+- GitHub writes remain disabled by default; only explicit draft PR creation is implemented.
+- Linear writes remain disabled by default; only explicit run comments are implemented.
+- GitHub branch push is deferred; push branches manually or add a future explicit push flow.
 - Provider auth for Codex, Claude, and Cursor remains separate from GitHub/Linear integration auth.
 - No cloud accounts, team sharing, GitHub App install flow, Linear webhooks, GitHub webhooks, code signing, notarization, auto-update, or Tauri support yet.
 
 ## Next Milestone
 
-Milestone 11 should be `Safely enable explicit GitHub PR creation and Linear run comments with connected auth`.
+Milestone 12 should be `Add CI workflows, release automation, and production packaging hardening`.
