@@ -1097,6 +1097,12 @@ function ReviewArtifactsPanel({
   const git = reviewArtifacts?.git;
   const pr = reviewArtifacts?.pr;
   const files = reviewArtifacts?.diff.files ?? [];
+  const hasCheckArtifacts = Boolean(
+    reviewArtifacts &&
+      (reviewArtifacts.checks.length > 0 ||
+        reviewArtifacts.workflowRuns.length > 0 ||
+        (reviewArtifacts.commitStatus?.statuses.length ?? 0) > 0),
+  );
 
   return (
     <section aria-labelledby="review-artifacts-heading" className="mt-6">
@@ -1172,9 +1178,10 @@ function ReviewArtifactsPanel({
               <dt className="flex items-center gap-1.5 text-muted-foreground">
                 <CheckCircle2 className="h-3.5 w-3.5" /> CI status
               </dt>
-              <dd className="mt-1 font-medium">{reviewArtifacts.commitStatus?.state ?? "No combined status"}</dd>
+              <dd className="mt-1 font-medium">{hasCheckArtifacts ? (reviewArtifacts.commitStatus?.state ?? "Checks reported") : "No GitHub checks are currently reported"}</dd>
               <dd className="mt-1 text-xs text-muted-foreground">
                 {reviewArtifacts.checks.length} check runs · {reviewArtifacts.workflowRuns.length} workflow runs
+                {!hasCheckArtifacts ? " · Refresh review artifacts after CI starts." : ""}
               </dd>
             </div>
           </dl>
@@ -1208,16 +1215,14 @@ function ReviewArtifactsPanel({
             )}
           </div>
 
-          {(reviewArtifacts.checks.length > 0 ||
-            reviewArtifacts.workflowRuns.length > 0 ||
-            (reviewArtifacts.commitStatus?.statuses.length ?? 0) > 0) && (
+          {hasCheckArtifacts ? (
             <div className="grid gap-3 md:grid-cols-2">
               <ArtifactStatusList
                 title="Check runs"
                 items={reviewArtifacts.checks.map((check) => ({
                   key: String(check.id),
                   label: check.name,
-                  status: [check.status, check.conclusion].filter(Boolean).join(" / ") || "unknown",
+                  status: formatArtifactStatus(check.status, check.conclusion),
                   url: check.url ?? check.detailsUrl,
                 }))}
               />
@@ -1226,16 +1231,36 @@ function ReviewArtifactsPanel({
                 items={reviewArtifacts.workflowRuns.map((workflowRun) => ({
                   key: String(workflowRun.id),
                   label: workflowRun.name,
-                  status: [workflowRun.status, workflowRun.conclusion].filter(Boolean).join(" / ") || "unknown",
+                  status: formatArtifactStatus(workflowRun.status, workflowRun.conclusion),
                   url: workflowRun.url,
                 }))}
               />
             </div>
+          ) : (
+            <p className="rounded-md border p-3 text-sm text-muted-foreground">
+              No GitHub checks are currently reported. Refresh review artifacts after CI starts or after pushing the branch.
+            </p>
           )}
         </div>
       )}
     </section>
   );
+}
+
+function formatArtifactStatus(status: string | null | undefined, conclusion: string | null | undefined): string {
+  const normalizedStatus = normalizeArtifactState(status);
+  const normalizedConclusion = normalizeArtifactState(conclusion);
+  return [normalizedStatus, normalizedConclusion].filter(Boolean).join(" / ") || "unknown";
+}
+
+function normalizeArtifactState(value: string | null | undefined): string | null {
+  if (!value) return null;
+  const normalized = value.replace(/_/g, " ").toLowerCase();
+  if (normalized === "in progress") return "in progress";
+  if (["queued", "pending", "completed", "success", "failure", "failed", "skipped", "cancelled", "canceled", "neutral", "timed out", "action required"].includes(normalized)) {
+    return normalized;
+  }
+  return normalized;
 }
 
 function WriteActionsPanel({

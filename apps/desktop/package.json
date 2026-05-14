@@ -8,6 +8,7 @@
     "build": "tsc -p tsconfig.json",
     "dev": "pnpm build && electron dist/main/index.js",
     "package": "pnpm build && node scripts/package.mjs",
+    "inspect-artifact": "node scripts/inspect-artifact.mjs",
     "test": "vitest run",
     "lint": "tsc -p tsconfig.json --noEmit"
   },
