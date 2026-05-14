@@ -169,6 +169,9 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
+      - name: Build packages
+        run: pnpm build:packages
+
       - name: Run harness scan
         run: pnpm harness:scan --path .
 

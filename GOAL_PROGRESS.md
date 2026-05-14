@@ -157,7 +157,10 @@ Checkpoint 9, 14, and 15 validation:
   - Web `GET /settings`: 200.
   - After shutdown, `:4100` and `:3000` no longer had listeners.
 - Remote CI validation:
-  - Pending branch push/PR update. Local workflow YAML parsing passed, but remote GitHub Actions results cannot be claimed until the branch is pushed and checks run.
+  - First PR run reported checks successfully.
+  - Initial `Harness scan` job failed because it ran `pnpm harness:scan --path .` before building `@symphonia/types`; the scanner imports the workspace package `dist` output in CI.
+  - Fixed `.github/workflows/ci.yml` to run `pnpm build:packages` before the harness scan job.
+  - Remote rerun status pending after fix.
 
 Final implemented files/directories:
 
