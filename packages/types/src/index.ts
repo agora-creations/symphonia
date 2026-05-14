@@ -2159,8 +2159,29 @@ export const WritesStatusResponseSchema = z.object({
 });
 export type WritesStatusResponse = z.infer<typeof WritesStatusResponseSchema>;
 
+export const WriteActionAvailabilityStatusSchema = z.enum([
+  "enabled",
+  "gated",
+  "read_only",
+  "disabled",
+  "unavailable",
+  "blocked",
+]);
+export type WriteActionAvailabilityStatus = z.infer<typeof WriteActionAvailabilityStatusSchema>;
+
+export const WriteActionAvailabilitySchema = z.object({
+  provider: IntegrationWriteProviderSchema,
+  kind: IntegrationWriteKindSchema,
+  label: z.string().min(1),
+  status: WriteActionAvailabilityStatusSchema,
+  reasons: z.array(z.string().min(1)),
+  evidenceRequired: z.array(z.string().min(1)),
+});
+export type WriteActionAvailability = z.infer<typeof WriteActionAvailabilitySchema>;
+
 export const IntegrationWriteActionsResponseSchema = z.object({
   writeActions: z.array(z.union([IntegrationWritePreviewSchema, IntegrationWriteResultSchema])),
+  availability: z.array(WriteActionAvailabilitySchema).default([]),
 });
 export type IntegrationWriteActionsResponse = z.infer<typeof IntegrationWriteActionsResponseSchema>;
 
@@ -2413,6 +2434,68 @@ export const ApprovalsResponseSchema = z.object({
   approvals: z.array(ApprovalStateSchema),
 });
 export type ApprovalsResponse = z.infer<typeof ApprovalsResponseSchema>;
+
+export const FileSummarySourceSchema = z.enum([
+  "approval_event",
+  "review_artifact",
+  "diff_event",
+  "empty",
+  "unavailable",
+]);
+export type FileSummarySource = z.infer<typeof FileSummarySourceSchema>;
+
+export const ReviewArtifactEvidenceStatusSchema = z.enum(["ready", "missing", "error", "unavailable"]);
+export type ReviewArtifactEvidenceStatus = z.infer<typeof ReviewArtifactEvidenceStatusSchema>;
+
+export const HookOutputSummarySchema = z.object({
+  hookName: HookNameSchema,
+  status: HookStatusSchema,
+  command: z.string().min(1).nullable(),
+  cwd: z.string().min(1),
+  exitCode: z.number().int().nullable(),
+  stdoutPreview: z.string(),
+  stderrPreview: z.string(),
+  error: z.string().nullable(),
+});
+export type HookOutputSummary = z.infer<typeof HookOutputSummarySchema>;
+
+export const RunEvidenceSummarySchema = z.object({
+  eventCount: z.number().int().nonnegative(),
+  providerEventCount: z.number().int().nonnegative(),
+  approvalCount: z.number().int().nonnegative(),
+  pendingApprovalCount: z.number().int().nonnegative(),
+  hookCount: z.number().int().nonnegative(),
+  failedHookCount: z.number().int().nonnegative(),
+  providerErrorCount: z.number().int().nonnegative(),
+  lastEventAt: isoDateTime.nullable(),
+});
+export type RunEvidenceSummary = z.infer<typeof RunEvidenceSummarySchema>;
+
+export const RunApprovalEvidenceSchema = z.object({
+  run: RunSchema,
+  issue: IssueSchema.nullable(),
+  workspacePath: z.string().min(1).nullable(),
+  provider: ProviderIdSchema,
+  finalRunState: RunStatusSchema,
+  changedFiles: z.array(ChangedFileSchema),
+  fileSummary: z.string().min(1).nullable(),
+  fileSummarySource: FileSummarySourceSchema,
+  evidenceSummary: RunEvidenceSummarySchema,
+  hookOutputSummary: z.array(HookOutputSummarySchema),
+  reviewArtifactStatus: ReviewArtifactEvidenceStatusSchema,
+  reviewArtifactIdentifier: z.string().min(1).nullable(),
+  reviewArtifactPath: z.string().min(1).nullable(),
+  reviewArtifact: ReviewArtifactSnapshotSchema.nullable(),
+  writeActionAvailability: z.array(WriteActionAvailabilitySchema),
+  missingEvidenceReasons: z.array(z.string().min(1)),
+  approvals: z.array(ApprovalStateSchema),
+});
+export type RunApprovalEvidence = z.infer<typeof RunApprovalEvidenceSchema>;
+
+export const RunApprovalEvidenceResponseSchema = z.object({
+  approvalEvidence: RunApprovalEvidenceSchema,
+});
+export type RunApprovalEvidenceResponse = z.infer<typeof RunApprovalEvidenceResponseSchema>;
 
 export const WorkflowStatusResponseSchema = z.object({
   workflow: WorkflowStatusSchema,

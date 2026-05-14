@@ -4,8 +4,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EventStore } from "@symphonia/db";
-import { AuthFetch, GitHubFetch, LinearFetch } from "@symphonia/core";
-import { AgentEvent, ApprovalState, WorkflowStatus } from "@symphonia/types";
+import { AuthFetch, createQueuedRun, GitHubFetch, LinearFetch } from "@symphonia/core";
+import { AgentEvent, ApprovalState, IntegrationWriteActionsResponse, RunApprovalEvidenceResponse, WorkflowStatus } from "@symphonia/types";
 import { createDaemonServer, SymphoniaDaemon } from "../src/daemon";
 
 let directory: string;
@@ -836,6 +836,67 @@ describe("daemon API", () => {
     expect(getEvents(created.id).some((event) => event.type === "approval.resolved" && event.resolution === "accept")).toBe(true);
   });
 
+  it("derives approval evidence file summaries from persisted review artifacts", async () => {
+    writeWorkflow({ codexCommand: fakeCodexCommand("file-approval") });
+
+    const created = await daemon.startRun("linear-issue-101", "codex");
+    await waitForApproval(created.id);
+
+    const pending = daemon.listApprovals(created.id);
+    expect(pending[0]?.approvalType).toBe("file_change");
+
+    await respondApproval(pending[0]!.approvalId, "accept");
+    await waitForTerminal(created.id, "succeeded");
+    await waitForApprovalEvidence(created.id, "approval-evidence.txt");
+
+    const approvals = daemon.listApprovals(created.id);
+    expect(approvals[0]?.status).toBe("resolved");
+    expect(approvals[0]?.fileSummary).toContain("approval-evidence.txt");
+
+    const evidence = daemon.getRunApprovalEvidence(created.id);
+    expect(evidence.fileSummary).toContain("approval-evidence.txt");
+    expect(evidence.changedFiles.some((file) => file.path === "approval-evidence.txt")).toBe(true);
+    expect(evidence.reviewArtifactStatus).toBe("ready");
+    expect(evidence.writeActionAvailability.every((action) => action.status === "read_only" || action.status === "disabled")).toBe(true);
+
+    const response = await requestJson<RunApprovalEvidenceResponse>("GET", `/runs/${created.id}/approval-evidence`);
+    expect(response.approvalEvidence.fileSummary).toContain("approval-evidence.txt");
+    expect(response.approvalEvidence.missingEvidenceReasons).not.toContain("No review artifact diff or git diff event is available for this run.");
+
+    const actions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${created.id}/write-actions`);
+    expect(actions.writeActions).toEqual([]);
+    expect(actions.availability.map((action) => action.status)).toEqual(expect.arrayContaining(["read_only"]));
+  });
+
+  it("reports explicit missing approval evidence instead of silent null", async () => {
+    const databasePath = join(directory, "missing-approval-evidence.sqlite");
+    const store = new EventStore(databasePath);
+    store.saveRun(
+      createQueuedRun({
+        id: "missing-evidence-run",
+        issueId: "linear-issue-101",
+        issueIdentifier: "ENG-101",
+        issueTitle: "Missing evidence test",
+        timestamp: "2026-05-14T10:00:00.000Z",
+        daemonInstanceId: "previous-daemon",
+      }),
+    );
+    daemon.close();
+    daemon = createDaemonServer(store, {
+      workflowPath,
+      cwd: directory,
+      linearFetch: fakeLinearFetch({ state: "Todo" }),
+    }).daemon;
+
+    const evidence = daemon.getRunApprovalEvidence("missing-evidence-run");
+
+    expect(evidence.fileSummary).toBeNull();
+    expect(evidence.missingEvidenceReasons).toEqual(
+      expect.arrayContaining(["No review artifact diff or git diff event is available for this run."]),
+    );
+    expect(evidence.writeActionAvailability.some((action) => action.reasons.includes("File-change summary is missing."))).toBe(true);
+  });
+
   it("reconstructs active persisted runs on startup and allows manual retry", async () => {
     const databasePath = join(directory, "restart.sqlite");
     daemon.close();
@@ -911,7 +972,9 @@ describe("daemon API", () => {
       linearFetch: fakeLinearFetch({ state: "Todo" }),
     }).daemon;
 
-    expect(daemon.listApprovals(created.id)).toHaveLength(0);
+    const recoveredApprovals = daemon.listApprovals(created.id);
+    expect(recoveredApprovals).toHaveLength(1);
+    expect(recoveredApprovals[0]).toMatchObject({ status: "resolved", decision: "cancel" });
     expect(getEvents(created.id).some((event) => event.type === "approval.recovered")).toBe(true);
     expect(getEvents(created.id).some((event) => event.type === "approval.resolved" && event.resolution === "cancel")).toBe(true);
   });
@@ -1000,6 +1063,18 @@ async function waitForApproval(runId: string): Promise<void> {
     await sleep(20);
   }
   throw new Error(`Run ${runId} did not create a pending approval.`);
+}
+
+async function waitForApprovalEvidence(runId: string, expectedFile: string): Promise<void> {
+  for (let index = 0; index < 100; index += 1) {
+    const evidence = daemon.getRunApprovalEvidence(runId);
+    if (evidence.fileSummary?.includes(expectedFile)) return;
+    await sleep(20);
+  }
+  const evidence = daemon.getRunApprovalEvidence(runId);
+  throw new Error(
+    `Run ${runId} did not expose approval evidence for ${expectedFile}; fileSummary=${evidence.fileSummary}; missing=${evidence.missingEvidenceReasons.join(",")}`,
+  );
 }
 
 function getEvents(runId: string): AgentEvent[] {
@@ -1449,6 +1524,9 @@ function fakeCliCommand(mode: string): string {
 
 function fakeServerSource(): string {
   return `
+import { execFileSync } from "node:child_process";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import readline from "node:readline";
 
 const mode = process.argv[2] ?? "success";
@@ -1489,6 +1567,12 @@ rl.on("line", (line) => {
     activeTurn = true;
     if (mode === "approval") {
       send({ id: "approval-1", method: "item/commandExecution/requestApproval", params: { threadId: "thread-1", turnId: "turn-1", itemId: "item-command", startedAtMs: Date.now(), approvalId: "approval-1", reason: "Run tests", command: "pnpm test", cwd: message.params.cwd, availableDecisions: ["accept", "acceptForSession", "decline", "cancel"] } });
+      return;
+    }
+    if (mode === "file-approval") {
+      try { execFileSync("git", ["init"], { cwd: message.params.cwd, stdio: "ignore" }); } catch {}
+      writeFileSync(join(message.params.cwd, "approval-evidence.txt"), "approval evidence change\\n");
+      send({ id: "approval-1", method: "item/fileChange/requestApproval", params: { threadId: "thread-1", turnId: "turn-1", itemId: "item-file", startedAtMs: Date.now(), approvalId: "approval-1", cwd: message.params.cwd, availableDecisions: ["accept", "acceptForSession", "decline", "cancel"] } });
       return;
     }
     if (mode === "wait") return;

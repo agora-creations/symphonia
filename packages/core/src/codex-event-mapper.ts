@@ -152,7 +152,11 @@ export function mapCodexServerRequestToApproval(
   const command = readString(params, "command");
   const cwd = readString(params, "cwd");
   const reason = readString(params, "reason");
-  const fileSummary = readString(params, "grantRoot");
+  const fileSummary =
+    readString(params, "grantRoot") ??
+    readString(params, "fileSummary") ??
+    readString(params, "summary") ??
+    summarizeFileChangeRequest(params);
   const availableDecisions = readDecisionArray(params.availableDecisions);
   const prompt =
     approvalType === "command"
@@ -216,6 +220,21 @@ function readDecisionArray(value: unknown): Array<"accept" | "acceptForSession" 
       item === "accept" || item === "acceptForSession" || item === "decline" || item === "cancel",
   );
   return decisions.length > 0 ? decisions : ["accept", "decline", "cancel"];
+}
+
+function summarizeFileChangeRequest(params: Record<string, unknown>): string | undefined {
+  const paths = readStringArray(params.files ?? params.paths);
+  if (paths.length > 0) {
+    const preview = paths.slice(0, 5).join(", ");
+    const remaining = Math.max(0, paths.length - 5);
+    return `${paths.length} file change ${paths.length === 1 ? "path" : "paths"}: ${preview}${remaining > 0 ? `, and ${remaining} more` : ""}`;
+  }
+  return stringifyLimited(params.changes ?? params.edits, 600) ?? undefined;
+}
+
+function readStringArray(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return value.filter((item): item is string => typeof item === "string" && item.length > 0);
 }
 
 function readRecord(record: Record<string, unknown>, key: string): Record<string, unknown> {

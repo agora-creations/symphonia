@@ -32,6 +32,7 @@ import {
   getIssues,
   getProviders,
   getReviewArtifacts,
+  getRunApprovalEvidence,
   getRunApprovals,
   getRunEventStreamUrl,
   getRunEvents,
@@ -74,6 +75,7 @@ import {
   type ProviderId,
   type ReviewArtifactSnapshot,
   type Run,
+  type RunApprovalEvidence,
   type RunStatus,
   type TrackerStatus,
   type WorkflowStatus,
@@ -263,6 +265,7 @@ export function IssuesView() {
   const [selectedPrompt, setSelectedPrompt] = useState<string | null>(null);
   const [selectedWorkspace, setSelectedWorkspace] = useState<WorkspaceInfo | null>(null);
   const [selectedReviewArtifacts, setSelectedReviewArtifacts] = useState<ReviewArtifactSnapshot | null>(null);
+  const [selectedApprovalEvidence, setSelectedApprovalEvidence] = useState<RunApprovalEvidence | null>(null);
   const [selectedApprovals, setSelectedApprovals] = useState<ApprovalState[]>([]);
   const [connectedStatus, setConnectedStatus] = useState<ConnectedGoldenPathStatus | null>(null);
   const [connectedError, setConnectedError] = useState<string | null>(null);
@@ -321,6 +324,12 @@ export function IssuesView() {
 
       if (event.type === "github.review_artifacts.refreshed") {
         setSelectedReviewArtifacts(event.snapshot);
+        void getRunApprovalEvidence(event.runId)
+          .then((evidence) => {
+            setSelectedApprovalEvidence(evidence);
+            setSelectedApprovals(evidence.approvals);
+          })
+          .catch(() => null);
       }
 
       if (event.type === "approval.requested") {
@@ -343,6 +352,16 @@ export function IssuesView() {
               : approval,
           ),
         );
+      }
+
+      if (event.type === "run.status" && isTerminalRunStatus(event.status)) {
+        void getRunApprovalEvidence(event.runId)
+          .then((evidence) => {
+            setSelectedApprovalEvidence(evidence);
+            setSelectedApprovals(evidence.approvals);
+            setSelectedReviewArtifacts(evidence.reviewArtifact);
+          })
+          .catch(() => null);
       }
     }
 
@@ -472,6 +491,7 @@ export function IssuesView() {
       setSelectedPrompt(null);
       setSelectedWorkspace(null);
       setSelectedReviewArtifacts(null);
+      setSelectedApprovalEvidence(null);
       setSelectedApprovals([]);
       return;
     }
@@ -483,13 +503,15 @@ export function IssuesView() {
       selectedIssueKey ? getWorkspace(selectedIssueKey) : Promise.resolve(null),
       getRunApprovals(selectedRunId),
       getReviewArtifacts(selectedRunId),
+      getRunApprovalEvidence(selectedRunId),
     ])
-      .then(([events, prompt, workspace, approvals, reviewArtifacts]) => {
+      .then(([events, prompt, workspace, approvals, reviewArtifacts, approvalEvidence]) => {
         setSelectedEvents(events);
         setSelectedPrompt(prompt);
         setSelectedWorkspace(workspace);
-        setSelectedApprovals(approvals);
+        setSelectedApprovals(approvalEvidence.approvals.length > 0 ? approvalEvidence.approvals : approvals);
         setSelectedReviewArtifacts(reviewArtifacts);
+        setSelectedApprovalEvidence(approvalEvidence);
       })
       .catch((caught) => {
         setDetailError(caught instanceof Error ? caught.message : "Failed to load run events.");
@@ -504,6 +526,7 @@ export function IssuesView() {
     setSelectedPrompt(null);
     setSelectedWorkspace(null);
     setSelectedReviewArtifacts(null);
+    setSelectedApprovalEvidence(null);
     setSelectedApprovals([]);
     setDetailError(null);
   }, []);
@@ -515,6 +538,7 @@ export function IssuesView() {
     setSelectedPrompt(null);
     setSelectedWorkspace(null);
     setSelectedReviewArtifacts(null);
+    setSelectedApprovalEvidence(null);
     setSelectedApprovals([]);
     setDetailError(null);
   }, []);
@@ -537,6 +561,7 @@ export function IssuesView() {
         setSelectedPrompt(null);
         setSelectedWorkspace(null);
         setSelectedReviewArtifacts(null);
+        setSelectedApprovalEvidence(null);
         setSelectedApprovals([]);
         subscribeRun(run.id);
       } catch (caught) {
@@ -569,6 +594,7 @@ export function IssuesView() {
         setSelectedPrompt(null);
         setSelectedWorkspace(null);
         setSelectedReviewArtifacts(null);
+        setSelectedApprovalEvidence(null);
         setSelectedApprovals([]);
         subscribeRun(nextRun.id);
       } catch (caught) {
@@ -615,6 +641,7 @@ export function IssuesView() {
       setRefreshingReviewArtifacts(true);
       setDetailError(null);
       setSelectedReviewArtifacts(await refreshReviewArtifacts(run.id));
+      setSelectedApprovalEvidence(await getRunApprovalEvidence(run.id));
       setGithubStatus(await getGithubStatus().catch(() => null));
     } catch (caught) {
       setDetailError(caught instanceof Error ? caught.message : "Failed to refresh review artifacts.");
@@ -842,6 +869,7 @@ export function IssuesView() {
 
       {selectedIssue && (
         <RunDetailsCard
+          approvalEvidence={selectedApprovalEvidence}
           approvals={selectedApprovals}
           error={detailError}
           events={selectedEvents}
@@ -943,6 +971,7 @@ export function IssuesView() {
 }
 
 function RunDetailsCard({
+  approvalEvidence,
   approvals,
   error,
   events,
@@ -960,6 +989,7 @@ function RunDetailsCard({
   selectedProvider,
   workspace,
 }: {
+  approvalEvidence: RunApprovalEvidence | null;
   approvals: ApprovalState[];
   error: string | null;
   events: AgentEvent[];
@@ -1131,6 +1161,8 @@ function RunDetailsCard({
             </p>
           )}
 
+          <ApprovalEvidencePanel approvalEvidence={approvalEvidence} events={events} reviewArtifacts={reviewArtifacts} run={run ?? null} />
+
           <EvidenceSummaryPanel events={events} run={run ?? null} />
 
           <ReviewArtifactsPanel
@@ -1141,6 +1173,7 @@ function RunDetailsCard({
           />
 
           <WriteActionsPanel
+            approvalEvidence={approvalEvidence}
             issue={issue}
             onRefreshReviewArtifacts={onRefreshReviewArtifacts}
             reviewArtifacts={reviewArtifacts}
@@ -1257,6 +1290,142 @@ function ProofStateBanner({
         </p>
       )}
     </div>
+  );
+}
+
+function ApprovalEvidencePanel({
+  approvalEvidence,
+  events,
+  reviewArtifacts,
+  run,
+}: {
+  approvalEvidence: RunApprovalEvidence | null;
+  events: AgentEvent[];
+  reviewArtifacts: ReviewArtifactSnapshot | null;
+  run: Run | null;
+}) {
+  const changedFiles = approvalEvidence?.changedFiles ?? reviewArtifacts?.diff.files ?? [];
+  const fileSummary =
+    approvalEvidence?.fileSummary ??
+    (reviewArtifacts
+      ? reviewArtifacts.diff.filesChanged === 0
+        ? "No file changes were detected."
+        : clientDiffSummary(reviewArtifacts.diff)
+      : null);
+  const missingReasons =
+    approvalEvidence?.missingEvidenceReasons ??
+    (run ? ["Approval evidence has not loaded yet. Refresh the run details if this persists."] : []);
+  const eventCount = approvalEvidence?.evidenceSummary.eventCount ?? events.length;
+  const finalState = approvalEvidence?.finalRunState ?? run?.status ?? null;
+  const hookOutput = approvalEvidence?.hookOutputSummary ?? [];
+  const reviewStatus = approvalEvidence?.reviewArtifactStatus ?? (reviewArtifacts ? (reviewArtifacts.error ? "error" : "ready") : "missing");
+  const fileSummarySource = approvalEvidence?.fileSummarySource ?? (reviewArtifacts ? "review_artifact" : "unavailable");
+
+  return (
+    <section aria-labelledby="approval-evidence-heading" className="mt-6">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h3 id="approval-evidence-heading" className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+            Approval evidence
+          </h3>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Evidence for human review before any future GitHub or Linear write action.
+          </p>
+        </div>
+        <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", reviewStatus === "ready" ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300")}>
+          {reviewStatus.replaceAll("_", " ")}
+        </span>
+      </div>
+
+      {!run ? (
+        <p className="mt-3 rounded-md border p-3 text-sm text-muted-foreground">Start a run to collect approval evidence.</p>
+      ) : (
+        <div className="mt-3 space-y-3">
+          <dl className="grid gap-3 text-sm sm:grid-cols-2">
+            <div className="rounded-md border p-3">
+              <dt className="text-muted-foreground">Run</dt>
+              <dd className="mt-1 break-all font-medium">{run.id}</dd>
+              <dd className="mt-1 text-xs text-muted-foreground">{run.provider} · {finalState ? finalState.replaceAll("_", " ") : "state unavailable"}</dd>
+            </div>
+            <div className="rounded-md border p-3">
+              <dt className="text-muted-foreground">Workspace</dt>
+              <dd className="mt-1 break-all font-medium">{approvalEvidence?.workspacePath ?? reviewArtifacts?.workspace?.path ?? run.workspacePath ?? "Workspace path unavailable"}</dd>
+            </div>
+            <div className="rounded-md border p-3">
+              <dt className="text-muted-foreground">Timeline</dt>
+              <dd className="mt-1 font-medium">{eventCount} persisted events</dd>
+              <dd className="mt-1 text-xs text-muted-foreground">
+                {approvalEvidence?.evidenceSummary.lastEventAt ? `last event ${formatTime(approvalEvidence.evidenceSummary.lastEventAt)}` : "open the event timeline below"}
+              </dd>
+            </div>
+            <div className="rounded-md border p-3">
+              <dt className="text-muted-foreground">Review artifact</dt>
+              <dd className="mt-1 break-all font-medium">{approvalEvidence?.reviewArtifactIdentifier ?? (reviewArtifacts ? `review-artifact:${reviewArtifacts.runId}` : "Missing")}</dd>
+              <dd className="mt-1 text-xs text-muted-foreground">{reviewArtifacts?.lastRefreshedAt ? `refreshed ${formatTime(reviewArtifacts.lastRefreshedAt)}` : "not refreshed"}</dd>
+            </div>
+          </dl>
+
+          <div className="rounded-md border p-3">
+            <p className="text-sm font-medium">File-change summary</p>
+            {fileSummary ? (
+              <p className="mt-2 text-sm text-muted-foreground">{fileSummary}</p>
+            ) : (
+              <p role="alert" className="mt-2 rounded-md border border-amber-500/30 bg-amber-500/10 p-3 text-sm text-amber-700 dark:text-amber-300">
+                File-change summary is missing. Future write actions must stay blocked until this evidence is available or explicitly reviewed as unavailable.
+              </p>
+            )}
+            <p className="mt-2 text-xs text-muted-foreground">source: {fileSummarySource.replaceAll("_", " ")}</p>
+          </div>
+
+          <div className="rounded-md border">
+            <div className="flex items-center justify-between border-b px-3 py-2">
+              <h4 className="text-sm font-medium">Changed files</h4>
+              <span className="text-xs text-muted-foreground">{changedFiles.length}</span>
+            </div>
+            {changedFiles.length === 0 ? (
+              <p className="p-3 text-sm text-muted-foreground">No changed files were reported by the review evidence.</p>
+            ) : (
+              <ul className="divide-y">
+                {changedFiles.slice(0, 12).map((file) => (
+                  <li key={`${file.source}-${file.path}`} className="flex flex-wrap items-center justify-between gap-2 p-3 text-sm">
+                    <span className="break-all font-medium">{file.path}</span>
+                    <span className="text-xs text-muted-foreground">{file.source} · {file.status} · +{file.additions} -{file.deletions}</span>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          {hookOutput.length > 0 ? (
+            <div className="rounded-md border">
+              <h4 className="border-b px-3 py-2 text-sm font-medium">Hook/test output</h4>
+              <ul className="divide-y">
+                {hookOutput.slice(0, 6).map((hook) => (
+                  <li key={`${hook.hookName}-${hook.status}-${hook.cwd}`} className="p-3 text-sm">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-medium">{hook.hookName}</span>
+                      <span className="text-xs text-muted-foreground">{hook.status.replaceAll("_", " ")} · exit {hook.exitCode ?? "n/a"}</span>
+                    </div>
+                    {hook.command && <p className="mt-1 break-all font-mono text-xs text-muted-foreground">{hook.command}</p>}
+                    {(hook.stdoutPreview || hook.stderrPreview || hook.error) && (
+                      <pre className="mt-2 max-h-40 overflow-auto whitespace-pre-wrap rounded-md border bg-background p-2 text-xs text-muted-foreground">
+                        {[hook.stdoutPreview, hook.stderrPreview, hook.error].filter(Boolean).join("\n")}
+                      </pre>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </div>
+          ) : (
+            <p className="rounded-md border p-3 text-sm text-muted-foreground">No hook or test output was recorded for this run.</p>
+          )}
+
+          {missingReasons.length > 0 && (
+            <StatusList title="Missing evidence" tone="warning" items={missingReasons} />
+          )}
+        </div>
+      )}
+    </section>
   );
 }
 
@@ -1523,11 +1692,13 @@ function normalizeArtifactState(value: string | null | undefined): string | null
 }
 
 function WriteActionsPanel({
+  approvalEvidence,
   issue,
   onRefreshReviewArtifacts,
   reviewArtifacts,
   run,
 }: {
+  approvalEvidence: RunApprovalEvidence | null;
   issue: Issue;
   onRefreshReviewArtifacts: (run: Run) => Promise<void>;
   reviewArtifacts: ReviewArtifactSnapshot | null;
@@ -1680,6 +1851,8 @@ function WriteActionsPanel({
             </p>
           )}
 
+          <WriteAvailabilityList availability={approvalEvidence?.writeActionAvailability ?? []} />
+
           <div className="grid gap-3 md:grid-cols-2">
             <WriteProviderCard
               actionButtonLabel={busyAction === "github-preview" ? "Preparing preview..." : "Preview PR"}
@@ -1750,6 +1923,47 @@ function WriteActionsPanel({
         </div>
       )}
     </section>
+  );
+}
+
+function WriteAvailabilityList({ availability }: { availability: RunApprovalEvidence["writeActionAvailability"] }) {
+  if (availability.length === 0) {
+    return (
+      <p className="rounded-md border p-3 text-sm text-muted-foreground">
+        Write-action availability has not loaded yet. Existing write gates remain in force.
+      </p>
+    );
+  }
+
+  return (
+    <div className="rounded-md border">
+      <div className="flex items-center justify-between border-b px-3 py-2">
+        <h4 className="text-sm font-medium">Write gate availability</h4>
+        <span className="text-xs text-muted-foreground">no automatic writes</span>
+      </div>
+      <ul className="divide-y">
+        {availability.map((action) => (
+          <li key={`${action.provider}-${action.kind}`} className="p-3 text-sm">
+            <div className="flex flex-wrap items-center justify-between gap-2">
+              <span className="font-medium">{action.label}</span>
+              <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", writeAvailabilityClass(action.status))}>
+                {action.status.replaceAll("_", " ")}
+              </span>
+            </div>
+            <p className="mt-1 text-xs text-muted-foreground">
+              Requires {action.evidenceRequired.join(", ")}.
+            </p>
+            {action.reasons.length > 0 && (
+              <ul className="mt-2 list-disc space-y-1 pl-4 text-xs text-muted-foreground">
+                {action.reasons.map((reason) => (
+                  <li key={reason}>{reason}</li>
+                ))}
+              </ul>
+            )}
+          </li>
+        ))}
+      </ul>
+    </div>
   );
 }
 
@@ -1937,6 +2151,20 @@ function writeStatusClass(status: IntegrationWritePreview["status"]) {
       return "border-blue-500/30 bg-blue-500/10 text-blue-600 dark:text-blue-300";
     case "cancelled":
       return "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300";
+  }
+}
+
+function writeAvailabilityClass(status: RunApprovalEvidence["writeActionAvailability"][number]["status"]) {
+  switch (status) {
+    case "enabled":
+      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300";
+    case "gated":
+      return "border-blue-500/30 bg-blue-500/10 text-blue-600 dark:text-blue-300";
+    case "read_only":
+    case "disabled":
+    case "unavailable":
+    case "blocked":
+      return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300";
   }
 }
 
@@ -3218,6 +3446,13 @@ function findLastEvent<T extends AgentEvent["type"]>(events: AgentEvent[], type:
 
 function shortSha(sha: string | null | undefined) {
   return sha ? sha.slice(0, 7) : "unknown";
+}
+
+function clientDiffSummary(diff: ReviewArtifactSnapshot["diff"]): string {
+  const files = diff.files.slice(0, 5).map((file) => file.path);
+  const remaining = Math.max(0, diff.filesChanged - files.length);
+  const fileList = files.length > 0 ? `: ${files.join(", ")}${remaining > 0 ? `, and ${remaining} more` : ""}` : "";
+  return `${diff.filesChanged} changed ${diff.filesChanged === 1 ? "file" : "files"}, +${diff.additions} -${diff.deletions}${fileList}.`;
 }
 
 function formatTime(timestamp: string) {

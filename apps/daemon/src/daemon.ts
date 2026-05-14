@@ -66,12 +66,15 @@ import {
   AuthProviderId,
   AuthProviderIdSchema,
   AuthValidationResult,
+  ChangedFile,
   ConnectedGoldenPathStatus,
   DaemonStatus,
+  DiffSummary,
   HookName,
   HookRun,
   Issue,
   isTerminalRunStatus,
+  IntegrationWriteKind,
   IntegrationWritePolicy,
   ProviderHealth,
   ProviderId,
@@ -88,6 +91,7 @@ import {
   IntegrationWriteResult,
   ReviewArtifactSnapshot,
   Run,
+  RunApprovalEvidence,
   RunSchema,
   StartRunRequestSchema,
   TrackerHealth,
@@ -101,6 +105,7 @@ import {
   WorkflowStatus,
   WorkspaceInfo,
   WorkspaceInventory,
+  WriteActionAvailability,
 } from "@symphonia/types";
 import {
   AuthDisconnectRequestSchema,
@@ -647,6 +652,11 @@ export class SymphoniaDaemon {
         });
       }
 
+      const runApprovalEvidenceMatch = path.match(/^\/runs\/([^/]+)\/approval-evidence$/);
+      if (request.method === "GET" && runApprovalEvidenceMatch) {
+        return sendJson(response, 200, { approvalEvidence: this.getRunApprovalEvidence(runApprovalEvidenceMatch[1]!) });
+      }
+
       const runReviewArtifactsMatch = path.match(/^\/runs\/([^/]+)\/review-artifacts$/);
       if (request.method === "GET" && runReviewArtifactsMatch) {
         const runId = runReviewArtifactsMatch[1]!;
@@ -658,7 +668,10 @@ export class SymphoniaDaemon {
       if (request.method === "GET" && runWriteActionsMatch) {
         const runId = runWriteActionsMatch[1]!;
         this.requireRun(runId);
-        return sendJson(response, 200, { writeActions: this.eventStore.listIntegrationWriteActionsForRun(runId) });
+        return sendJson(response, 200, {
+          writeActions: this.eventStore.listIntegrationWriteActionsForRun(runId),
+          availability: this.getWriteActionAvailability(runId),
+        });
       }
 
       const githubPrPreviewMatch = path.match(/^\/runs\/([^/]+)\/github\/pr\/preview$/);
@@ -1673,6 +1686,170 @@ export class SymphoniaDaemon {
     };
   }
 
+  getRunApprovalEvidence(runId: string): RunApprovalEvidence {
+    const record = this.requireRecord(runId);
+    const events = this.eventStore.getEventsForRun(runId);
+    const reviewArtifact = this.eventStore.getReviewArtifactSnapshot(runId);
+    const fileEvidence = this.getFileSummaryEvidence(runId, events, reviewArtifact);
+    const approvals = this.listApprovals(runId);
+    const workspacePath =
+      record.run.workspacePath ?? record.workspace?.path ?? reviewArtifact?.workspace?.path ?? fileEvidence.gitWorkspacePath ?? null;
+    const hookOutputSummary = events
+      .filter(
+        (event): event is Extract<AgentEvent, { type: "hook.started" | "hook.succeeded" | "hook.failed" | "hook.timed_out" }> =>
+          event.type === "hook.started" ||
+          event.type === "hook.succeeded" ||
+          event.type === "hook.failed" ||
+          event.type === "hook.timed_out",
+      )
+      .map((event) => ({
+        hookName: event.hook.hookName,
+        status: event.hook.status,
+        command: event.hook.command,
+        cwd: event.hook.cwd,
+        exitCode: event.hook.exitCode,
+        stdoutPreview: truncateText(event.hook.stdout, 600),
+        stderrPreview: truncateText(event.hook.stderr, 600),
+        error: event.hook.error,
+      }));
+    const providerErrorCount = events.filter(isProviderErrorEvent).length;
+    const providerEventCount = events.filter(isProviderEvent).length;
+    const missingEvidenceReasons = [
+      ...fileEvidence.missingEvidenceReasons,
+      ...(workspacePath ? [] : ["Workspace path is unavailable, so file evidence cannot be tied to a local workspace."]),
+      ...(events.length > 0 ? [] : ["No persisted run events are available for this run."]),
+      ...(reviewArtifact
+        ? reviewArtifact.error
+          ? [`Review artifact refresh reported: ${reviewArtifact.error}`]
+          : []
+        : ["Review artifact snapshot is missing; refresh review artifacts before approving future writes."]),
+      ...(isTerminalRunStatus(record.run.status)
+        ? []
+        : ["Run is not terminal yet, so final approval evidence is still incomplete."]),
+    ];
+
+    return {
+      run: record.run,
+      issue: record.issue,
+      workspacePath,
+      provider: record.run.provider,
+      finalRunState: record.run.status,
+      changedFiles: fileEvidence.changedFiles,
+      fileSummary: fileEvidence.fileSummary,
+      fileSummarySource: fileEvidence.fileSummarySource,
+      evidenceSummary: {
+        eventCount: events.length,
+        providerEventCount,
+        approvalCount: approvals.length,
+        pendingApprovalCount: approvals.filter((approval) => approval.status === "pending").length,
+        hookCount: hookOutputSummary.length,
+        failedHookCount: hookOutputSummary.filter((hook) => hook.status === "failed" || hook.status === "timed_out").length,
+        providerErrorCount,
+        lastEventAt: events.at(-1)?.timestamp ?? null,
+      },
+      hookOutputSummary,
+      reviewArtifactStatus: reviewArtifact ? (reviewArtifact.error ? "error" : "ready") : record.run ? "missing" : "unavailable",
+      reviewArtifactIdentifier: reviewArtifact ? `review-artifact:${reviewArtifact.runId}` : null,
+      reviewArtifactPath: null,
+      reviewArtifact,
+      writeActionAvailability: this.getWriteActionAvailability(runId),
+      missingEvidenceReasons: [...new Set(missingEvidenceReasons)],
+      approvals,
+    };
+  }
+
+  private getWriteActionAvailability(runId: string): WriteActionAvailability[] {
+    const record = this.requireRecord(runId);
+    const events = this.eventStore.getEventsForRun(runId);
+    const reviewArtifact = this.eventStore.getReviewArtifactSnapshot(runId);
+    const fileEvidence = this.getFileSummaryEvidence(runId, events, reviewArtifact);
+    const writes = this.tryGetWritesStatus();
+    const evidenceMissing = [
+      ...(reviewArtifact ? [] : ["Review artifact is missing."]),
+      ...(fileEvidence.fileSummary ? [] : ["File-change summary is missing."]),
+      ...(record.run.workspacePath ? [] : ["Run workspace path is missing."]),
+      ...(isTerminalRunStatus(record.run.status) ? [] : ["Run has not reached a terminal state."]),
+    ];
+
+    return [
+      writeAvailability({
+        provider: "github",
+        kind: "github_pr_create",
+        label: "Create GitHub draft PR",
+        policy: writes?.github ?? null,
+        evidenceMissing,
+      }),
+      writeAvailability({
+        provider: "linear",
+        kind: "linear_comment_create",
+        label: "Post Linear run comment",
+        policy: writes?.linear ?? null,
+        evidenceMissing,
+      }),
+    ];
+  }
+
+  private getFileSummaryEvidence(
+    runId: string,
+    events = this.eventStore.getEventsForRun(runId),
+    reviewArtifact = this.eventStore.getReviewArtifactSnapshot(runId),
+  ): {
+    changedFiles: ChangedFile[];
+    fileSummary: string | null;
+    fileSummarySource: RunApprovalEvidence["fileSummarySource"];
+    gitWorkspacePath: string | null;
+    missingEvidenceReasons: string[];
+  } {
+    const approvalEventSummary = events
+      .filter((event): event is Extract<AgentEvent, { type: "approval.requested" }> => event.type === "approval.requested")
+      .map((event) => event.fileSummary)
+      .find((summary): summary is string => Boolean(summary && summary.trim().length > 0));
+    const latestDiffEvent = events
+      .filter((event): event is Extract<AgentEvent, { type: "git.diff.generated" }> => event.type === "git.diff.generated")
+      .at(-1);
+    const diff = reviewArtifact?.diff ?? latestDiffEvent?.diff ?? null;
+    const gitWorkspacePath = reviewArtifact?.git.workspacePath ?? null;
+    const source = approvalEventSummary ? "approval_event" : reviewArtifact ? "review_artifact" : latestDiffEvent ? "diff_event" : "unavailable";
+
+    if (approvalEventSummary) {
+      return {
+        changedFiles: diff?.files ?? [],
+        fileSummary: approvalEventSummary,
+        fileSummarySource: "approval_event",
+        gitWorkspacePath,
+        missingEvidenceReasons: diff ? [] : ["Approval included a file summary, but no changed-file list is available."],
+      };
+    }
+
+    if (!diff) {
+      return {
+        changedFiles: [],
+        fileSummary: null,
+        fileSummarySource: "unavailable",
+        gitWorkspacePath,
+        missingEvidenceReasons: ["No review artifact diff or git diff event is available for this run."],
+      };
+    }
+
+    if (diff.filesChanged === 0) {
+      return {
+        changedFiles: [],
+        fileSummary: "No file changes were detected.",
+        fileSummarySource: "empty",
+        gitWorkspacePath,
+        missingEvidenceReasons: [],
+      };
+    }
+
+    return {
+      changedFiles: diff.files,
+      fileSummary: formatDiffSummary(diff),
+      fileSummarySource: source === "unavailable" ? "diff_event" : source,
+      gitWorkspacePath,
+      missingEvidenceReasons: [],
+    };
+  }
+
   async previewGithubPr(runId: string, input: unknown): Promise<IntegrationWritePreview> {
     const record = this.requireRecord(runId);
     const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
@@ -2018,10 +2195,80 @@ export class SymphoniaDaemon {
   }
 
   listApprovals(runId?: string): ApprovalState[] {
-    return [...this.approvals.values()]
-      .filter((approval) => !runId || approval.runId === runId)
-      .map((approval) => this.serializeApproval(approval))
-      .sort((a, b) => a.requestedAt.localeCompare(b.requestedAt));
+    const approvals = new Map<string, ApprovalState>();
+    for (const approval of this.listPersistedApprovals(runId)) {
+      approvals.set(approval.approvalId, approval);
+    }
+    for (const approval of this.approvals.values()) {
+      if (!runId || approval.runId === runId) {
+        approvals.set(approval.approvalId, this.serializeApproval(approval));
+      }
+    }
+    return [...approvals.values()].sort((a, b) => a.requestedAt.localeCompare(b.requestedAt));
+  }
+
+  private listPersistedApprovals(runId?: string): ApprovalState[] {
+    const runIds = runId ? [runId] : this.eventStore.listRuns().map((run) => run.id);
+    const approvals: ApprovalState[] = [];
+
+    for (const id of runIds) {
+      const events = this.eventStore.getEventsForRun(id);
+      const byId = new Map<string, ApprovalState>();
+      for (const event of events) {
+        if (event.type === "approval.requested") {
+          byId.set(event.approvalId, this.approvalStateFromEvent(event));
+          continue;
+        }
+        if (event.type === "approval.resolved") {
+          const existing = byId.get(event.approvalId);
+          if (existing) {
+            byId.set(event.approvalId, {
+              ...existing,
+              status: "resolved",
+              decision: event.resolution,
+              resolvedAt: event.timestamp,
+            });
+          }
+          continue;
+        }
+        if (event.type === "approval.recovered") {
+          const existing = byId.get(event.approvalId);
+          if (existing && existing.status === "pending") {
+            byId.set(event.approvalId, {
+              ...existing,
+              status: "resolved",
+              decision: "cancel",
+              resolvedAt: event.timestamp,
+            });
+          }
+        }
+      }
+      approvals.push(...byId.values());
+    }
+
+    return approvals;
+  }
+
+  private approvalStateFromEvent(event: Extract<AgentEvent, { type: "approval.requested" }>): ApprovalState {
+    return this.hydrateApprovalFileSummary({
+      approvalId: event.approvalId,
+      runId: event.runId,
+      provider: this.requireRun(event.runId).provider,
+      approvalType: event.approvalType ?? "unknown",
+      status: "pending",
+      prompt: event.prompt,
+      threadId: event.threadId ?? null,
+      turnId: event.turnId ?? null,
+      itemId: event.itemId ?? null,
+      reason: event.reason ?? null,
+      command: event.command ?? null,
+      cwd: event.cwd ?? null,
+      fileSummary: event.fileSummary ?? null,
+      availableDecisions: event.availableDecisions ?? [],
+      decision: null,
+      requestedAt: event.timestamp,
+      resolvedAt: null,
+    });
   }
 
   private requestApproval(
@@ -2105,7 +2352,7 @@ export class SymphoniaDaemon {
   }
 
   private serializeApproval(approval: ApprovalRecord): ApprovalState {
-    return {
+    return this.hydrateApprovalFileSummary({
       approvalId: approval.approvalId,
       runId: approval.runId,
       provider: approval.provider,
@@ -2123,6 +2370,14 @@ export class SymphoniaDaemon {
       decision: approval.decision,
       requestedAt: approval.requestedAt,
       resolvedAt: approval.resolvedAt,
+    });
+  }
+
+  private hydrateApprovalFileSummary(approval: ApprovalState): ApprovalState {
+    if (approval.fileSummary || approval.approvalType !== "file_change") return approval;
+    return {
+      ...approval,
+      fileSummary: this.getFileSummaryEvidence(approval.runId).fileSummary,
     };
   }
 
@@ -2848,6 +3103,88 @@ export function startDaemon(port = Number(process.env.SYMPHONIA_DAEMON_PORT ?? d
 
 export function isDaemonEntrypoint(metaUrl: string): boolean {
   return metaUrl === pathToFileURL(process.argv[1] ?? "").href;
+}
+
+function formatDiffSummary(diff: DiffSummary): string {
+  const files = diff.files.slice(0, 5).map((file) => file.path);
+  const remaining = Math.max(0, diff.filesChanged - files.length);
+  const fileList = files.length > 0 ? `: ${files.join(", ")}${remaining > 0 ? `, and ${remaining} more` : ""}` : "";
+  const noun = diff.filesChanged === 1 ? "file" : "files";
+  return `${diff.filesChanged} changed ${noun}, +${diff.additions} -${diff.deletions}${fileList}.`;
+}
+
+function truncateText(value: string, maxLength: number): string {
+  if (value.length <= maxLength) return value;
+  return `${value.slice(0, maxLength)}...`;
+}
+
+function isProviderEvent(event: AgentEvent): boolean {
+  return event.type.startsWith("codex.") || event.type.startsWith("claude.") || event.type.startsWith("cursor.") || event.type === "provider.started" || event.type === "provider.stderr";
+}
+
+function isProviderErrorEvent(event: AgentEvent): boolean {
+  return event.type.endsWith(".error") || event.type === "provider.stderr";
+}
+
+function writeAvailability(input: {
+  provider: WriteActionAvailability["provider"];
+  kind: IntegrationWriteKind;
+  label: string;
+  policy: IntegrationWritePolicy | null;
+  evidenceMissing: string[];
+}): WriteActionAvailability {
+  const evidenceRequired = ["terminal run", "workspace path", "review artifact", "file-change summary"];
+  const reasons: string[] = [];
+  let status: WriteActionAvailability["status"] = "gated";
+
+  if (!input.policy) {
+    return {
+      provider: input.provider,
+      kind: input.kind,
+      label: input.label,
+      status: "unavailable",
+      reasons: ["Write policy could not be loaded."],
+      evidenceRequired,
+    };
+  }
+
+  if (input.policy.readOnly) {
+    status = "read_only";
+    reasons.push(`${providerLabel(input.provider)} read_only is true.`);
+  }
+  if (!input.policy.enabled) {
+    status = status === "read_only" ? status : "disabled";
+    reasons.push(`${providerLabel(input.provider)} writes are disabled.`);
+  }
+  if (!input.policy.allowedKinds.includes(input.kind)) {
+    status = status === "read_only" || status === "disabled" ? status : "gated";
+    reasons.push(`${input.label} is not enabled in WORKFLOW.md.`);
+  }
+  if (input.evidenceMissing.length > 0) {
+    status = status === "read_only" || status === "disabled" ? status : "unavailable";
+    reasons.push(...input.evidenceMissing);
+  }
+  if (reasons.length === 0 && input.policy.requireConfirmation) {
+    status = "gated";
+    reasons.push(`Manual confirmation phrase is required: ${input.policy.confirmationPhrase}.`);
+  }
+  if (reasons.length === 0) {
+    status = input.policy.allowAutomatic ? "enabled" : "gated";
+    reasons.push("Policy permits this action only after explicit review.");
+  }
+
+  return {
+    provider: input.provider,
+    kind: input.kind,
+    label: input.label,
+    status,
+    reasons: [...new Set(reasons)],
+    evidenceRequired,
+  };
+}
+
+function providerLabel(provider: WriteActionAvailability["provider"]): string {
+  return provider === "github" ? "GitHub" : "Linear";
 }
 
 type ConnectedReadinessStatus = ConnectedGoldenPathStatus["linear"]["status"];
