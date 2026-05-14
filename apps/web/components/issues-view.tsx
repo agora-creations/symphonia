@@ -7,6 +7,8 @@ import { UserAvatar } from "@/components/avatar-stack";
 import { cn } from "@/lib/utils";
 import { CheckCircle2, ExternalLink, FileDiff, Filter, GitBranch, GitPullRequest, LayoutGrid, List, Plus, RefreshCw, SlidersHorizontal, X } from "lucide-react";
 import {
+  createGithubPr,
+  createLinearComment,
   executeWorkspaceCleanup,
   getDaemonStatus,
   getGithubStatus,
@@ -17,12 +19,16 @@ import {
   getRunEventStreamUrl,
   getRunEvents,
   getRunPrompt,
+  getRunWriteActions,
   getRuns,
   getTrackerStatus,
   getWorkspace,
   getWorkspaceCleanupPlan,
   getWorkspaceInventory,
+  getWritesStatus,
   getWorkflowStatus,
+  previewGithubPr,
+  previewLinearComment,
   refreshReviewArtifacts,
   refreshIssues,
   refreshWorkspaceInventory,
@@ -43,6 +49,9 @@ import {
   type IssuePriority,
   type IssueState,
   type GitHubStatus,
+  type IntegrationWritePolicy,
+  type IntegrationWritePreview,
+  type IntegrationWriteResult,
   type ProviderHealth,
   type ProviderId,
   type ReviewArtifactSnapshot,
@@ -50,6 +59,7 @@ import {
   type RunStatus,
   type TrackerStatus,
   type WorkflowStatus,
+  type WritesStatus,
   type WorkspaceInfo,
   type WorkspaceCleanupPlan,
   type WorkspaceCleanupResult,
@@ -1001,6 +1011,13 @@ function RunDetailsCard({
             run={run ?? null}
           />
 
+          <WriteActionsPanel
+            issue={issue}
+            onRefreshReviewArtifacts={onRefreshReviewArtifacts}
+            reviewArtifacts={reviewArtifacts}
+            run={run ?? null}
+          />
+
           {pendingApprovals.length > 0 && (
             <section aria-labelledby="approvals-heading" className="mt-6">
               <h3 id="approvals-heading" className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
@@ -1219,6 +1236,424 @@ function ReviewArtifactsPanel({
       )}
     </section>
   );
+}
+
+function WriteActionsPanel({
+  issue,
+  onRefreshReviewArtifacts,
+  reviewArtifacts,
+  run,
+}: {
+  issue: Issue;
+  onRefreshReviewArtifacts: (run: Run) => Promise<void>;
+  reviewArtifacts: ReviewArtifactSnapshot | null;
+  run: Run | null;
+}) {
+  const [status, setStatus] = useState<WritesStatus | null>(null);
+  const [history, setHistory] = useState<Array<IntegrationWritePreview | IntegrationWriteResult>>([]);
+  const [githubPreview, setGithubPreview] = useState<IntegrationWritePreview | null>(null);
+  const [linearPreview, setLinearPreview] = useState<IntegrationWritePreview | null>(null);
+  const [githubConfirmation, setGithubConfirmation] = useState("");
+  const [linearConfirmation, setLinearConfirmation] = useState("");
+  const [githubResult, setGithubResult] = useState<IntegrationWriteResult | null>(null);
+  const [linearResult, setLinearResult] = useState<IntegrationWriteResult | null>(null);
+  const [error, setError] = useState<string | null>(null);
+  const [busyAction, setBusyAction] = useState<"github-preview" | "github-create" | "linear-preview" | "linear-create" | null>(null);
+
+  const loadHistory = useCallback(async () => {
+    if (!run) {
+      setHistory([]);
+      return;
+    }
+    setHistory(await getRunWriteActions(run.id));
+  }, [run]);
+
+  useEffect(() => {
+    setGithubPreview(null);
+    setLinearPreview(null);
+    setGithubConfirmation("");
+    setLinearConfirmation("");
+    setGithubResult(null);
+    setLinearResult(null);
+    setError(null);
+    void Promise.all([getWritesStatus(), run ? getRunWriteActions(run.id) : Promise.resolve([])])
+      .then(([loadedStatus, loadedHistory]) => {
+        setStatus(loadedStatus);
+        setHistory(loadedHistory);
+      })
+      .catch((caught) => {
+        setError(caught instanceof Error ? caught.message : "Failed to load write actions.");
+      });
+  }, [run]);
+
+  const handleGithubPreview = useCallback(async () => {
+    if (!run) return;
+    try {
+      setBusyAction("github-preview");
+      setError(null);
+      setGithubResult(null);
+      const preview = await previewGithubPr(run.id);
+      setGithubPreview(preview);
+      setGithubConfirmation("");
+      await loadHistory();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Failed to preview GitHub PR.");
+    } finally {
+      setBusyAction(null);
+    }
+  }, [loadHistory, run]);
+
+  const handleGithubCreate = useCallback(async () => {
+    if (!run || !githubPreview) return;
+    try {
+      setBusyAction("github-create");
+      setError(null);
+      const result = await createGithubPr(run.id, {
+        previewId: githubPreview.id,
+        confirmation: githubConfirmation,
+        dryRun: false,
+        idempotencyKey: `${githubPreview.id}:create`,
+      });
+      setGithubResult(result);
+      await loadHistory();
+      if (result.status === "succeeded") {
+        await onRefreshReviewArtifacts(run);
+      }
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Failed to create GitHub PR.");
+    } finally {
+      setBusyAction(null);
+    }
+  }, [githubConfirmation, githubPreview, loadHistory, onRefreshReviewArtifacts, run]);
+
+  const handleLinearPreview = useCallback(async () => {
+    if (!run) return;
+    try {
+      setBusyAction("linear-preview");
+      setError(null);
+      setLinearResult(null);
+      const preview = await previewLinearComment(run.id);
+      setLinearPreview(preview);
+      setLinearConfirmation("");
+      await loadHistory();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Failed to preview Linear comment.");
+    } finally {
+      setBusyAction(null);
+    }
+  }, [loadHistory, run]);
+
+  const handleLinearCreate = useCallback(async () => {
+    if (!run || !linearPreview) return;
+    try {
+      setBusyAction("linear-create");
+      setError(null);
+      const result = await createLinearComment(run.id, {
+        previewId: linearPreview.id,
+        confirmation: linearConfirmation,
+        dryRun: false,
+        idempotencyKey: `${linearPreview.id}:create`,
+      });
+      setLinearResult(result);
+      await loadHistory();
+    } catch (caught) {
+      setError(caught instanceof Error ? caught.message : "Failed to post Linear comment.");
+    } finally {
+      setBusyAction(null);
+    }
+  }, [linearConfirmation, linearPreview, loadHistory, run]);
+
+  return (
+    <section aria-labelledby="write-actions-heading" className="mt-6">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h3 id="write-actions-heading" className="text-[11px] font-medium uppercase tracking-wider text-muted-foreground">
+            Write actions
+          </h3>
+          <p className="mt-1 text-xs text-muted-foreground">
+            Preview, confirm, and audit external writes for {issue.key}. Writes remain disabled until WORKFLOW.md explicitly enables them.
+          </p>
+        </div>
+        {run && (
+          <button
+            type="button"
+            onClick={() => void loadHistory()}
+            className="inline-flex items-center gap-1.5 rounded-md border px-2 py-1 text-xs font-medium hover:bg-muted"
+          >
+            <RefreshCw className="h-3.5 w-3.5" />
+            Refresh history
+          </button>
+        )}
+      </div>
+
+      {!run ? (
+        <p className="mt-3 rounded-md border p-3 text-sm text-muted-foreground">Start or select a run before preparing GitHub or Linear writes.</p>
+      ) : (
+        <div className="mt-3 space-y-3">
+          {error && (
+            <p role="alert" className="rounded-md border border-red-500/30 bg-red-500/10 p-3 text-sm text-red-600 dark:text-red-300">
+              {error}
+            </p>
+          )}
+
+          <div className="grid gap-3 md:grid-cols-2">
+            <WriteProviderCard
+              actionButtonLabel={busyAction === "github-preview" ? "Preparing preview..." : "Preview PR"}
+              busy={busyAction === "github-preview" || busyAction === "github-create"}
+              confirmation={githubConfirmation}
+              createButtonLabel={busyAction === "github-create" ? "Creating PR..." : "Create draft PR"}
+              onConfirmChange={setGithubConfirmation}
+              onCreate={handleGithubCreate}
+              onPreview={handleGithubPreview}
+              policy={status?.github ?? null}
+              preview={githubPreview}
+              result={githubResult}
+              title="GitHub draft PR"
+            />
+            <WriteProviderCard
+              actionButtonLabel={busyAction === "linear-preview" ? "Preparing preview..." : "Preview Linear comment"}
+              busy={busyAction === "linear-preview" || busyAction === "linear-create"}
+              confirmation={linearConfirmation}
+              createButtonLabel={busyAction === "linear-create" ? "Posting comment..." : "Post Linear comment"}
+              onConfirmChange={setLinearConfirmation}
+              onCreate={handleLinearCreate}
+              onPreview={handleLinearPreview}
+              policy={status?.linear ?? null}
+              preview={linearPreview}
+              result={linearResult}
+              title="Linear run comment"
+            />
+          </div>
+
+          <div className="rounded-md border">
+            <div className="flex items-center justify-between border-b px-3 py-2">
+              <h4 className="text-sm font-medium">Write history</h4>
+              <span className="text-xs text-muted-foreground">{history.length}</span>
+            </div>
+            {history.length === 0 ? (
+              <p className="p-3 text-sm text-muted-foreground">No write previews or executions have been recorded for this run.</p>
+            ) : (
+              <ul className="divide-y">
+                {history.slice(0, 20).map((action) => (
+                  <li key={action.id} className="p-3 text-sm">
+                    <div className="flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-medium">{writeActionLabel(action)}</span>
+                      <span className={cn("rounded-full border px-2 py-0.5 text-[11px]", writeStatusClass(action.status))}>
+                        {action.status.replaceAll("_", " ")}
+                      </span>
+                    </div>
+                    <div className="mt-1 flex flex-wrap gap-2 text-xs text-muted-foreground">
+                      <span>{action.provider}</span>
+                      <span>{action.kind.replaceAll("_", " ")}</span>
+                      <span>{formatTime("executedAt" in action ? action.executedAt : action.createdAt)}</span>
+                      {"externalUrl" in action && action.externalUrl && (
+                        <a href={action.externalUrl} target="_blank" rel="noreferrer" className="inline-flex items-center gap-1 hover:text-foreground">
+                          Open result <ExternalLink className="h-3 w-3" />
+                        </a>
+                      )}
+                    </div>
+                  </li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          {reviewArtifacts?.pr && (
+            <p className="rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-700 dark:text-emerald-300">
+              GitHub review artifacts already detected PR #{reviewArtifacts.pr.number}; new PR creation previews will block duplicates.
+            </p>
+          )}
+        </div>
+      )}
+    </section>
+  );
+}
+
+function WriteProviderCard({
+  actionButtonLabel,
+  busy,
+  confirmation,
+  createButtonLabel,
+  onConfirmChange,
+  onCreate,
+  onPreview,
+  policy,
+  preview,
+  result,
+  title,
+}: {
+  actionButtonLabel: string;
+  busy: boolean;
+  confirmation: string;
+  createButtonLabel: string;
+  onConfirmChange: (value: string) => void;
+  onCreate: () => Promise<void>;
+  onPreview: () => Promise<void>;
+  policy: IntegrationWritePolicy | null;
+  preview: IntegrationWritePreview | null;
+  result: IntegrationWriteResult | null;
+  title: string;
+}) {
+  const blocked = (preview?.blockers.length ?? 0) > 0;
+  const confirmationMatches = preview ? confirmation === preview.confirmationPhrase : false;
+
+  return (
+    <div className="rounded-md border p-3">
+      <div className="flex flex-wrap items-start justify-between gap-2">
+        <div>
+          <h4 className="text-sm font-medium">{title}</h4>
+          <p className="mt-1 text-xs text-muted-foreground">{writePolicyText(policy)}</p>
+        </div>
+        <button
+          type="button"
+          onClick={() => void onPreview()}
+          disabled={busy}
+          className="inline-flex items-center rounded-md border px-2 py-1 text-xs font-medium hover:bg-muted disabled:cursor-not-allowed disabled:opacity-60"
+        >
+          {actionButtonLabel}
+        </button>
+      </div>
+
+      {preview && (
+        <div className="mt-3 space-y-3">
+          <dl className="grid gap-2 text-xs sm:grid-cols-2">
+            <div>
+              <dt className="text-muted-foreground">Credential source</dt>
+              <dd className="mt-1 font-medium">{preview.credentialSource}</dd>
+            </div>
+            <div>
+              <dt className="text-muted-foreground">Target</dt>
+              <dd className="mt-1 break-all font-medium">{writeTargetLabel(preview)}</dd>
+            </div>
+          </dl>
+
+          {preview.blockers.length > 0 && (
+            <StatusList title="Blockers" tone="danger" items={preview.blockers} />
+          )}
+          {preview.warnings.length > 0 && (
+            <StatusList title="Warnings" tone="warning" items={preview.warnings} />
+          )}
+
+          <div className="rounded-md border bg-background">
+            <div className="border-b px-3 py-2 text-xs font-medium">Preview body</div>
+            <pre className="max-h-64 overflow-auto whitespace-pre-wrap p-3 text-xs leading-5 text-muted-foreground">{preview.bodyPreview || "No body generated."}</pre>
+          </div>
+
+          {preview.githubPr && (
+            <dl className="grid gap-2 text-xs sm:grid-cols-2">
+              <div>
+                <dt className="text-muted-foreground">PR title</dt>
+                <dd className="mt-1 break-words font-medium">{preview.githubPr.title}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">Branch</dt>
+                <dd className="mt-1 break-all font-medium">
+                  {preview.githubPr.headBranch ?? "unknown"} → {preview.githubPr.baseBranch}
+                </dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">Draft</dt>
+                <dd className="mt-1 font-medium">{preview.githubPr.draft ? "yes" : "no"}</dd>
+              </div>
+              <div>
+                <dt className="text-muted-foreground">Changed files</dt>
+                <dd className="mt-1 font-medium">
+                  {preview.githubPr.changedFilesSummary.filesChanged} files, +{preview.githubPr.changedFilesSummary.additions} -{preview.githubPr.changedFilesSummary.deletions}
+                </dd>
+              </div>
+            </dl>
+          )}
+
+          {!blocked && (
+            <div className="space-y-2">
+              <label className="block text-xs font-medium" htmlFor={`${preview.id}-confirmation`}>
+                Type {preview.confirmationPhrase} to confirm
+              </label>
+              <input
+                id={`${preview.id}-confirmation`}
+                value={confirmation}
+                onChange={(event) => onConfirmChange(event.target.value)}
+                className="w-full rounded-md border bg-background px-3 py-2 text-sm"
+                autoComplete="off"
+              />
+              <button
+                type="button"
+                onClick={() => void onCreate()}
+                disabled={busy || !confirmationMatches}
+                className="inline-flex items-center rounded-md bg-primary px-3 py-1.5 text-sm font-medium text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-60"
+              >
+                {createButtonLabel}
+              </button>
+            </div>
+          )}
+        </div>
+      )}
+
+      {result && (
+        <p className={cn("mt-3 rounded-md border p-3 text-xs", result.status === "succeeded" ? "border-emerald-500/30 bg-emerald-500/10 text-emerald-700 dark:text-emerald-300" : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300")}>
+          {result.status === "succeeded" ? "Write succeeded." : result.errors.join("; ")}
+          {result.externalUrl && (
+            <a href={result.externalUrl} target="_blank" rel="noreferrer" className="ml-2 inline-flex items-center gap-1 font-medium underline">
+              Open result <ExternalLink className="h-3 w-3" />
+            </a>
+          )}
+        </p>
+      )}
+    </div>
+  );
+}
+
+function StatusList({ items, title, tone }: { items: string[]; title: string; tone: "danger" | "warning" }) {
+  return (
+    <div className={cn("rounded-md border p-3 text-xs", tone === "danger" ? "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300" : "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300")}>
+      <p className="font-medium">{title}</p>
+      <ul className="mt-2 list-disc space-y-1 pl-4">
+        {items.map((item) => (
+          <li key={item}>{item}</li>
+        ))}
+      </ul>
+    </div>
+  );
+}
+
+function writePolicyText(policy: IntegrationWritePolicy | null): string {
+  if (!policy) return "Policy not loaded.";
+  if (policy.readOnly) return "Read-only is enabled; writes are blocked.";
+  if (!policy.enabled) return "Writes are disabled by policy.";
+  if (policy.allowedKinds.length === 0) return "No write action kind is enabled.";
+  return `Enabled for ${policy.allowedKinds.map((kind) => kind.replaceAll("_", " ")).join(", ")}; confirmation required.`;
+}
+
+function writeTargetLabel(preview: IntegrationWritePreview): string {
+  if (preview.provider === "github") {
+    const repo = preview.target.owner && preview.target.repo ? `${preview.target.owner}/${preview.target.repo}` : "GitHub repository";
+    const branch = preview.target.branch ? ` on ${preview.target.branch}` : "";
+    return `${repo}${branch}`;
+  }
+  return preview.target.issueIdentifier ?? preview.issueIdentifier ?? "Linear issue";
+}
+
+function writeActionLabel(action: IntegrationWritePreview | IntegrationWriteResult): string {
+  if ("executedAt" in action) {
+    return action.externalUrl ? `${action.kind.replaceAll("_", " ")} result` : `${action.kind.replaceAll("_", " ")} attempt`;
+  }
+  return action.title;
+}
+
+function writeStatusClass(status: IntegrationWritePreview["status"]) {
+  switch (status) {
+    case "succeeded":
+      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300";
+    case "blocked":
+    case "failed":
+      return "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300";
+    case "executing":
+    case "pending_confirmation":
+    case "previewed":
+      return "border-blue-500/30 bg-blue-500/10 text-blue-600 dark:text-blue-300";
+    case "cancelled":
+      return "border-amber-500/30 bg-amber-500/10 text-amber-600 dark:text-amber-300";
+  }
 }
 
 function ArtifactStatusList({
@@ -1824,6 +2259,38 @@ function eventLabel(event: AgentEvent) {
       return "Review artifacts refreshed";
     case "github.error":
       return "GitHub error";
+    case "integration.write.previewed":
+      return "Write previewed";
+    case "integration.write.blocked":
+      return "Write blocked";
+    case "integration.write.confirmation_required":
+      return "Write confirmation required";
+    case "integration.write.started":
+      return "Write started";
+    case "integration.write.succeeded":
+      return "Write succeeded";
+    case "integration.write.failed":
+      return "Write failed";
+    case "integration.write.cancelled":
+      return "Write cancelled";
+    case "github.pr.previewed":
+      return "GitHub PR previewed";
+    case "github.pr.create_failed":
+      return "GitHub PR creation failed";
+    case "github.branch.push.previewed":
+      return "GitHub branch push previewed";
+    case "github.branch.push_started":
+      return "GitHub branch push started";
+    case "github.branch.push_succeeded":
+      return "GitHub branch push succeeded";
+    case "github.branch.push_failed":
+      return "GitHub branch push failed";
+    case "linear.comment.previewed":
+      return "Linear comment previewed";
+    case "linear.comment.created":
+      return "Linear comment created";
+    case "linear.comment.create_failed":
+      return "Linear comment failed";
     case "codex.thread.started":
       return "Codex thread started";
     case "codex.turn.started":
@@ -1959,6 +2426,37 @@ function eventSummary(event: AgentEvent) {
       return `${event.snapshot.diff.filesChanged} changed files. Last refreshed ${formatTime(event.snapshot.lastRefreshedAt)}.`;
     case "github.error":
       return `${event.operation}: ${event.message}`;
+    case "integration.write.previewed":
+    case "integration.write.blocked":
+      return `${event.preview.title}\n${event.preview.blockers.length} blockers · ${event.preview.warnings.length} warnings`;
+    case "integration.write.confirmation_required":
+      return `${event.provider} ${event.kind.replaceAll("_", " ")} requires confirmation.`;
+    case "integration.write.started":
+      return `${event.provider} ${event.kind.replaceAll("_", " ")} started.`;
+    case "integration.write.succeeded":
+      return [event.result.externalUrl ?? event.result.externalId, event.result.warnings.join("\n")].filter(Boolean).join("\n");
+    case "integration.write.failed":
+      return event.error;
+    case "integration.write.cancelled":
+      return event.reason;
+    case "github.pr.previewed":
+      return `${event.preview.title}\n${event.preview.headBranch ?? "unknown"} -> ${event.preview.baseBranch}`;
+    case "github.pr.create_failed":
+      return event.error;
+    case "github.branch.push.previewed":
+      return `${event.preview.branch}\n${event.preview.blockers.join("\n")}`;
+    case "github.branch.push_started":
+      return event.branch;
+    case "github.branch.push_succeeded":
+      return `${event.branch}\n${shortSha(event.headSha)}`;
+    case "github.branch.push_failed":
+      return `${event.branch ?? "unknown branch"}\n${event.error}`;
+    case "linear.comment.previewed":
+      return `${event.preview.issueIdentifier}\n${event.preview.body}`;
+    case "linear.comment.created":
+      return `${event.result.id}\n${event.result.url ?? "No URL returned"}`;
+    case "linear.comment.create_failed":
+      return event.error;
     case "codex.thread.started":
       return [`thread ${event.threadId}`, event.model ? `model ${event.model}` : null, event.cwd ? `cwd ${event.cwd}` : null]
         .filter(Boolean)

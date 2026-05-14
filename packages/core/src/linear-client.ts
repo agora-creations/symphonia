@@ -109,6 +109,26 @@ const LinearViewerResponseSchema = z.object({
   viewer: LinearViewerSchema,
 });
 
+const LinearCommentCreateResponseSchema = z.object({
+  commentCreate: z.object({
+    success: z.boolean(),
+    comment: z
+      .object({
+        id: z.string().nullable().optional(),
+        url: z.string().nullable().optional(),
+        createdAt: z.string().nullable().optional(),
+      })
+      .nullable()
+      .optional(),
+  }),
+});
+
+export type LinearCommentCreateResult = {
+  id: string;
+  url: string | null;
+  createdAt: string | null;
+};
+
 export type LinearIssuesPage = {
   nodes: LinearIssueNode[];
   hasNextPage: boolean;
@@ -251,16 +271,28 @@ export class LinearGraphqlClient {
     return LinearIssueResponseSchema.parse(data).issue;
   }
 
-  async createComment(issueId: string, body: string, signal?: AbortSignal): Promise<void> {
-    await this.request(
+  async createComment(issueId: string, body: string, signal?: AbortSignal): Promise<LinearCommentCreateResult> {
+    const data = await this.request(
       `mutation SymphoniaLinearCommentCreate($issueId: String!, $body: String!) {
         commentCreate(input: { issueId: $issueId, body: $body }) {
           success
+          comment {
+            id
+            url
+            createdAt
+          }
         }
       }`,
       { issueId, body },
       signal,
     );
+    const payload = LinearCommentCreateResponseSchema.parse(data).commentCreate;
+    if (!payload.success) throw new LinearClientError("Linear commentCreate returned success=false.", "graphql");
+    return {
+      id: payload.comment?.id ?? `comment-${Date.now()}`,
+      url: payload.comment?.url ?? null,
+      createdAt: payload.comment?.createdAt ?? null,
+    };
   }
 
   async updateIssueState(issueId: string, stateId: string, signal?: AbortSignal): Promise<void> {

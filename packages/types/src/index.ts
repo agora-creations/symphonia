@@ -218,11 +218,18 @@ export const ArtifactEventSchema = BaseAgentEventSchema.extend({
 
 export const TrackerWriteConfigSchema = z.object({
   enabled: z.boolean(),
+  requireConfirmation: z.boolean().default(true),
+  allowAutomatic: z.boolean().default(false),
+  allowComments: z.boolean().default(false),
+  allowStateTransitions: z.boolean().default(false),
   commentOnRunStart: z.boolean(),
   commentOnRunComplete: z.boolean(),
   moveToStateOnStart: z.string().min(1).nullable(),
   moveToStateOnSuccess: z.string().min(1).nullable(),
   moveToStateOnFailure: z.string().min(1).nullable(),
+  runCommentTemplate: z.string().default("Symphonia run update for {{ issue.identifier }}."),
+  confirmationPhrase: z.string().min(1).default("POST LINEAR COMMENT"),
+  maxBodyLength: z.number().int().positive().default(12_000),
 });
 export type TrackerWriteConfig = z.infer<typeof TrackerWriteConfigSchema>;
 
@@ -370,12 +377,18 @@ export type CursorConfig = z.infer<typeof CursorConfigSchema>;
 
 export const GitHubWriteConfigSchema = z.object({
   enabled: z.boolean(),
+  requireConfirmation: z.boolean().default(true),
+  allowAutomatic: z.boolean().default(false),
   allowPush: z.boolean(),
   allowCreatePr: z.boolean(),
   allowUpdatePr: z.boolean(),
   allowComment: z.boolean(),
   allowRequestReviewers: z.boolean(),
   draftPrByDefault: z.boolean(),
+  protectedBranches: z.array(z.string().min(1)).default(["main", "master", "production"]),
+  confirmationPhrase: z.string().min(1).default("CREATE GITHUB PR"),
+  maxTitleLength: z.number().int().positive().default(240),
+  maxBodyLength: z.number().int().positive().default(60_000),
   prTitleTemplate: z.string(),
   prBodyTemplate: z.string(),
 });
@@ -579,6 +592,25 @@ export const WorkflowConfigSummarySchema = z.object({
   pollIntervalMs: z.number().int().positive().nullable(),
   readOnly: z.boolean(),
   writeEnabled: z.boolean(),
+  write: z
+    .object({
+      enabled: z.boolean(),
+      requireConfirmation: z.boolean(),
+      allowAutomatic: z.boolean(),
+      allowComments: z.boolean(),
+      allowStateTransitions: z.boolean(),
+      commentOnRunStart: z.boolean(),
+      commentOnRunComplete: z.boolean(),
+    })
+    .default({
+      enabled: false,
+      requireConfirmation: true,
+      allowAutomatic: false,
+      allowComments: false,
+      allowStateTransitions: false,
+      commentOnRunStart: false,
+      commentOnRunComplete: false,
+    }),
   workspaceRoot: z.string().min(1),
   workspaceCleanup: z.object({
     enabled: z.boolean(),
@@ -647,6 +679,11 @@ export const WorkflowConfigSummarySchema = z.object({
     readOnly: z.boolean(),
     writeEnabled: z.boolean(),
     allowCreatePr: z.boolean(),
+    allowPush: z.boolean().default(false),
+    allowComment: z.boolean().default(false),
+    draftPrByDefault: z.boolean().default(true),
+    requireConfirmation: z.boolean().default(true),
+    protectedBranches: z.array(z.string().min(1)).default(["main", "master", "production"]),
     tokenConfigured: z.boolean(),
     pageSize: z.number().int().positive(),
     maxPages: z.number().int().positive(),
@@ -1032,6 +1069,176 @@ export const ReviewArtifactSnapshotSchema = z.object({
 });
 export type ReviewArtifactSnapshot = z.infer<typeof ReviewArtifactSnapshotSchema>;
 
+export const IntegrationWriteProviderSchema = z.enum(["github", "linear"]);
+export type IntegrationWriteProvider = z.infer<typeof IntegrationWriteProviderSchema>;
+
+export const IntegrationWriteKindSchema = z.enum([
+  "github_pr_create",
+  "github_branch_push",
+  "github_issue_comment",
+  "linear_comment_create",
+]);
+export type IntegrationWriteKind = z.infer<typeof IntegrationWriteKindSchema>;
+
+export const IntegrationWriteStatusSchema = z.enum([
+  "previewed",
+  "blocked",
+  "pending_confirmation",
+  "executing",
+  "succeeded",
+  "failed",
+  "cancelled",
+]);
+export type IntegrationWriteStatus = z.infer<typeof IntegrationWriteStatusSchema>;
+
+export const IntegrationWriteTargetSchema = z.object({
+  provider: IntegrationWriteProviderSchema,
+  owner: z.string().min(1).nullable().default(null),
+  repo: z.string().min(1).nullable().default(null),
+  issueId: z.string().min(1).nullable().default(null),
+  issueIdentifier: z.string().min(1).nullable().default(null),
+  branch: z.string().min(1).nullable().default(null),
+  baseBranch: z.string().min(1).nullable().default(null),
+  url: z.string().url().nullable().default(null),
+});
+export type IntegrationWriteTarget = z.infer<typeof IntegrationWriteTargetSchema>;
+
+export const IntegrationWritePolicySchema = z.object({
+  provider: IntegrationWriteProviderSchema,
+  enabled: z.boolean(),
+  readOnly: z.boolean(),
+  requireConfirmation: z.boolean(),
+  allowAutomatic: z.boolean(),
+  allowedKinds: z.array(IntegrationWriteKindSchema),
+  protectedBranches: z.array(z.string().min(1)),
+  confirmationPhrase: z.string().min(1),
+  maxBodyLength: z.number().int().positive(),
+  maxTitleLength: z.number().int().positive().nullable(),
+});
+export type IntegrationWritePolicy = z.infer<typeof IntegrationWritePolicySchema>;
+
+const IntegrationWriteBaseSchema = z.object({
+  id: z.string().min(1),
+  provider: IntegrationWriteProviderSchema,
+  kind: IntegrationWriteKindSchema,
+  runId: z.string().min(1),
+  issueId: z.string().min(1).nullable(),
+  issueIdentifier: z.string().min(1).nullable(),
+  status: IntegrationWriteStatusSchema,
+  title: z.string().min(1),
+  summary: z.string().min(1),
+  bodyPreview: z.string(),
+  target: IntegrationWriteTargetSchema,
+  credentialSource: AuthCredentialSourceSchema,
+  requiredPermissions: z.array(z.string().min(1)),
+  warnings: z.array(z.string().min(1)),
+  blockers: z.array(z.string().min(1)),
+  confirmationRequired: z.boolean(),
+  confirmationPhrase: z.string().min(1),
+  createdAt: isoDateTime,
+  expiresAt: isoDateTime,
+});
+
+export const GitHubPrCreatePreviewSchema = z.object({
+  runId: z.string().min(1),
+  owner: z.string().min(1).nullable(),
+  repo: z.string().min(1).nullable(),
+  baseBranch: z.string().min(1),
+  headBranch: z.string().min(1).nullable(),
+  headSha: z.string().min(1).nullable(),
+  title: z.string().min(1),
+  body: z.string(),
+  draft: z.boolean(),
+  existingPr: PullRequestSummarySchema.nullable(),
+  changedFilesSummary: DiffSummarySchema,
+  blockers: z.array(z.string().min(1)),
+  warnings: z.array(z.string().min(1)),
+});
+export type GitHubPrCreatePreview = z.infer<typeof GitHubPrCreatePreviewSchema>;
+
+export const GitHubPrCreateResultSchema = z.object({
+  number: z.number().int().positive(),
+  id: z.number().int().nonnegative(),
+  url: z.string().url(),
+  state: z.string().min(1),
+  draft: z.boolean(),
+  title: z.string(),
+  baseBranch: z.string().min(1),
+  headBranch: z.string().min(1),
+  createdAt: isoDateTime,
+});
+export type GitHubPrCreateResult = z.infer<typeof GitHubPrCreateResultSchema>;
+
+export const GitHubBranchPushPreviewSchema = z.object({
+  runId: z.string().min(1),
+  workspacePath: z.string().min(1).nullable(),
+  remoteName: z.string().min(1),
+  branch: z.string().min(1).nullable(),
+  headSha: z.string().min(1).nullable(),
+  upstreamExists: z.boolean().nullable(),
+  remoteBranchExists: z.boolean().nullable(),
+  protectedBranch: z.boolean(),
+  commandPreview: z.array(z.string().min(1)),
+  blockers: z.array(z.string().min(1)),
+  warnings: z.array(z.string().min(1)),
+});
+export type GitHubBranchPushPreview = z.infer<typeof GitHubBranchPushPreviewSchema>;
+
+export const LinearCommentPreviewSchema = z.object({
+  runId: z.string().min(1),
+  issueId: z.string().min(1).nullable(),
+  issueIdentifier: z.string().min(1).nullable(),
+  issueUrl: z.string().url().nullable(),
+  body: z.string(),
+  existingCommentHint: z.string().min(1).nullable(),
+  duplicateMarker: z.string().min(1),
+  blockers: z.array(z.string().min(1)),
+  warnings: z.array(z.string().min(1)),
+});
+export type LinearCommentPreview = z.infer<typeof LinearCommentPreviewSchema>;
+
+export const LinearCommentResultSchema = z.object({
+  id: z.string().min(1),
+  url: z.string().url().nullable(),
+  bodyPreview: z.string(),
+  createdAt: isoDateTime,
+});
+export type LinearCommentResult = z.infer<typeof LinearCommentResultSchema>;
+
+export const IntegrationWritePreviewSchema = IntegrationWriteBaseSchema.extend({
+  githubPr: GitHubPrCreatePreviewSchema.nullable().default(null),
+  githubBranchPush: GitHubBranchPushPreviewSchema.nullable().default(null),
+  linearComment: LinearCommentPreviewSchema.nullable().default(null),
+});
+export type IntegrationWritePreview = z.infer<typeof IntegrationWritePreviewSchema>;
+
+export const IntegrationWriteExecutionRequestSchema = z.object({
+  previewId: z.string().min(1),
+  confirmation: z.string().nullable().default(null),
+  dryRun: z.boolean().default(false),
+  idempotencyKey: z.string().min(1).nullable().default(null),
+});
+export type IntegrationWriteExecutionRequest = z.infer<typeof IntegrationWriteExecutionRequestSchema>;
+
+export const IntegrationWriteResultSchema = z.object({
+  id: z.string().min(1),
+  previewId: z.string().min(1),
+  provider: IntegrationWriteProviderSchema,
+  kind: IntegrationWriteKindSchema,
+  status: IntegrationWriteStatusSchema,
+  target: IntegrationWriteTargetSchema,
+  externalUrl: z.string().url().nullable(),
+  externalId: z.string().min(1).nullable(),
+  warnings: z.array(z.string().min(1)),
+  errors: z.array(z.string().min(1)),
+  executedAt: isoDateTime,
+  redactedRequestSummary: z.record(z.string(), z.unknown()),
+  redactedResponseSummary: z.record(z.string(), z.unknown()),
+  githubPr: GitHubPrCreateResultSchema.nullable().default(null),
+  linearComment: LinearCommentResultSchema.nullable().default(null),
+});
+export type IntegrationWriteResult = z.infer<typeof IntegrationWriteResultSchema>;
+
 export const HarnessGradeSchema = z.enum(["A", "B", "C", "D", "F"]);
 export type HarnessGrade = z.infer<typeof HarnessGradeSchema>;
 
@@ -1403,6 +1610,105 @@ export const GitHubErrorEventSchema = BaseAgentEventSchema.extend({
   status: z.number().int().positive().nullable().optional(),
 });
 
+export const IntegrationWritePreviewedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("integration.write.previewed"),
+  preview: IntegrationWritePreviewSchema,
+});
+
+export const IntegrationWriteBlockedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("integration.write.blocked"),
+  preview: IntegrationWritePreviewSchema,
+});
+
+export const IntegrationWriteConfirmationRequiredEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("integration.write.confirmation_required"),
+  previewId: z.string().min(1),
+  provider: IntegrationWriteProviderSchema,
+  kind: IntegrationWriteKindSchema,
+});
+
+export const IntegrationWriteStartedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("integration.write.started"),
+  previewId: z.string().min(1),
+  provider: IntegrationWriteProviderSchema,
+  kind: IntegrationWriteKindSchema,
+  target: IntegrationWriteTargetSchema,
+});
+
+export const IntegrationWriteSucceededEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("integration.write.succeeded"),
+  result: IntegrationWriteResultSchema,
+});
+
+export const IntegrationWriteFailedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("integration.write.failed"),
+  previewId: z.string().min(1),
+  provider: IntegrationWriteProviderSchema,
+  kind: IntegrationWriteKindSchema,
+  error: z.string().min(1),
+});
+
+export const IntegrationWriteCancelledEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("integration.write.cancelled"),
+  previewId: z.string().min(1),
+  provider: IntegrationWriteProviderSchema,
+  kind: IntegrationWriteKindSchema,
+  reason: z.string().min(1),
+});
+
+export const GitHubPrPreviewedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("github.pr.previewed"),
+  preview: GitHubPrCreatePreviewSchema,
+});
+
+export const GitHubPrCreateFailedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("github.pr.create_failed"),
+  previewId: z.string().min(1),
+  error: z.string().min(1),
+  status: z.number().int().positive().nullable().optional(),
+});
+
+export const GitHubBranchPushPreviewedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("github.branch.push.previewed"),
+  preview: GitHubBranchPushPreviewSchema,
+});
+
+export const GitHubBranchPushStartedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("github.branch.push_started"),
+  previewId: z.string().min(1),
+  branch: z.string().min(1),
+});
+
+export const GitHubBranchPushSucceededEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("github.branch.push_succeeded"),
+  previewId: z.string().min(1),
+  branch: z.string().min(1),
+  headSha: z.string().min(1).nullable(),
+});
+
+export const GitHubBranchPushFailedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("github.branch.push_failed"),
+  previewId: z.string().min(1),
+  branch: z.string().min(1).nullable(),
+  error: z.string().min(1),
+});
+
+export const LinearCommentPreviewedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("linear.comment.previewed"),
+  preview: LinearCommentPreviewSchema,
+});
+
+export const LinearCommentCreatedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("linear.comment.created"),
+  result: LinearCommentResultSchema,
+});
+
+export const LinearCommentCreateFailedEventSchema = BaseAgentEventSchema.extend({
+  type: z.literal("linear.comment.create_failed"),
+  previewId: z.string().min(1),
+  error: z.string().min(1),
+});
+
 export const TrackerSyncEventSchema = BaseAgentEventSchema.extend({
   type: z.literal("tracker.sync"),
   tracker: TrackerKindSchema,
@@ -1667,6 +1973,22 @@ export const AgentEventSchema = z.discriminatedUnion("type", [
   GitHubWorkflowRunsFetchedEventSchema,
   GitHubReviewArtifactsRefreshedEventSchema,
   GitHubErrorEventSchema,
+  IntegrationWritePreviewedEventSchema,
+  IntegrationWriteBlockedEventSchema,
+  IntegrationWriteConfirmationRequiredEventSchema,
+  IntegrationWriteStartedEventSchema,
+  IntegrationWriteSucceededEventSchema,
+  IntegrationWriteFailedEventSchema,
+  IntegrationWriteCancelledEventSchema,
+  GitHubPrPreviewedEventSchema,
+  GitHubPrCreateFailedEventSchema,
+  GitHubBranchPushPreviewedEventSchema,
+  GitHubBranchPushStartedEventSchema,
+  GitHubBranchPushSucceededEventSchema,
+  GitHubBranchPushFailedEventSchema,
+  LinearCommentPreviewedEventSchema,
+  LinearCommentCreatedEventSchema,
+  LinearCommentCreateFailedEventSchema,
   TrackerSyncEventSchema,
   TrackerReconciledEventSchema,
   CodexThreadStartedEventSchema,
@@ -1825,6 +2147,32 @@ export const ReviewArtifactResponseSchema = z.object({
   reviewArtifacts: ReviewArtifactSnapshotSchema.nullable(),
 });
 export type ReviewArtifactResponse = z.infer<typeof ReviewArtifactResponseSchema>;
+
+export const WritesStatusSchema = z.object({
+  github: IntegrationWritePolicySchema,
+  linear: IntegrationWritePolicySchema,
+});
+export type WritesStatus = z.infer<typeof WritesStatusSchema>;
+
+export const WritesStatusResponseSchema = z.object({
+  writes: WritesStatusSchema,
+});
+export type WritesStatusResponse = z.infer<typeof WritesStatusResponseSchema>;
+
+export const IntegrationWriteActionsResponseSchema = z.object({
+  writeActions: z.array(z.union([IntegrationWritePreviewSchema, IntegrationWriteResultSchema])),
+});
+export type IntegrationWriteActionsResponse = z.infer<typeof IntegrationWriteActionsResponseSchema>;
+
+export const IntegrationWritePreviewResponseSchema = z.object({
+  preview: IntegrationWritePreviewSchema,
+});
+export type IntegrationWritePreviewResponse = z.infer<typeof IntegrationWritePreviewResponseSchema>;
+
+export const IntegrationWriteResultResponseSchema = z.object({
+  result: IntegrationWriteResultSchema,
+});
+export type IntegrationWriteResultResponse = z.infer<typeof IntegrationWriteResultResponseSchema>;
 
 export const RunsResponseSchema = z.object({
   runs: z.array(RunSchema),

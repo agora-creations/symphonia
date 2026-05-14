@@ -6,7 +6,12 @@ import {
   AuthStartRequestSchema,
   AuthStartResultSchema,
   AuthValidationResultSchema,
+  GitHubPrCreatePreviewSchema,
   IntegrationAuthConnectionSchema,
+  IntegrationWriteExecutionRequestSchema,
+  IntegrationWritePreviewSchema,
+  IntegrationWriteResultSchema,
+  LinearCommentPreviewSchema,
   ReviewArtifactSnapshotSchema,
   HookRunSchema,
   HarnessApplyRequestSchema,
@@ -216,6 +221,114 @@ describe("shared schemas", () => {
         provider: "dropbox",
       }),
     ).toThrow();
+  });
+
+  it("parses write previews/results and rejects invalid write execution payloads", () => {
+    const githubPreview = GitHubPrCreatePreviewSchema.parse({
+      runId: "run-1",
+      owner: "agora-creations",
+      repo: "symphonia",
+      baseBranch: "main",
+      headBranch: "feature/SYM-1",
+      headSha: "abc123",
+      title: "SYM-1: Add write actions",
+      body: "Body",
+      draft: true,
+      existingPr: null,
+      changedFilesSummary: { filesChanged: 0, additions: 0, deletions: 0, files: [] },
+      blockers: [],
+      warnings: [],
+    });
+    expect(githubPreview.draft).toBe(true);
+
+    const linearPreview = LinearCommentPreviewSchema.parse({
+      runId: "run-1",
+      issueId: "issue-1",
+      issueIdentifier: "SYM-1",
+      issueUrl: "https://linear.app/acme/issue/SYM-1",
+      body: "Run update\n\n<!-- symphonia-run-id: run-1 -->",
+      existingCommentHint: null,
+      duplicateMarker: "<!-- symphonia-run-id: run-1 -->",
+      blockers: [],
+      warnings: [],
+    });
+    expect(linearPreview.duplicateMarker).toContain("run-1");
+
+    const preview = IntegrationWritePreviewSchema.parse({
+      id: "preview-1",
+      provider: "github",
+      kind: "github_pr_create",
+      runId: "run-1",
+      issueId: "issue-1",
+      issueIdentifier: "SYM-1",
+      status: "pending_confirmation",
+      title: "GitHub draft pull request",
+      summary: "Draft PR for SYM-1",
+      bodyPreview: "Body",
+      target: {
+        provider: "github",
+        owner: "agora-creations",
+        repo: "symphonia",
+        issueId: "issue-1",
+        issueIdentifier: "SYM-1",
+        branch: "feature/SYM-1",
+        baseBranch: "main",
+        url: null,
+      },
+      credentialSource: "connected",
+      requiredPermissions: ["Pull requests: write"],
+      warnings: [],
+      blockers: [],
+      confirmationRequired: true,
+      confirmationPhrase: "CREATE GITHUB PR",
+      createdAt: timestamp,
+      expiresAt: timestamp,
+      githubPr: githubPreview,
+      githubBranchPush: null,
+      linearComment: null,
+    });
+    expect(JSON.stringify(preview)).not.toContain("ghu_");
+
+    const result = IntegrationWriteResultSchema.parse({
+      id: "result-1",
+      previewId: "preview-1",
+      provider: "github",
+      kind: "github_pr_create",
+      status: "succeeded",
+      target: preview.target,
+      externalUrl: "https://github.com/agora-creations/symphonia/pull/1",
+      externalId: "1",
+      warnings: [],
+      errors: [],
+      executedAt: timestamp,
+      redactedRequestSummary: { credentialSource: "connected" },
+      redactedResponseSummary: { number: 1 },
+      githubPr: {
+        number: 1,
+        id: 1001,
+        url: "https://github.com/agora-creations/symphonia/pull/1",
+        state: "open",
+        draft: true,
+        title: "SYM-1: Add write actions",
+        baseBranch: "main",
+        headBranch: "feature/SYM-1",
+        createdAt: timestamp,
+      },
+      linearComment: null,
+    });
+    expect(result.status).toBe("succeeded");
+
+    expect(IntegrationWriteExecutionRequestSchema.parse({ previewId: "preview-1" }).dryRun).toBe(false);
+    expect(() => IntegrationWriteExecutionRequestSchema.parse({ previewId: "" })).toThrow();
+    expect(
+      AgentEventSchema.parse({
+        id: "write-event",
+        runId: "run-1",
+        type: "integration.write.previewed",
+        timestamp,
+        preview,
+      }).type,
+    ).toBe("integration.write.previewed");
   });
 
   it("parses harness scan results and rejects invalid apply payloads", () => {

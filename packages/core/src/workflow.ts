@@ -100,13 +100,31 @@ const defaultWorkspaceCleanupPolicy = {
 const defaultPrTitleTemplate = "{{ issue.identifier }}: {{ issue.title }}";
 const defaultPrBodyTemplate = `## Summary
 
-Automated work for {{ issue.identifier }}.
+Symphonia run for {{ issue.identifier }}.
 
 Issue: {{ issue.url }}
 
+## What changed
+
+See review artifacts and run timeline.
+
 ## Validation
 
-See Symphonia run timeline and review artifacts.`;
+See Symphonia run timeline.
+
+<!-- symphonia-run-id: {{ run.id }} -->`;
+const defaultProtectedBranches = ["main", "master", "production"];
+const defaultGithubConfirmationPhrase = "CREATE GITHUB PR";
+const defaultLinearConfirmationPhrase = "POST LINEAR COMMENT";
+const defaultLinearCommentTemplate = `Symphonia run update for {{ issue.identifier }}.
+
+Status: {{ run.status }}
+Provider: {{ run.provider }}
+
+Summary:
+{{ run.summary }}
+
+<!-- symphonia-run-id: {{ run.id }} -->`;
 
 export function discoverWorkflowPath(options: Pick<LoadWorkflowOptions, "workflowPath" | "cwd"> = {}): string {
   if (options.workflowPath) return resolve(options.workflowPath);
@@ -214,6 +232,12 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
   const maxPages = readPositiveInteger(trackerRaw, defaultTrackerMaxPages, "maxPages", "max_pages");
   const pollIntervalMs = readOptionalPositiveInteger(trackerRaw, "pollIntervalMs", "poll_interval_ms");
   const writeRaw = readObject(trackerRaw, "write");
+  const trackerReadOnly = readBoolean(trackerRaw, true, "readOnly", "read_only");
+  const trackerWriteEnabled = !trackerReadOnly && readBoolean(writeRaw, false, "enabled");
+  const trackerAllowComments = trackerWriteEnabled && readBoolean(writeRaw, false, "allowComments", "allow_comments");
+  const trackerAllowStateTransitions =
+    trackerWriteEnabled && readBoolean(writeRaw, false, "allowStateTransitions", "allow_state_transitions");
+  const trackerAllowAutomatic = trackerWriteEnabled && readBoolean(writeRaw, false, "allowAutomatic", "allow_automatic");
 
   if (trackerKind === "linear" && !teamKey && !teamId && !projectSlug && !projectId && !allowWorkspaceWide) {
     throw new WorkflowError(
@@ -461,14 +485,24 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
       pageSize,
       maxPages,
       pollIntervalMs,
-      readOnly: readBoolean(trackerRaw, true, "readOnly", "read_only"),
+      readOnly: trackerReadOnly,
       write: {
-        enabled: readBoolean(writeRaw, false, "enabled"),
-        commentOnRunStart: readBoolean(writeRaw, false, "commentOnRunStart", "comment_on_run_start"),
-        commentOnRunComplete: readBoolean(writeRaw, false, "commentOnRunComplete", "comment_on_run_complete"),
-        moveToStateOnStart: readString(writeRaw, "moveToStateOnStart", "move_to_state_on_start") ?? null,
-        moveToStateOnSuccess: readString(writeRaw, "moveToStateOnSuccess", "move_to_state_on_success") ?? null,
-        moveToStateOnFailure: readString(writeRaw, "moveToStateOnFailure", "move_to_state_on_failure") ?? null,
+        enabled: trackerWriteEnabled,
+        requireConfirmation: readBoolean(writeRaw, true, "requireConfirmation", "require_confirmation"),
+        allowAutomatic: trackerAllowAutomatic,
+        allowComments: trackerAllowComments,
+        allowStateTransitions: trackerAllowStateTransitions,
+        commentOnRunStart: trackerAllowAutomatic && trackerAllowComments && readBoolean(writeRaw, false, "commentOnRunStart", "comment_on_run_start"),
+        commentOnRunComplete:
+          trackerAllowAutomatic && trackerAllowComments && readBoolean(writeRaw, false, "commentOnRunComplete", "comment_on_run_complete"),
+        moveToStateOnStart: trackerAllowStateTransitions ? readString(writeRaw, "moveToStateOnStart", "move_to_state_on_start") ?? null : null,
+        moveToStateOnSuccess:
+          trackerAllowStateTransitions ? readString(writeRaw, "moveToStateOnSuccess", "move_to_state_on_success") ?? null : null,
+        moveToStateOnFailure:
+          trackerAllowStateTransitions ? readString(writeRaw, "moveToStateOnFailure", "move_to_state_on_failure") ?? null : null,
+        runCommentTemplate: readString(writeRaw, "runCommentTemplate", "run_comment_template") ?? defaultLinearCommentTemplate,
+        confirmationPhrase: readString(writeRaw, "confirmationPhrase", "confirmation_phrase") ?? defaultLinearConfirmationPhrase,
+        maxBodyLength: readPositiveInteger(writeRaw, 12_000, "maxBodyLength", "max_body_length"),
       },
     },
     polling: {
@@ -552,12 +586,18 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
       maxPages: githubMaxPages,
       write: {
         enabled: githubWriteEnabled,
+        requireConfirmation: readBoolean(githubWriteRaw, true, "requireConfirmation", "require_confirmation"),
+        allowAutomatic: readBoolean(githubWriteRaw, false, "allowAutomatic", "allow_automatic"),
         allowPush: githubAllowPush,
         allowCreatePr: githubAllowCreatePr,
         allowUpdatePr: githubAllowUpdatePr,
         allowComment: githubAllowComment,
         allowRequestReviewers: githubAllowRequestReviewers,
         draftPrByDefault: readBoolean(githubWriteRaw, true, "draftPrByDefault", "draft_pr_by_default"),
+        protectedBranches: readStringArray(githubWriteRaw, defaultProtectedBranches, "protectedBranches", "protected_branches"),
+        confirmationPhrase: readString(githubWriteRaw, "confirmationPhrase", "confirmation_phrase") ?? defaultGithubConfirmationPhrase,
+        maxTitleLength: readPositiveInteger(githubWriteRaw, 240, "maxTitleLength", "max_title_length"),
+        maxBodyLength: readPositiveInteger(githubWriteRaw, 60_000, "maxBodyLength", "max_body_length"),
         prTitleTemplate:
           readString(githubWriteRaw, "prTitleTemplate", "pr_title_template") ?? defaultPrTitleTemplate,
         prBodyTemplate: readString(githubWriteRaw, "prBodyTemplate", "pr_body_template") ?? defaultPrBodyTemplate,
@@ -594,6 +634,15 @@ export function summarizeWorkflowConfig(config: WorkflowConfig): WorkflowConfigS
     pollIntervalMs: config.tracker.pollIntervalMs,
     readOnly: config.tracker.readOnly,
     writeEnabled: config.tracker.write.enabled,
+    write: {
+      enabled: config.tracker.write.enabled,
+      requireConfirmation: config.tracker.write.requireConfirmation,
+      allowAutomatic: config.tracker.write.allowAutomatic,
+      allowComments: config.tracker.write.allowComments,
+      allowStateTransitions: config.tracker.write.allowStateTransitions,
+      commentOnRunStart: config.tracker.write.commentOnRunStart,
+      commentOnRunComplete: config.tracker.write.commentOnRunComplete,
+    },
     workspaceRoot: config.workspace.root,
     workspaceCleanup: {
       enabled: config.workspace.cleanup.enabled,
@@ -662,6 +711,11 @@ export function summarizeWorkflowConfig(config: WorkflowConfig): WorkflowConfigS
       readOnly: config.github.readOnly,
       writeEnabled: config.github.write.enabled,
       allowCreatePr: config.github.write.allowCreatePr,
+      allowPush: config.github.write.allowPush,
+      allowComment: config.github.write.allowComment,
+      draftPrByDefault: config.github.write.draftPrByDefault,
+      requireConfirmation: config.github.write.requireConfirmation,
+      protectedBranches: config.github.write.protectedBranches,
       tokenConfigured: Boolean(config.github.token),
       pageSize: config.github.pageSize,
       maxPages: config.github.maxPages,

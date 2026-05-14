@@ -14,6 +14,7 @@ export * from "./harness-generator.js";
 export * from "./harness-scanner.js";
 export * from "./harness-scoring.js";
 export * from "./hook-runner.js";
+export * from "./integration-writes.js";
 export * from "./linear-client.js";
 export * from "./linear-tracker.js";
 export * from "./provider-errors.js";

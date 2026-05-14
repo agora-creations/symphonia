@@ -6,6 +6,23 @@ tracker:
   api_key: "$LINEAR_API_KEY"
   allow_workspace_wide: true
   read_only: true
+  write:
+    enabled: false
+    require_confirmation: true
+    allow_comments: false
+    allow_state_transitions: false
+    comment_on_run_start: false
+    comment_on_run_complete: false
+    run_comment_template: |
+      Symphonia run update for {{ issue.identifier }}.
+
+      Status: {{ run.status }}
+      Provider: {{ run.provider }}
+
+      Summary:
+      {{ run.summary }}
+
+      <!-- symphonia-run-id: {{ run.id }} -->
   active_states:
     - "Todo"
     - "In Progress"
@@ -16,6 +33,44 @@ tracker:
     - "Closed"
     - "Canceled"
     - "Duplicate"
+
+github:
+  enabled: false
+  token: "$GITHUB_TOKEN"
+  owner: null
+  repo: null
+  default_base_branch: "main"
+  remote_name: "origin"
+  read_only: true
+  write:
+    enabled: false
+    require_confirmation: true
+    allow_push: false
+    allow_create_pr: false
+    allow_comment: false
+    allow_request_reviewers: false
+    draft_pr_by_default: true
+    protected_branches:
+      - "main"
+      - "master"
+      - "production"
+    pr_title_template: "{{ issue.identifier }}: {{ issue.title }}"
+    pr_body_template: |
+      ## Summary
+
+      Symphonia run for {{ issue.identifier }}.
+
+      Issue: {{ issue.url }}
+
+      ## What changed
+
+      See review artifacts and run timeline.
+
+      ## Validation
+
+      See Symphonia run timeline.
+
+      <!-- symphonia-run-id: {{ run.id }} -->
 
 polling:
   interval_ms: 30000
