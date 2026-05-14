@@ -2,9 +2,11 @@
 
 import { useEffect, useState } from "react";
 import type { ReactNode } from "react";
-import { CheckCircle2, Database, FolderOpen, RefreshCw, ShieldCheck } from "lucide-react";
+import { CheckCircle2, Database, FileText, FolderOpen, RefreshCw, ScanSearch, ShieldCheck } from "lucide-react";
+import { applyHarnessArtifacts, runHarnessScan } from "@/lib/api";
 import { getDesktopApi, type DesktopSettings, type DesktopStatus } from "@/lib/desktop";
 import { cn } from "@/lib/utils";
+import type { HarnessApplyResult, HarnessScanResult } from "@symphonia/types";
 
 export function DesktopSetupGate() {
   const [desktopStatus, setDesktopStatus] = useState<DesktopStatus | null>(null);
@@ -12,6 +14,12 @@ export function DesktopSetupGate() {
   const [saving, setSaving] = useState(false);
   const [message, setMessage] = useState<string | null>(null);
   const [starterWorkflow, setStarterWorkflow] = useState<string | null>(null);
+  const [harnessScan, setHarnessScan] = useState<HarnessScanResult | null>(null);
+  const [selectedArtifacts, setSelectedArtifacts] = useState<string[]>([]);
+  const [harnessDryRun, setHarnessDryRun] = useState(true);
+  const [harnessConfirmation, setHarnessConfirmation] = useState("");
+  const [harnessApplyResult, setHarnessApplyResult] = useState<HarnessApplyResult | null>(null);
+  const [harnessBusy, setHarnessBusy] = useState<"scan" | "apply" | null>(null);
   const desktop = getDesktopApi();
 
   useEffect(() => {
@@ -60,6 +68,56 @@ export function DesktopSetupGate() {
     const result = await desktop.createStarterWorkflow(settings.repositoryPath);
     setStarterWorkflow(result.existed ? `Existing WORKFLOW.md kept at ${result.path}` : `Created starter WORKFLOW.md at ${result.path}`);
     setSettings(await desktop.getSettings());
+  }
+
+  async function runHarnessReadinessScan() {
+    if (!settings?.repositoryPath) return;
+    setHarnessBusy("scan");
+    setMessage(null);
+    try {
+      const scan = await runHarnessScan({
+        repositoryPath: settings.repositoryPath,
+        includeGitStatus: true,
+        includeDocs: true,
+        includeScripts: true,
+        includePackageMetadata: true,
+        includeWorkflow: true,
+        includeAgentsMd: true,
+        includeCi: true,
+        includeSecurity: true,
+        includeAccessibility: true,
+        includeGeneratedPreviews: true,
+      });
+      setHarnessScan(scan);
+      setSelectedArtifacts(
+        scan.generatedPreviews
+          .filter((preview) => (preview.path === "AGENTS.md" || preview.path === "WORKFLOW.md") && (preview.action === "create" || preview.action === "update"))
+          .map((preview) => preview.id),
+      );
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setHarnessBusy(null);
+    }
+  }
+
+  async function applyHarnessSelection() {
+    if (!settings?.repositoryPath || selectedArtifacts.length === 0) return;
+    setHarnessBusy("apply");
+    setMessage(null);
+    try {
+      const result = await applyHarnessArtifacts({
+        repositoryPath: settings.repositoryPath,
+        artifactIds: selectedArtifacts,
+        dryRun: harnessDryRun,
+        confirmation: harnessDryRun ? null : harnessConfirmation,
+      });
+      setHarnessApplyResult(result);
+    } catch (error) {
+      setMessage(error instanceof Error ? error.message : String(error));
+    } finally {
+      setHarnessBusy(null);
+    }
   }
 
   async function completeSetup() {
@@ -153,6 +211,95 @@ export function DesktopSetupGate() {
                 Create safe starter if missing
               </button>
             </div>
+          </div>
+
+          <div className="mt-4 rounded-md border bg-muted/20 p-4">
+            <div className="flex flex-col gap-3 md:flex-row md:items-center md:justify-between">
+              <div>
+                <p className="text-sm font-medium">Agent-readiness scan</p>
+                <p className="mt-1 text-xs text-muted-foreground">
+                  Optional. Preview starter harness files before writing anything.
+                </p>
+              </div>
+              <button
+                type="button"
+                onClick={runHarnessReadinessScan}
+                disabled={!settings.repositoryPath || harnessBusy === "scan"}
+                className="inline-flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted disabled:opacity-50"
+              >
+                {harnessBusy === "scan" ? <RefreshCw className="h-4 w-4 animate-spin" /> : <ScanSearch className="h-4 w-4" />}
+                Scan repository readiness
+              </button>
+            </div>
+
+            {harnessScan && (
+              <div className="mt-4 space-y-3">
+                <div className="flex flex-wrap items-center gap-2 text-xs">
+                  <span className="rounded-full border px-2 py-1">Score {harnessScan.score.percentage}%</span>
+                  <span className="rounded-full border px-2 py-1">Grade {harnessScan.grade}</span>
+                  <span className="rounded-full border px-2 py-1">{harnessScan.findings.length} findings</span>
+                </div>
+                <div className="space-y-2">
+                  {harnessScan.generatedPreviews
+                    .filter((preview) => preview.path === "AGENTS.md" || preview.path === "WORKFLOW.md")
+                    .map((preview) => (
+                      <div key={preview.id} className="rounded-md border bg-background p-3">
+                        <label className="flex items-start gap-2 text-sm">
+                          <input
+                            type="checkbox"
+                            className="mt-1"
+                            checked={selectedArtifacts.includes(preview.id)}
+                            disabled={preview.action !== "create" && preview.action !== "update"}
+                            onChange={() =>
+                              setSelectedArtifacts((current) =>
+                                current.includes(preview.id) ? current.filter((item) => item !== preview.id) : [...current, preview.id],
+                              )
+                            }
+                          />
+                          <span className="min-w-0">
+                            <span className="flex items-center gap-2">
+                              <FileText className="h-4 w-4" />
+                              <span className="break-all font-medium">{preview.path}</span>
+                              <span className="rounded-full border px-2 py-0.5 text-[11px] text-muted-foreground">{preview.action}</span>
+                            </span>
+                            <span className="mt-1 block text-xs text-muted-foreground">{preview.warnings.join(" ")}</span>
+                          </span>
+                        </label>
+                        <details className="mt-2">
+                          <summary className="cursor-pointer text-xs text-muted-foreground">Preview diff</summary>
+                          <pre className="mt-2 max-h-52 overflow-auto rounded-md border bg-muted/20 p-2 text-xs">{preview.diff}</pre>
+                        </details>
+                      </div>
+                    ))}
+                </div>
+                <label className="flex items-center gap-2 text-sm">
+                  <input type="checkbox" checked={harnessDryRun} onChange={(event) => setHarnessDryRun(event.target.checked)} />
+                  Dry-run only
+                </label>
+                {!harnessDryRun && (
+                  <input
+                    value={harnessConfirmation}
+                    onChange={(event) => setHarnessConfirmation(event.target.value)}
+                    className="w-full rounded-md border bg-background px-3 py-2 text-xs"
+                    placeholder="APPLY HARNESS CHANGES"
+                  />
+                )}
+                <button
+                  type="button"
+                  onClick={applyHarnessSelection}
+                  disabled={selectedArtifacts.length === 0 || harnessBusy === "apply" || (!harnessDryRun && harnessConfirmation !== "APPLY HARNESS CHANGES")}
+                  className="inline-flex items-center justify-center gap-2 rounded-md border px-3 py-2 text-sm hover:bg-muted disabled:opacity-50"
+                >
+                  {harnessBusy === "apply" ? <RefreshCw className="h-4 w-4 animate-spin" /> : <CheckCircle2 className="h-4 w-4" />}
+                  {harnessDryRun ? "Dry-run selected previews" : "Apply selected previews"}
+                </button>
+                {harnessApplyResult && (
+                  <p className="text-xs text-muted-foreground">
+                    Applied {harnessApplyResult.applied.length}, skipped {harnessApplyResult.skipped.length}, failed {harnessApplyResult.failed.length}.
+                  </p>
+                )}
+              </div>
+            )}
           </div>
 
           {message && <p className="mt-4 rounded-md border px-3 py-2 text-sm text-muted-foreground">{message}</p>}

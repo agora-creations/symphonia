@@ -1,10 +1,11 @@
 import { randomUUID } from "node:crypto";
-import { lstatSync, rmSync } from "node:fs";
+import { existsSync, lstatSync, realpathSync, rmSync } from "node:fs";
 import { createServer, IncomingMessage, Server, ServerResponse } from "node:http";
-import { basename, resolve } from "node:path";
+import { basename, dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import {
   applyRunEvent,
+  applyHarnessArtifacts,
   buildWorkspaceInventory,
   canStartRunForIssue,
   claudeProvider,
@@ -18,6 +19,8 @@ import {
   getWorkflowStatus,
   createLinearTrackerAdapter,
   GitHubFetch,
+  HarnessApplyError,
+  HarnessScannerError,
   isIssueActive,
   isIssueTerminal,
   LinearFetch,
@@ -36,6 +39,7 @@ import {
   runCursorAgentProvider,
   runMockAgentProvider,
   runHook,
+  scanHarnessRepository,
   WorkflowError,
   WorkflowRuntime,
   WorkspaceError,
@@ -57,6 +61,12 @@ import {
   ProviderId,
   GitHubHealth,
   GitHubStatus,
+  HarnessApplyRequestSchema,
+  HarnessApplyResult,
+  HarnessPreviewRequestSchema,
+  HarnessScanRequestSchema,
+  HarnessScanResult,
+  HarnessStatus,
   ReviewArtifactSnapshot,
   Run,
   RunSchema,
@@ -361,6 +371,45 @@ export class SymphoniaDaemon {
 
       if (request.method === "GET" && (path === "/daemon/status" || path === "/recovery/status")) {
         return sendJson(response, 200, { daemon: await this.getDaemonStatus() });
+      }
+
+      if (request.method === "GET" && path === "/harness/status") {
+        return sendJson(response, 200, { harness: this.getHarnessStatus() });
+      }
+
+      if (request.method === "GET" && path === "/harness/scans") {
+        const repositoryPath = url.searchParams.get("repositoryPath") ?? undefined;
+        const scans = this.eventStore.listHarnessScans(repositoryPath ? this.normalizeRepositoryPath(repositoryPath) : undefined, 20);
+        return sendJson(response, 200, { scans });
+      }
+
+      if (request.method === "POST" && path === "/harness/scan") {
+        const scan = this.runHarnessScan(await readJsonBody(request));
+        return sendJson(response, 201, { scan });
+      }
+
+      const harnessScanMatch = path.match(/^\/harness\/scans\/([^/]+)$/);
+      if (request.method === "GET" && harnessScanMatch) {
+        const scan = this.eventStore.getHarnessScan(decodeURIComponent(harnessScanMatch[1]!));
+        if (!scan) throw new ApiError(404, "Harness scan not found.");
+        return sendJson(response, 200, { scan });
+      }
+
+      if (request.method === "POST" && path === "/harness/previews") {
+        const { scan, previews } = this.generateHarnessPreviewsForScan(await readJsonBody(request));
+        return sendJson(response, 200, { scan, previews });
+      }
+
+      if (request.method === "POST" && path === "/harness/apply") {
+        const result = this.applyHarnessPreviews(await readJsonBody(request));
+        return sendJson(response, 200, { result });
+      }
+
+      const harnessRecommendationsMatch = path.match(/^\/harness\/recommendations\/([^/]+)$/);
+      if (request.method === "GET" && harnessRecommendationsMatch) {
+        const scan = this.eventStore.getHarnessScan(decodeURIComponent(harnessRecommendationsMatch[1]!));
+        if (!scan) throw new ApiError(404, "Harness scan not found.");
+        return sendJson(response, 200, { recommendations: scan.recommendations });
       }
 
       const providerHealthMatch = path.match(/^\/providers\/(mock|codex|claude|cursor)\/health$/);
@@ -1081,6 +1130,204 @@ export class SymphoniaDaemon {
         status: provider.status,
       })),
     };
+  }
+
+  getHarnessStatus(): HarnessStatus {
+    const currentRepositoryPath = this.getCurrentRepositoryPath();
+    const latest = this.eventStore.getLatestHarnessScanForRepository(currentRepositoryPath);
+    return {
+      available: true,
+      currentRepositoryPath,
+      latestScanId: latest?.id ?? null,
+      latestScanAt: latest?.scannedAt ?? null,
+      latestGrade: latest?.grade ?? null,
+    };
+  }
+
+  runHarnessScan(input: unknown): HarnessScanResult {
+    const repositoryPath = this.getCurrentRepositoryPath();
+    const scanId = `scan-${randomUUID()}`;
+    const request = HarnessScanRequestSchema.parse({
+      repositoryPath,
+      includeGitStatus: true,
+      includeDocs: true,
+      includeScripts: true,
+      includePackageMetadata: true,
+      includeWorkflow: true,
+      includeAgentsMd: true,
+      includeCi: true,
+      includeSecurity: true,
+      includeAccessibility: true,
+      includeGeneratedPreviews: false,
+      ...(typeof input === "object" && input ? input : {}),
+    });
+
+    this.appendDaemonEvent({
+      id: randomUUID(),
+      runId: "__daemon__",
+      type: "harness.scan.started",
+      timestamp: nowIso(),
+      scanId,
+      repositoryPath: request.repositoryPath,
+    });
+
+    try {
+      const scan = scanHarnessRepository(request, { id: scanId });
+      this.eventStore.saveHarnessScan(scan);
+      for (const recommendation of scan.recommendations) {
+        this.appendDaemonEvent({
+          id: randomUUID(),
+          runId: "__daemon__",
+          type: "harness.recommendation.generated",
+          timestamp: nowIso(),
+          scanId: scan.id,
+          recommendation,
+        });
+      }
+      for (const artifact of scan.generatedPreviews) {
+        this.appendDaemonEvent({
+          id: randomUUID(),
+          runId: "__daemon__",
+          type: "harness.artifact.previewed",
+          timestamp: nowIso(),
+          scanId: scan.id,
+          artifact,
+        });
+      }
+      this.appendDaemonEvent({
+        id: randomUUID(),
+        runId: "__daemon__",
+        type: "harness.scan.completed",
+        timestamp: nowIso(),
+        scanId: scan.id,
+        repositoryPath: scan.repositoryPath,
+        score: scan.score,
+      });
+      return scan;
+    } catch (error) {
+      this.appendDaemonEvent({
+        id: randomUUID(),
+        runId: "__daemon__",
+        type: "harness.scan.failed",
+        timestamp: nowIso(),
+        scanId,
+        repositoryPath: request.repositoryPath,
+        error: error instanceof Error ? error.message : "Harness scan failed.",
+      });
+      throw normalizeHarnessError(error);
+    }
+  }
+
+  generateHarnessPreviewsForScan(input: unknown): { scan: HarnessScanResult; previews: HarnessScanResult["generatedPreviews"] } {
+    const request = HarnessPreviewRequestSchema.parse(input);
+    const existing = this.eventStore.getHarnessScan(request.scanId);
+    if (!existing) throw new ApiError(404, "Harness scan not found.");
+
+    const scan = scanHarnessRepository(
+      {
+        repositoryPath: existing.repositoryPath,
+        includeGitStatus: true,
+        includeDocs: true,
+        includeScripts: true,
+        includePackageMetadata: true,
+        includeWorkflow: true,
+        includeAgentsMd: true,
+        includeCi: true,
+        includeSecurity: true,
+        includeAccessibility: true,
+        includeGeneratedPreviews: true,
+      },
+      { id: existing.id },
+    );
+    this.eventStore.saveHarnessScan(scan);
+    for (const artifact of scan.generatedPreviews) {
+      this.appendDaemonEvent({
+        id: randomUUID(),
+        runId: "__daemon__",
+        type: "harness.artifact.previewed",
+        timestamp: nowIso(),
+        scanId: scan.id,
+        artifact,
+      });
+    }
+    return { scan, previews: scan.generatedPreviews };
+  }
+
+  applyHarnessPreviews(input: unknown): HarnessApplyResult {
+    const request = HarnessApplyRequestSchema.parse(input);
+    const repositoryPath = this.normalizeRepositoryPath(request.repositoryPath);
+    let scan = this.eventStore.getLatestHarnessScanForRepository(repositoryPath);
+    if (!scan) {
+      throw new ApiError(404, "Run a harness scan before applying artifact previews.");
+    }
+    if (scan.generatedPreviews.length === 0) {
+      scan = this.generateHarnessPreviewsForScan({ scanId: scan.id }).scan;
+    }
+
+    try {
+      const result = applyHarnessArtifacts({ ...request, repositoryPath }, scan.generatedPreviews, { scanId: scan.id });
+      const appliedAt = nowIso();
+      this.eventStore.saveHarnessApplyResult({
+        id: `apply-${randomUUID()}`,
+        repositoryPath,
+        scanId: scan.id,
+        appliedAt,
+        result,
+      });
+
+      for (const item of result.applied) {
+        this.appendDaemonEvent({
+          id: randomUUID(),
+          runId: "__daemon__",
+          type: "harness.artifact.applied",
+          timestamp: nowIso(),
+          scanId: scan.id,
+          artifactId: item.artifactId,
+          path: item.path,
+        });
+      }
+      for (const item of result.skipped) {
+        this.appendDaemonEvent({
+          id: randomUUID(),
+          runId: "__daemon__",
+          type: "harness.artifact.skipped",
+          timestamp: nowIso(),
+          scanId: scan.id,
+          artifactId: item.artifactId,
+          path: item.path,
+          reason: item.message,
+        });
+      }
+      for (const item of result.failed) {
+        this.appendDaemonEvent({
+          id: randomUUID(),
+          runId: "__daemon__",
+          type: "harness.artifact.failed",
+          timestamp: nowIso(),
+          scanId: scan.id,
+          artifactId: item.artifactId,
+          path: item.path,
+          error: item.error,
+        });
+      }
+
+      return result;
+    } catch (error) {
+      throw normalizeHarnessError(error);
+    }
+  }
+
+  private getCurrentRepositoryPath(): string {
+    return this.normalizeRepositoryPath(this.options.cwd ?? process.env.SYMPHONIA_REPO_ROOT ?? inferRepositoryRoot(process.cwd()));
+  }
+
+  private normalizeRepositoryPath(path: string): string {
+    const resolved = resolve(path);
+    try {
+      return realpathSync(resolved);
+    } catch {
+      return resolved;
+    }
   }
 
   getReviewArtifacts(runId: string): ReviewArtifactSnapshot | null {
@@ -1902,6 +2149,25 @@ function normalizeError(error: unknown): ApiError {
   }
 
   return new ApiError(500, "Unknown error");
+}
+
+function normalizeHarnessError(error: unknown): ApiError {
+  if (error instanceof ApiError) return error;
+  if (error instanceof HarnessScannerError || error instanceof HarnessApplyError) return new ApiError(400, error.message);
+  if (error instanceof Error) return new ApiError(400, error.message);
+  return new ApiError(500, "Unknown harness error");
+}
+
+function inferRepositoryRoot(startPath: string): string {
+  let current = resolve(startPath);
+  while (true) {
+    if (existsSync(resolve(current, "pnpm-workspace.yaml")) || existsSync(resolve(current, ".git"))) {
+      return current;
+    }
+    const parent = dirname(current);
+    if (parent === current) return resolve(startPath);
+    current = parent;
+  }
 }
 
 function setCorsHeaders(response: ServerResponse): void {

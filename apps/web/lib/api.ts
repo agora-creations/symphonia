@@ -10,6 +10,16 @@ import {
   GitHubHealthResponseSchema,
   GitHubStatus,
   GitHubStatusResponseSchema,
+  HarnessApplyRequest,
+  HarnessApplyResponseSchema,
+  HarnessApplyResult,
+  HarnessPreviewResponseSchema,
+  HarnessScanHistoryResponseSchema,
+  HarnessScanRequest,
+  HarnessScanResponseSchema,
+  HarnessScanResult,
+  HarnessStatus,
+  HarnessStatusResponseSchema,
   HealthResponseSchema,
   IssuesResponseSchema,
   ProviderHealth,
@@ -104,6 +114,49 @@ export async function getRuns(): Promise<Run[]> {
 export async function getDaemonStatus(): Promise<DaemonStatus> {
   const response = await request("/daemon/status");
   return DaemonStatusResponseSchema.parse(response).daemon;
+}
+
+export async function getHarnessStatus(): Promise<HarnessStatus> {
+  const response = await request("/harness/status");
+  return HarnessStatusResponseSchema.parse(response).harness;
+}
+
+export async function runHarnessScan(input: Partial<HarnessScanRequest>): Promise<HarnessScanResult> {
+  const response = await request("/harness/scan", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return HarnessScanResponseSchema.parse(response).scan;
+}
+
+export async function getHarnessScans(repositoryPath?: string): Promise<HarnessScanResult[]> {
+  const query = repositoryPath ? `?repositoryPath=${encodeURIComponent(repositoryPath)}` : "";
+  const response = await request(`/harness/scans${query}`);
+  return HarnessScanHistoryResponseSchema.parse(response).scans;
+}
+
+export async function getHarnessScan(scanId: string): Promise<HarnessScanResult> {
+  const response = await request(`/harness/scans/${encodeURIComponent(scanId)}`);
+  return HarnessScanResponseSchema.parse(response).scan;
+}
+
+export async function generateHarnessPreviews(scanId: string): Promise<HarnessScanResult> {
+  const response = await request("/harness/previews", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ scanId }),
+  });
+  return HarnessPreviewResponseSchema.parse(response).scan;
+}
+
+export async function applyHarnessArtifacts(input: HarnessApplyRequest): Promise<HarnessApplyResult> {
+  const response = await request("/harness/apply", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return HarnessApplyResponseSchema.parse(response).result;
 }
 
 export async function getRunEvents(runId: string): Promise<AgentEvent[]> {

@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { AgentEvent, Issue, ReviewArtifactSnapshot, Run } from "@symphonia/types";
+import { AgentEvent, HarnessScanResult, Issue, ReviewArtifactSnapshot, Run } from "@symphonia/types";
 import { EventStore } from "../src";
 
 let directory: string;
@@ -114,6 +114,36 @@ describe("EventStore", () => {
       recoveryState: "terminal",
     });
   });
+
+  it("saves harness scans, fetches latest scan, records preview metadata, and stores apply history", () => {
+    const first = harnessScan("scan-1", 42, "D");
+    const second = harnessScan("scan-2", 82, "B");
+
+    store.saveHarnessScan(first);
+    store.saveHarnessScan(second);
+
+    expect(store.getHarnessScan("scan-1")?.score.percentage).toBe(42);
+    expect(store.getLatestHarnessScanForRepository("/tmp/repo")?.id).toBe("scan-2");
+    expect(store.listHarnessScans("/tmp/repo").map((scan) => scan.id)).toEqual(["scan-2", "scan-1"]);
+    expect(store.getHarnessScan("scan-2")?.generatedPreviews[0]?.path).toBe("AGENTS.md");
+
+    store.saveHarnessApplyResult({
+      id: "apply-1",
+      repositoryPath: "/tmp/repo",
+      scanId: "scan-2",
+      appliedAt: "2026-05-13T08:07:00.000Z",
+      result: {
+        applied: [{ artifactId: "agents-md", path: "AGENTS.md", action: "create", message: "created" }],
+        skipped: [],
+        failed: [],
+        backups: [],
+        events: ["harness.artifact.applied:agents-md"],
+        nextScanSuggested: true,
+      },
+    });
+
+    expect(store.listHarnessApplyHistory("/tmp/repo")).toHaveLength(1);
+  });
 });
 
 function issue(identifier: string, state: string): Issue {
@@ -213,5 +243,72 @@ function runRecord(id: string, status: Run["status"]): Run {
     recoveredAt: null,
     createdByDaemonInstanceId: "daemon-old",
     lastSeenDaemonInstanceId: "daemon-old",
+  };
+}
+
+function harnessScan(id: string, percentage: number, grade: HarnessScanResult["grade"]): HarnessScanResult {
+  return {
+    id,
+    repositoryPath: "/tmp/repo",
+    scannedAt: id === "scan-1" ? "2026-05-13T08:05:00.000Z" : "2026-05-13T08:06:00.000Z",
+    score: {
+      overall: percentage,
+      max: 100,
+      percentage,
+      grade,
+      categoryScores: {
+        "repository-map": { score: percentage / 10, max: 10, percentage, grade, status: "partial" },
+      },
+    },
+    grade,
+    categories: [
+      {
+        id: "repository-map",
+        label: "Repository Map",
+        score: percentage / 10,
+        max: 10,
+        status: "partial",
+        summary: "summary",
+        evidence: [{ label: "README", value: "present", filePath: "README.md", lineNumber: null }],
+        findings: [],
+        recommendations: [],
+      },
+    ],
+    findings: [],
+    recommendations: [],
+    detectedFiles: [{ path: "README.md", kind: "readme", exists: true, sizeBytes: 10, hash: "hash", summary: "readme" }],
+    generatedPreviews: [
+      {
+        id: "agents-md",
+        kind: "AGENTS.md",
+        path: "AGENTS.md",
+        action: "create",
+        existingContentHash: null,
+        proposedContent: "# AGENTS.md\n",
+        diff: "+# AGENTS.md\n",
+        warnings: [],
+        requiresConfirmation: true,
+      },
+    ],
+    warnings: [],
+    errors: [],
+    metadata: {
+      isGitRepository: true,
+      gitDirty: false,
+      gitBranch: "main",
+      gitRemote: "https://github.com/agora-creations/symphonia.git",
+      packageManager: "pnpm",
+      languages: ["TypeScript"],
+      frameworks: ["Node"],
+      validationCommands: [],
+    },
+    limits: {
+      maxFiles: 100,
+      maxBytes: 1000,
+      maxFileSizeBytes: 1000,
+      filesScanned: 1,
+      bytesRead: 10,
+      truncated: false,
+    },
   };
 }
