@@ -1077,6 +1077,7 @@ export const IntegrationWriteKindSchema = z.enum([
   "github_branch_push",
   "github_issue_comment",
   "linear_comment_create",
+  "linear_status_update",
 ]);
 export type IntegrationWriteKind = z.infer<typeof IntegrationWriteKindSchema>;
 
@@ -1197,6 +1198,19 @@ export const LinearCommentPreviewSchema = z.object({
 });
 export type LinearCommentPreview = z.infer<typeof LinearCommentPreviewSchema>;
 
+export const LinearStatusUpdatePreviewSchema = z.object({
+  runId: z.string().min(1),
+  issueId: z.string().min(1).nullable(),
+  issueIdentifier: z.string().min(1).nullable(),
+  issueUrl: z.string().url().nullable(),
+  currentStatus: z.string().min(1).nullable(),
+  proposedStatus: z.string().min(1).nullable(),
+  finalRunState: RunStatusSchema,
+  blockers: z.array(z.string().min(1)),
+  warnings: z.array(z.string().min(1)),
+});
+export type LinearStatusUpdatePreview = z.infer<typeof LinearStatusUpdatePreviewSchema>;
+
 export const LinearCommentResultSchema = z.object({
   id: z.string().min(1),
   url: z.string().url().nullable(),
@@ -1211,6 +1225,73 @@ export const IntegrationWritePreviewSchema = IntegrationWriteBaseSchema.extend({
   linearComment: LinearCommentPreviewSchema.nullable().default(null),
 });
 export type IntegrationWritePreview = z.infer<typeof IntegrationWritePreviewSchema>;
+
+export const WriteActionPreviewStatusSchema = z.enum([
+  "preview_available",
+  "blocked",
+  "unavailable",
+  "read_only",
+  "evidence_missing",
+]);
+export type WriteActionPreviewStatus = z.infer<typeof WriteActionPreviewStatusSchema>;
+
+export const WriteActionPreviewAuditSchema = z.object({
+  runId: z.string().min(1),
+  issueId: z.string().min(1).nullable(),
+  kind: IntegrationWriteKindSchema,
+  targetSystem: IntegrationWriteProviderSchema,
+  targetIdentifier: z.string().min(1).nullable(),
+  payloadHash: z.string().min(1),
+  approvalEvidenceSource: z.string().min(1),
+  reviewArtifactSource: z.string().min(1).nullable(),
+  generatedAt: isoDateTime,
+  generatedBy: z.string().min(1).nullable(),
+  idempotencyKey: z.string().min(1),
+  status: z.literal("previewed"),
+  externalWriteId: z.null(),
+});
+export type WriteActionPreviewAudit = z.infer<typeof WriteActionPreviewAuditSchema>;
+
+export const WriteActionPreviewPayloadSchema = z.object({
+  githubPr: GitHubPrCreatePreviewSchema.nullable().default(null),
+  linearComment: LinearCommentPreviewSchema.nullable().default(null),
+  linearStatusUpdate: LinearStatusUpdatePreviewSchema.nullable().default(null),
+});
+export type WriteActionPreviewPayload = z.infer<typeof WriteActionPreviewPayloadSchema>;
+
+export const WriteActionPreviewContractSchema = z.object({
+  id: z.string().min(1),
+  runId: z.string().min(1),
+  issueId: z.string().min(1).nullable(),
+  issueIdentifier: z.string().min(1).nullable(),
+  kind: IntegrationWriteKindSchema,
+  targetSystem: IntegrationWriteProviderSchema,
+  targetLabel: z.string().min(1),
+  status: WriteActionPreviewStatusSchema,
+  title: z.string().min(1),
+  bodyPreview: z.string(),
+  targetRepository: z.string().min(1).nullable(),
+  targetBranch: z.string().min(1).nullable(),
+  baseBranch: z.string().min(1).nullable(),
+  changedFiles: z.array(ChangedFileSchema),
+  reviewArtifactId: z.string().min(1).nullable(),
+  reviewArtifactPath: z.string().min(1).nullable(),
+  approvalEvidenceId: z.string().min(1),
+  approvalEvidenceSource: z.string().min(1),
+  requiredPermissions: z.array(z.string().min(1)),
+  confirmationRequired: z.boolean(),
+  confirmationPrompt: z.string().min(1),
+  blockingReasons: z.array(z.string().min(1)),
+  riskWarnings: z.array(z.string().min(1)),
+  idempotencyKey: z.string().min(1),
+  payloadHash: z.string().min(1),
+  generatedAt: isoDateTime,
+  expiresAt: isoDateTime.nullable(),
+  dryRunOnly: z.literal(true),
+  payload: WriteActionPreviewPayloadSchema,
+  audit: WriteActionPreviewAuditSchema,
+});
+export type WriteActionPreviewContract = z.infer<typeof WriteActionPreviewContractSchema>;
 
 export const IntegrationWriteExecutionRequestSchema = z.object({
   previewId: z.string().min(1),
@@ -2182,6 +2263,7 @@ export type WriteActionAvailability = z.infer<typeof WriteActionAvailabilitySche
 export const IntegrationWriteActionsResponseSchema = z.object({
   writeActions: z.array(z.union([IntegrationWritePreviewSchema, IntegrationWriteResultSchema])),
   availability: z.array(WriteActionAvailabilitySchema).default([]),
+  previews: z.array(WriteActionPreviewContractSchema).default([]),
 });
 export type IntegrationWriteActionsResponse = z.infer<typeof IntegrationWriteActionsResponseSchema>;
 

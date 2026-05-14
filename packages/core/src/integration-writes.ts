@@ -96,7 +96,10 @@ export function linearWritePolicy(config: WorkflowConfig["tracker"]): Integratio
     readOnly: config.readOnly,
     requireConfirmation: config.write.requireConfirmation,
     allowAutomatic: config.write.allowAutomatic,
-    allowedKinds: config.write.allowComments ? ["linear_comment_create"] : [],
+    allowedKinds: [
+      ...(config.write.allowComments ? ["linear_comment_create" as const] : []),
+      ...(config.write.allowStateTransitions ? ["linear_status_update" as const] : []),
+    ],
     protectedBranches: [],
     confirmationPhrase: config.write.confirmationPhrase || linearCommentConfirmationPhrase,
     maxBodyLength: config.write.maxBodyLength,

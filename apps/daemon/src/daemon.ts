@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { existsSync, lstatSync, realpathSync, rmSync } from "node:fs";
 import { createServer, IncomingMessage, Server, ServerResponse } from "node:http";
 import { basename, dirname, resolve } from "node:path";
@@ -21,8 +21,6 @@ import {
   createLinearClient,
   createRetryRun,
   cursorProvider,
-  executeGitHubPrCreate,
-  executeLinearCommentCreate,
   getWorkflowStatus,
   createLinearTrackerAdapter,
   githubWritePolicy,
@@ -46,7 +44,6 @@ import {
   runCursorAgentProvider,
   runHook,
   scanHarnessRepository,
-  validateIntegrationWriteExecution,
   WorkflowError,
   WorkflowRuntime,
   WorkspaceError,
@@ -86,7 +83,6 @@ import {
   HarnessScanRequestSchema,
   HarnessScanResult,
   HarnessStatus,
-  IntegrationWriteExecutionRequestSchema,
   IntegrationWritePreview,
   IntegrationWriteResult,
   ReviewArtifactSnapshot,
@@ -106,6 +102,10 @@ import {
   WorkspaceInfo,
   WorkspaceInventory,
   WriteActionAvailability,
+  WriteActionPreviewContract,
+  WriteActionPreviewContractSchema,
+  LinearStatusUpdatePreview,
+  LinearStatusUpdatePreviewSchema,
 } from "@symphonia/types";
 import {
   AuthDisconnectRequestSchema,
@@ -671,6 +671,7 @@ export class SymphoniaDaemon {
         return sendJson(response, 200, {
           writeActions: this.eventStore.listIntegrationWriteActionsForRun(runId),
           availability: this.getWriteActionAvailability(runId),
+          previews: await this.getWriteActionPreviews(runId),
         });
       }
 
@@ -682,8 +683,8 @@ export class SymphoniaDaemon {
 
       const githubPrCreateMatch = path.match(/^\/runs\/([^/]+)\/github\/pr\/create$/);
       if (request.method === "POST" && githubPrCreateMatch) {
-        const result = await this.createGithubPr(githubPrCreateMatch[1]!, await readJsonBody(request));
-        return sendJson(response, result.status === "succeeded" || result.status === "cancelled" ? 200 : 400, { result });
+        this.requireRun(githubPrCreateMatch[1]!);
+        throw new ApiError(405, "GitHub PR creation is disabled in Milestone 15B; use preview-only write contracts.");
       }
 
       const linearCommentPreviewMatch = path.match(/^\/runs\/([^/]+)\/linear\/comment\/preview$/);
@@ -694,8 +695,8 @@ export class SymphoniaDaemon {
 
       const linearCommentCreateMatch = path.match(/^\/runs\/([^/]+)\/linear\/comment\/create$/);
       if (request.method === "POST" && linearCommentCreateMatch) {
-        const result = await this.createLinearComment(linearCommentCreateMatch[1]!, await readJsonBody(request));
-        return sendJson(response, result.status === "succeeded" || result.status === "cancelled" ? 200 : 400, { result });
+        this.requireRun(linearCommentCreateMatch[1]!);
+        throw new ApiError(405, "Linear comments are disabled in Milestone 15B; use preview-only write contracts.");
       }
 
       const runPromptMatch = path.match(/^\/runs\/([^/]+)\/prompt$/);
@@ -1786,7 +1787,101 @@ export class SymphoniaDaemon {
         policy: writes?.linear ?? null,
         evidenceMissing,
       }),
+      writeAvailability({
+        provider: "linear",
+        kind: "linear_status_update",
+        label: "Update Linear issue status",
+        policy: writes?.linear ?? null,
+        evidenceMissing,
+      }),
     ];
+  }
+
+  private async getWriteActionPreviews(runId: string): Promise<WriteActionPreviewContract[]> {
+    const record = this.requireRecord(runId);
+    const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+    const evidence = this.getRunApprovalEvidence(runId);
+    const availability = evidence.writeActionAvailability;
+    const reviewArtifacts = evidence.reviewArtifact;
+    const githubCredential = this.authManager.resolveCredential("github");
+    const linearCredential = this.authManager.resolveCredential("linear");
+    const githubPreview = await buildGitHubPrPreview({
+      run: record.run,
+      issue: record.issue,
+      workflowConfig: runtime.config,
+      reviewArtifacts,
+      credential: githubCredential,
+      githubClient: null,
+    });
+    const linearCommentPreview = buildLinearCommentPreview({
+      run: record.run,
+      issue: record.issue,
+      workflowConfig: runtime.config,
+      credential: linearCredential,
+    });
+    const linearStatusPreview = this.buildLinearStatusUpdatePreview(record, runtime, evidence, linearCredential?.source ?? "unavailable");
+
+    return [
+      previewContractFromIntegrationPreview({
+        preview: githubPreview,
+        evidence,
+        availability: availability.find((item) => item.kind === "github_pr_create") ?? null,
+        generatedBy: "local-daemon",
+      }),
+      previewContractFromIntegrationPreview({
+        preview: linearCommentPreview,
+        evidence,
+        availability: availability.find((item) => item.kind === "linear_comment_create") ?? null,
+        generatedBy: "local-daemon",
+      }),
+      linearStatusPreviewContract({
+        run: record.run,
+        issue: record.issue,
+        preview: linearStatusPreview,
+        credentialSource: linearCredential?.source ?? "unavailable",
+        evidence,
+        availability: availability.find((item) => item.kind === "linear_status_update") ?? null,
+        generatedBy: "local-daemon",
+      }),
+    ];
+  }
+
+  private buildLinearStatusUpdatePreview(
+    record: RunRecord,
+    runtime: WorkflowRuntime,
+    evidence: RunApprovalEvidence,
+    credentialSource: IntegrationWritePreview["credentialSource"],
+  ) {
+    const config = runtime.config.tracker;
+    const policy = linearWritePolicy(config);
+    const proposedStatus = proposedLinearStatusForRun(config, record.run.status);
+    const blockers: string[] = [];
+    const warnings: string[] = [];
+
+    if (config.kind !== "linear") blockers.push("Tracker is not Linear.");
+    if (config.readOnly) blockers.push("Linear tracker read_only is true.");
+    if (!config.write.enabled) blockers.push("Linear writes are disabled.");
+    if (!config.write.allowStateTransitions) blockers.push("Linear state transitions are disabled.");
+    if (!policy.allowedKinds.includes("linear_status_update")) blockers.push("Linear status updates are not enabled in WORKFLOW.md.");
+    if (credentialSource === "unavailable") blockers.push("Linear credentials are unavailable.");
+    if (!record.issue.id) blockers.push("Linear issue id is unavailable.");
+    if (!proposedStatus) blockers.push("No Linear target status is configured for this run result.");
+    if (evidence.missingEvidenceReasons.length > 0) blockers.push(...evidence.missingEvidenceReasons);
+    if (record.issue.state && proposedStatus && record.issue.state === proposedStatus) {
+      warnings.push(`Linear issue is already in ${proposedStatus}.`);
+    }
+
+    return LinearStatusUpdatePreviewSchema.parse({
+      runId: record.run.id,
+      issueId: record.issue.id,
+      issueIdentifier: record.issue.identifier,
+      issueUrl: record.issue.url,
+      currentStatus: record.issue.state,
+      proposedStatus,
+      finalRunState: record.run.status,
+      blockers: [...new Set(blockers)],
+      warnings,
+    });
   }
 
   private getFileSummaryEvidence(
@@ -1875,31 +1970,9 @@ export class SymphoniaDaemon {
     return preview;
   }
 
-  async createGithubPr(runId: string, input: unknown) {
+  async createGithubPr(runId: string, _input: unknown) {
     this.requireRun(runId);
-    const request = IntegrationWriteExecutionRequestSchema.parse(input);
-    const preview = this.eventStore.getIntegrationWritePreview(request.previewId);
-    if (!preview || preview.runId !== runId) throw new ApiError(404, "GitHub PR preview not found for this run.");
-    validateIntegrationWriteExecution(preview, request, "github_pr_create", "github");
-    const existing = this.getMatchingIdempotencyResult(preview, request);
-    if (existing) return existing;
-    const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
-    const credential = await this.resolveGithubCredential();
-    this.appendWriteStartedEvent(preview);
-    const result = await executeGitHubPrCreate({
-      preview,
-      request,
-      workflowConfig: runtime.config,
-      credential,
-      githubClient: this.githubClientForRuntime(runtime, credential?.token ?? null),
-      existingResult: null,
-    });
-    this.eventStore.saveIntegrationWriteResult(result, request.idempotencyKey ?? null);
-    this.appendWriteResultEvents(preview, result);
-    if (result.status === "succeeded") {
-      await this.refreshReviewArtifactsForRun(runId).catch(() => null);
-    }
-    return result;
+    throw new ApiError(405, "GitHub PR creation is disabled in Milestone 15B; use preview-only write contracts.");
   }
 
   async previewLinearComment(runId: string, input: unknown): Promise<IntegrationWritePreview> {
@@ -1919,32 +1992,9 @@ export class SymphoniaDaemon {
     return preview;
   }
 
-  async createLinearComment(runId: string, input: unknown) {
+  async createLinearComment(runId: string, _input: unknown) {
     this.requireRun(runId);
-    const request = IntegrationWriteExecutionRequestSchema.parse(input);
-    const preview = this.eventStore.getIntegrationWritePreview(request.previewId);
-    if (!preview || preview.runId !== runId) throw new ApiError(404, "Linear comment preview not found for this run.");
-    validateIntegrationWriteExecution(preview, request, "linear_comment_create", "linear");
-    const existing = this.getMatchingIdempotencyResult(preview, request);
-    if (existing) return existing;
-    const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
-    let credential = this.authManager.resolveCredential("linear");
-    if (credential?.connection.status === "expired") {
-      await this.authManager.refreshConnection("linear");
-      credential = this.authManager.resolveCredential("linear");
-    }
-    this.appendWriteStartedEvent(preview);
-    const result = await executeLinearCommentCreate({
-      preview,
-      request,
-      workflowConfig: runtime.config,
-      credential,
-      linearClient: this.linearClientForRuntime(runtime, credential?.authorizationHeader ?? null),
-      existingResult: null,
-    });
-    this.eventStore.saveIntegrationWriteResult(result, request.idempotencyKey ?? null);
-    this.appendWriteResultEvents(preview, result);
-    return result;
+    throw new ApiError(405, "Linear comments are disabled in Milestone 15B; use preview-only write contracts.");
   }
 
   listWorkspaces(): WorkspaceInfo[] {
@@ -3124,6 +3174,257 @@ function isProviderEvent(event: AgentEvent): boolean {
 
 function isProviderErrorEvent(event: AgentEvent): boolean {
   return event.type.endsWith(".error") || event.type === "provider.stderr";
+}
+
+function previewContractFromIntegrationPreview(input: {
+  preview: IntegrationWritePreview;
+  evidence: RunApprovalEvidence;
+  availability: WriteActionAvailability | null;
+  generatedBy: string | null;
+}): WriteActionPreviewContract {
+  const approvalEvidenceId = `approval-evidence:${input.preview.runId}`;
+  const reviewArtifactId = input.evidence.reviewArtifactIdentifier;
+  const payload = {
+    githubPr: input.preview.githubPr,
+    linearComment: input.preview.linearComment,
+    linearStatusUpdate: null,
+  };
+  const immutablePayload = {
+    kind: input.preview.kind,
+    runId: input.preview.runId,
+    issueId: input.preview.issueId,
+    issueIdentifier: input.preview.issueIdentifier,
+    target: input.preview.target,
+    title: input.preview.title,
+    bodyPreview: input.preview.bodyPreview,
+    reviewArtifactId,
+    approvalEvidenceId,
+    payload,
+  };
+  const payloadHash = sha256(stableStringify(immutablePayload));
+  const availabilityReasons = nonConfirmationReasons(input.availability?.reasons ?? []);
+  const blockingReasons = uniqueStrings([...input.preview.blockers, ...availabilityReasons]);
+  const riskWarnings = uniqueStrings([
+    ...input.preview.warnings,
+    "Preview-only in Milestone 15B; no external write endpoint will execute this action.",
+  ]);
+  const generatedAt = nowIso();
+  const targetRepository =
+    input.preview.target.owner && input.preview.target.repo ? `${input.preview.target.owner}/${input.preview.target.repo}` : null;
+  const contract = WriteActionPreviewContractSchema.parse({
+    id: `write-preview-${input.preview.runId}-${input.preview.kind}-${payloadHash.slice(0, 12)}`,
+    runId: input.preview.runId,
+    issueId: input.preview.issueId,
+    issueIdentifier: input.preview.issueIdentifier,
+    kind: input.preview.kind,
+    targetSystem: input.preview.provider,
+    targetLabel: writePreviewTargetLabel(input.preview),
+    status: writePreviewStatus(input.availability, blockingReasons, input.evidence),
+    title: previewContractTitle(input.preview),
+    bodyPreview: input.preview.bodyPreview,
+    targetRepository,
+    targetBranch: input.preview.target.branch,
+    baseBranch: input.preview.target.baseBranch,
+    changedFiles: input.evidence.changedFiles,
+    reviewArtifactId,
+    reviewArtifactPath: input.evidence.reviewArtifactPath,
+    approvalEvidenceId,
+    approvalEvidenceSource: `approval-evidence:${input.evidence.fileSummarySource}`,
+    requiredPermissions: input.preview.requiredPermissions,
+    confirmationRequired: input.preview.confirmationRequired,
+    confirmationPrompt: confirmationPrompt(input.preview.confirmationRequired, input.preview.confirmationPhrase),
+    blockingReasons,
+    riskWarnings,
+    idempotencyKey: previewIdempotencyKey(input.preview.runId, input.preview.kind, payloadHash),
+    payloadHash,
+    generatedAt,
+    expiresAt: input.preview.expiresAt,
+    dryRunOnly: true,
+    payload,
+    audit: {
+      runId: input.preview.runId,
+      issueId: input.preview.issueId,
+      kind: input.preview.kind,
+      targetSystem: input.preview.provider,
+      targetIdentifier: writePreviewTargetLabel(input.preview),
+      payloadHash,
+      approvalEvidenceSource: `approval-evidence:${input.evidence.fileSummarySource}`,
+      reviewArtifactSource: reviewArtifactId,
+      generatedAt,
+      generatedBy: input.generatedBy,
+      idempotencyKey: previewIdempotencyKey(input.preview.runId, input.preview.kind, payloadHash),
+      status: "previewed",
+      externalWriteId: null,
+    },
+  });
+
+  return contract;
+}
+
+function linearStatusPreviewContract(input: {
+  run: Run;
+  issue: Issue;
+  preview: LinearStatusUpdatePreview;
+  credentialSource: IntegrationWritePreview["credentialSource"];
+  evidence: RunApprovalEvidence;
+  availability: WriteActionAvailability | null;
+  generatedBy: string | null;
+}): WriteActionPreviewContract {
+  const approvalEvidenceId = `approval-evidence:${input.run.id}`;
+  const reviewArtifactId = input.evidence.reviewArtifactIdentifier;
+  const bodyPreview = input.preview.proposedStatus
+    ? `Move ${input.issue.identifier} from ${input.preview.currentStatus ?? "unknown"} to ${input.preview.proposedStatus}.`
+    : `No Linear target status is configured for ${input.run.status}.`;
+  const payload = {
+    githubPr: null,
+    linearComment: null,
+    linearStatusUpdate: input.preview,
+  };
+  const immutablePayload = {
+    kind: "linear_status_update",
+    runId: input.run.id,
+    issueId: input.issue.id,
+    issueIdentifier: input.issue.identifier,
+    target: { provider: "linear", issueId: input.issue.id, issueIdentifier: input.issue.identifier, url: input.issue.url },
+    bodyPreview,
+    reviewArtifactId,
+    approvalEvidenceId,
+    payload,
+  };
+  const payloadHash = sha256(stableStringify(immutablePayload));
+  const availabilityReasons = nonConfirmationReasons(input.availability?.reasons ?? []);
+  const blockingReasons = uniqueStrings([...input.preview.blockers, ...availabilityReasons]);
+  const generatedAt = nowIso();
+  const contract = WriteActionPreviewContractSchema.parse({
+    id: `write-preview-${input.run.id}-linear_status_update-${payloadHash.slice(0, 12)}`,
+    runId: input.run.id,
+    issueId: input.issue.id,
+    issueIdentifier: input.issue.identifier,
+    kind: "linear_status_update",
+    targetSystem: "linear",
+    targetLabel: input.issue.identifier,
+    status: writePreviewStatus(input.availability, blockingReasons, input.evidence),
+    title: "Linear status update",
+    bodyPreview,
+    targetRepository: null,
+    targetBranch: null,
+    baseBranch: null,
+    changedFiles: input.evidence.changedFiles,
+    reviewArtifactId,
+    reviewArtifactPath: input.evidence.reviewArtifactPath,
+    approvalEvidenceId,
+    approvalEvidenceSource: `approval-evidence:${input.evidence.fileSummarySource}`,
+    requiredPermissions: ["Linear issueUpdate"],
+    confirmationRequired: true,
+    confirmationPrompt: confirmationPrompt(true, confirmationPhraseFromAvailability(input.availability)),
+    blockingReasons,
+    riskWarnings: uniqueStrings([
+      ...input.preview.warnings,
+      `Credential source would be ${input.credentialSource}.`,
+      "Preview-only in Milestone 15B; no external write endpoint will execute this action.",
+    ]),
+    idempotencyKey: previewIdempotencyKey(input.run.id, "linear_status_update", payloadHash),
+    payloadHash,
+    generatedAt,
+    expiresAt: null,
+    dryRunOnly: true,
+    payload,
+    audit: {
+      runId: input.run.id,
+      issueId: input.issue.id,
+      kind: "linear_status_update",
+      targetSystem: "linear",
+      targetIdentifier: input.issue.identifier,
+      payloadHash,
+      approvalEvidenceSource: `approval-evidence:${input.evidence.fileSummarySource}`,
+      reviewArtifactSource: reviewArtifactId,
+      generatedAt,
+      generatedBy: input.generatedBy,
+      idempotencyKey: previewIdempotencyKey(input.run.id, "linear_status_update", payloadHash),
+      status: "previewed",
+      externalWriteId: null,
+    },
+  });
+
+  return contract;
+}
+
+function writePreviewStatus(
+  availability: WriteActionAvailability | null,
+  blockingReasons: string[],
+  evidence: RunApprovalEvidence,
+): WriteActionPreviewContract["status"] {
+  if (evidence.missingEvidenceReasons.length > 0) return "evidence_missing";
+  if (!availability) return "unavailable";
+  if (availability.status === "read_only") return "read_only";
+  if (availability.status === "disabled" || availability.status === "blocked") return "blocked";
+  if (availability.status === "unavailable") return "unavailable";
+  return blockingReasons.length > 0 ? "blocked" : "preview_available";
+}
+
+function previewContractTitle(preview: IntegrationWritePreview): string {
+  if (preview.githubPr) return preview.githubPr.title;
+  if (preview.linearComment) return "Linear run comment";
+  return preview.title;
+}
+
+function writePreviewTargetLabel(preview: IntegrationWritePreview): string {
+  if (preview.provider === "github") {
+    const repo = preview.target.owner && preview.target.repo ? `${preview.target.owner}/${preview.target.repo}` : "GitHub repository";
+    return preview.target.branch ? `${repo} on ${preview.target.branch}` : repo;
+  }
+  return preview.target.issueIdentifier ?? preview.issueIdentifier ?? "Linear issue";
+}
+
+function confirmationPrompt(required: boolean, phrase: string): string {
+  return required
+    ? `Future execution would require explicit confirmation: ${phrase}.`
+    : "Future execution would require an explicit approval record before external writes are enabled.";
+}
+
+function confirmationPhraseFromAvailability(availability: WriteActionAvailability | null): string {
+  const phraseReason = availability?.reasons.find((reason) => reason.startsWith("Manual confirmation phrase is required: "));
+  return phraseReason?.replace("Manual confirmation phrase is required: ", "").replace(/\.$/, "") ?? "configured confirmation phrase";
+}
+
+function nonConfirmationReasons(reasons: string[]): string[] {
+  return reasons.filter(
+    (reason) =>
+      !reason.startsWith("Manual confirmation phrase is required: ") &&
+      reason !== "Policy permits this action only after explicit review.",
+  );
+}
+
+function previewIdempotencyKey(runId: string, kind: IntegrationWriteKind, payloadHash: string): string {
+  return `preview:${kind}:${runId}:${payloadHash.slice(0, 24)}`;
+}
+
+function proposedLinearStatusForRun(config: WorkflowRuntime["config"]["tracker"], status: Run["status"]): string | null {
+  if (!config.write.allowStateTransitions) return null;
+  if (status === "succeeded") return config.write.moveToStateOnSuccess;
+  if (status === "failed" || status === "timed_out" || status === "cancelled" || status === "interrupted" || status === "orphaned") {
+    return config.write.moveToStateOnFailure;
+  }
+  return config.write.moveToStateOnStart;
+}
+
+function sha256(value: string): string {
+  return createHash("sha256").update(value).digest("hex");
+}
+
+function stableStringify(value: unknown): string {
+  if (Array.isArray(value)) return `[${value.map(stableStringify).join(",")}]`;
+  if (value && typeof value === "object") {
+    return `{${Object.entries(value as Record<string, unknown>)
+      .sort(([left], [right]) => left.localeCompare(right))
+      .map(([key, nested]) => `${JSON.stringify(key)}:${stableStringify(nested)}`)
+      .join(",")}}`;
+  }
+  return JSON.stringify(value) ?? "null";
+}
+
+function uniqueStrings(values: string[]): string[] {
+  return [...new Set(values.filter((value) => value.trim().length > 0))];
 }
 
 function writeAvailability(input: {
