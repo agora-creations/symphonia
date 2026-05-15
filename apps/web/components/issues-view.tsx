@@ -2145,6 +2145,10 @@ function GitHubPrPreflightPanel({ preflight }: { preflight: GitHubPrPreflightRes
         <PreviewKeyValue label="Review" value={preflight.reviewArtifact.status} />
         <PreviewKeyValue label="Preview hash" value={preflight.preview.matches ? "matches" : "mismatch"} />
         <PreviewKeyValue label="Remote state" value={preflight.remoteState.ambiguous ? "ambiguous" : "clear"} />
+        <PreviewKeyValue label="Branch freshness" value={preflight.branchFreshness.status.replaceAll("_", " ")} />
+        <PreviewKeyValue label="Base advanced" value={preflight.branchFreshness.baseHasAdvanced === null ? "unknown" : preflight.branchFreshness.baseHasAdvanced ? "yes" : "no"} />
+        <PreviewKeyValue label="Stored base" value={shortCommit(preflight.branchFreshness.storedBaseCommit)} />
+        <PreviewKeyValue label="Remote base" value={shortCommit(preflight.branchFreshness.currentRemoteBaseCommit)} />
       </dl>
       {preflight.diff.missingFromLiveDiff.length > 0 && (
         <StatusList title="Missing from live diff" tone="danger" items={preflight.diff.missingFromLiveDiff.slice(0, 8)} />
@@ -2152,10 +2156,26 @@ function GitHubPrPreflightPanel({ preflight }: { preflight: GitHubPrPreflightRes
       {preflight.diff.extraInLiveDiff.length > 0 && (
         <StatusList title="Extra in live diff" tone="danger" items={preflight.diff.extraInLiveDiff.slice(0, 8)} />
       )}
+      {preflight.branchFreshness.upstreamChangedFiles.length > 0 && (
+        <StatusList title="Upstream changed files" tone="warning" items={preflight.branchFreshness.upstreamChangedFiles.slice(0, 8)} />
+      )}
+      {preflight.branchFreshness.overlappingChangedFiles.length > 0 && (
+        <StatusList title="Branch freshness overlaps" tone="danger" items={preflight.branchFreshness.overlappingChangedFiles.slice(0, 8)} />
+      )}
+      {preflight.branchFreshness.blockingReasons.length > 0 && (
+        <StatusList title="Branch freshness blocking reasons" tone="danger" items={preflight.branchFreshness.blockingReasons} />
+      )}
+      {preflight.branchFreshness.warnings.length > 0 && (
+        <StatusList title="Branch freshness warnings" tone="warning" items={preflight.branchFreshness.warnings} />
+      )}
       {preflight.blockingReasons.length > 0 && <StatusList title="Preflight blocking reasons" tone="danger" items={preflight.blockingReasons} />}
       {preflight.warnings.length > 0 && <StatusList title="Preflight warnings" tone="warning" items={preflight.warnings} />}
     </div>
   );
+}
+
+function shortCommit(value: string | null): string {
+  return value ? value.slice(0, 12) : "unknown";
 }
 
 function StatusList({ items, title, tone }: { items: string[]; title: string; tone: "danger" | "warning" }) {
