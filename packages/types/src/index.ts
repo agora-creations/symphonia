@@ -1472,6 +1472,24 @@ export const GitHubPrPreflightWriteModeSchema = z.object({
 });
 export type GitHubPrPreflightWriteMode = z.infer<typeof GitHubPrPreflightWriteModeSchema>;
 
+export const GitHubPrBranchFreshnessStatusSchema = z.enum(["fresh", "stale_no_overlap", "stale_overlap", "unknown"]);
+export type GitHubPrBranchFreshnessStatus = z.infer<typeof GitHubPrBranchFreshnessStatusSchema>;
+
+export const GitHubPrBranchFreshnessSchema = z.object({
+  status: GitHubPrBranchFreshnessStatusSchema,
+  baseBranch: z.string().min(1).nullable(),
+  storedBaseCommit: z.string().min(1).nullable(),
+  currentRemoteBaseCommit: z.string().min(1).nullable(),
+  baseHasAdvanced: z.boolean().nullable(),
+  upstreamChangedFiles: z.array(z.string().min(1)),
+  approvalChangedFiles: z.array(z.string().min(1)),
+  overlappingChangedFiles: z.array(z.string().min(1)),
+  checkedAt: isoDateTime,
+  blockingReasons: z.array(z.string().min(1)),
+  warnings: z.array(z.string().min(1)),
+});
+export type GitHubPrBranchFreshness = z.infer<typeof GitHubPrBranchFreshnessSchema>;
+
 export const GitHubPrPreflightResultSchema = z.object({
   runId: z.string().min(1),
   previewId: z.string().min(1).nullable(),
@@ -1486,6 +1504,7 @@ export const GitHubPrPreflightResultSchema = z.object({
   preview: GitHubPrPreflightPreviewSchema,
   remoteState: GitHubPrPreflightRemoteStateSchema,
   writeMode: GitHubPrPreflightWriteModeSchema,
+  branchFreshness: GitHubPrBranchFreshnessSchema,
   blockingReasons: z.array(z.string().min(1)),
   warnings: z.array(z.string().min(1)),
   requiredConfirmation: z.string().min(1).nullable(),

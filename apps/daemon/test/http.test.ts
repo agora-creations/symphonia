@@ -437,6 +437,7 @@ describe("daemon API", () => {
       },
       diff: { matchesApprovalEvidence: true },
       remoteState: { ambiguous: false },
+      branchFreshness: { status: "fresh", baseHasAdvanced: false },
     });
 
     const result = await requestJson<GitHubPrExecutionResultResponse>("POST", `/runs/${run.id}/github/pr/create`, {
@@ -707,6 +708,203 @@ describe("daemon API", () => {
     expect(preflight.preflight.preview.matches).toBe(false);
     expect(preflight.preflight.blockingReasons).toEqual(
       expect.arrayContaining(["Preview payload hash does not match the current GitHub PR preview."]),
+    );
+  });
+
+  it("warns when PR branch base is stale without overlapping approval evidence", async () => {
+    process.env.GITHUB_TOKEN = "ghu_write_secret";
+    process.env.LINEAR_API_KEY = "lin_write_secret";
+    const sourceRepoPath = join(directory, "source-repo");
+    const remotePath = join(directory, "agora-creations", "symphonia.git");
+    prepareSourceRepository(sourceRepoPath, remotePath);
+    const created = createDaemonServer(new EventStore(join(directory, "freshness-no-overlap.sqlite")), {
+      workflowPath,
+      cwd: sourceRepoPath,
+      githubFetch: fakeGitHubWriteFetch(),
+      linearFetch: fakeLinearFetch({ state: "Todo" }),
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeWorkflow({
+      codexCommand: fakeCodexCommand("success-change"),
+      githubEnabled: true,
+      githubReadOnly: false,
+      githubWriteEnabled: true,
+      githubAllowCreatePr: true,
+      githubAllowPush: true,
+      workspaceRoot: join(directory, "isolated-workspaces"),
+    });
+    await daemon.refreshIssueCache();
+
+    const run = await daemon.startRun("linear-issue-101", "codex");
+    await waitForTerminal(run.id, "succeeded");
+    await requestJson("POST", `/runs/${run.id}/review-artifacts/refresh`);
+    const actions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
+    const githubPreview = actions.previews.find((preview) => preview.kind === "github_pr_create")!;
+    advanceSourceRepository(sourceRepoPath, "upstream-only.txt", "upstream only\n", "Advance base without overlap");
+
+    const preflight = await requestJson<GitHubPrPreflightResponse>("GET", githubPreflightPath(run.id, githubPreview));
+
+    expect(preflight.preflight.canExecute).toBe(true);
+    expect(preflight.preflight.status).toBe("warning");
+    expect(preflight.preflight.branchFreshness).toMatchObject({
+      status: "stale_no_overlap",
+      baseBranch: "main",
+      baseHasAdvanced: true,
+      upstreamChangedFiles: ["upstream-only.txt"],
+      approvalChangedFiles: ["change.txt"],
+      overlappingChangedFiles: [],
+      blockingReasons: [],
+    });
+    expect(preflight.preflight.branchFreshness.currentRemoteBaseCommit).not.toBe(
+      preflight.preflight.branchFreshness.storedBaseCommit,
+    );
+  });
+
+  it("blocks execution when PR branch base advanced over approval evidence files", async () => {
+    process.env.GITHUB_TOKEN = "ghu_write_secret";
+    process.env.LINEAR_API_KEY = "lin_write_secret";
+    const store = new EventStore(join(directory, "freshness-overlap.sqlite"));
+    let githubPrCreateCalls = 0;
+    const githubBaseFetch = fakeGitHubWriteFetch();
+    const githubFetch: GitHubFetch = async (input, init) => {
+      const url = new URL(input);
+      if (url.pathname === "/repos/agora-creations/symphonia/pulls" && init?.method === "POST") githubPrCreateCalls += 1;
+      return githubBaseFetch(input, init);
+    };
+    const sourceRepoPath = join(directory, "source-repo");
+    const remotePath = join(directory, "agora-creations", "symphonia.git");
+    prepareSourceRepository(sourceRepoPath, remotePath);
+    const created = createDaemonServer(store, {
+      workflowPath,
+      cwd: sourceRepoPath,
+      githubFetch,
+      linearFetch: fakeLinearFetch({ state: "Todo" }),
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeWorkflow({
+      codexCommand: fakeCodexCommand("success-change"),
+      githubEnabled: true,
+      githubReadOnly: false,
+      githubWriteEnabled: true,
+      githubAllowCreatePr: true,
+      githubAllowPush: true,
+      workspaceRoot: join(directory, "isolated-workspaces"),
+    });
+    await daemon.refreshIssueCache();
+
+    const run = await daemon.startRun("linear-issue-101", "codex");
+    await waitForTerminal(run.id, "succeeded");
+    await requestJson("POST", `/runs/${run.id}/review-artifacts/refresh`);
+    const actions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
+    const githubPreview = actions.previews.find((preview) => preview.kind === "github_pr_create")!;
+    advanceSourceRepository(sourceRepoPath, "change.txt", "upstream conflict\n", "Advance base with overlap");
+
+    const preflight = await requestJson<GitHubPrPreflightResponse>("GET", githubPreflightPath(run.id, githubPreview));
+    expect(preflight.preflight.canExecute).toBe(false);
+    expect(preflight.preflight.branchFreshness).toMatchObject({
+      status: "stale_overlap",
+      baseHasAdvanced: true,
+      upstreamChangedFiles: ["change.txt"],
+      approvalChangedFiles: ["change.txt"],
+      overlappingChangedFiles: ["change.txt"],
+    });
+    expect(preflight.preflight.blockingReasons).toEqual(
+      expect.arrayContaining(["Target base branch main advanced and upstream changed approval evidence files: change.txt."]),
+    );
+
+    const blocked = await requestJson<GitHubPrExecutionResultResponse>("POST", `/runs/${run.id}/github/pr/create`, githubExecutionBody(run.id, githubPreview));
+    expect(blocked.result.status).toBe("blocked");
+    expect(blocked.result.preflight?.branchFreshness.status).toBe("stale_overlap");
+    expect(store.findLocalWriteExecutionByIdempotencyKey(githubPreview.idempotencyKey)).toBeNull();
+    expect(githubPrCreateCalls).toBe(0);
+  });
+
+  it("blocks PR preflight when stored base commit is missing", async () => {
+    process.env.GITHUB_TOKEN = "ghu_write_secret";
+    process.env.LINEAR_API_KEY = "lin_write_secret";
+    const store = new EventStore(join(directory, "freshness-missing-base.sqlite"));
+    const sourceRepoPath = join(directory, "source-repo");
+    const remotePath = join(directory, "agora-creations", "symphonia.git");
+    prepareSourceRepository(sourceRepoPath, remotePath);
+    const created = createDaemonServer(store, {
+      workflowPath,
+      cwd: sourceRepoPath,
+      githubFetch: fakeGitHubWriteFetch(),
+      linearFetch: fakeLinearFetch({ state: "Todo" }),
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeWorkflow({
+      codexCommand: fakeCodexCommand("success-change"),
+      githubEnabled: true,
+      githubReadOnly: false,
+      githubWriteEnabled: true,
+      githubAllowCreatePr: true,
+      githubAllowPush: true,
+      workspaceRoot: join(directory, "isolated-workspaces"),
+    });
+    await daemon.refreshIssueCache();
+
+    const run = await daemon.startRun("linear-issue-101", "codex");
+    await waitForTerminal(run.id, "succeeded");
+    await requestJson("POST", `/runs/${run.id}/review-artifacts/refresh`);
+    const ownership = store.getRunWorkspaceOwnership(run.id)!;
+    store.saveRunWorkspaceOwnership({ ...ownership, baseCommit: null });
+    const actions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
+    const githubPreview = actions.previews.find((preview) => preview.kind === "github_pr_create")!;
+
+    const preflight = await requestJson<GitHubPrPreflightResponse>("GET", githubPreflightPath(run.id, githubPreview));
+    expect(preflight.preflight.canExecute).toBe(false);
+    expect(preflight.preflight.branchFreshness).toMatchObject({
+      status: "unknown",
+      storedBaseCommit: null,
+      currentRemoteBaseCommit: null,
+    });
+    expect(preflight.preflight.blockingReasons).toEqual(
+      expect.arrayContaining(["Branch freshness could not be verified because workspace ownership has no stored base commit."]),
+    );
+  });
+
+  it("reports unknown branch freshness when remote base is unavailable", async () => {
+    process.env.GITHUB_TOKEN = "ghu_write_secret";
+    process.env.LINEAR_API_KEY = "lin_write_secret";
+    const sourceRepoPath = join(directory, "source-repo");
+    const remotePath = join(directory, "agora-creations", "symphonia.git");
+    prepareSourceRepository(sourceRepoPath, remotePath);
+    const created = createDaemonServer(new EventStore(join(directory, "freshness-remote-unavailable.sqlite")), {
+      workflowPath,
+      cwd: sourceRepoPath,
+      githubFetch: fakeGitHubWriteFetch(),
+      linearFetch: fakeLinearFetch({ state: "Todo" }),
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeWorkflow({
+      codexCommand: fakeCodexCommand("success-change"),
+      githubEnabled: true,
+      githubReadOnly: false,
+      githubWriteEnabled: true,
+      githubAllowCreatePr: true,
+      githubAllowPush: true,
+      workspaceRoot: join(directory, "isolated-workspaces"),
+    });
+    await daemon.refreshIssueCache();
+
+    const run = await daemon.startRun("linear-issue-101", "codex");
+    await waitForTerminal(run.id, "succeeded");
+    await requestJson("POST", `/runs/${run.id}/review-artifacts/refresh`);
+    const actions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
+    const githubPreview = actions.previews.find((preview) => preview.kind === "github_pr_create")!;
+    execFileSync("git", ["remote", "remove", "origin"], { cwd: daemon.requireRun(run.id).workspacePath!, stdio: "ignore" });
+
+    const preflight = await requestJson<GitHubPrPreflightResponse>("GET", githubPreflightPath(run.id, githubPreview));
+    expect(preflight.preflight.canExecute).toBe(false);
+    expect(preflight.preflight.branchFreshness.status).toBe("unknown");
+    expect(preflight.preflight.branchFreshness.currentRemoteBaseCommit).toBeNull();
+    expect(preflight.preflight.branchFreshness.blockingReasons.join(" ")).toContain(
+      "Branch freshness could not determine current remote base commit",
     );
   });
 
@@ -1848,6 +2046,13 @@ function prepareSourceRepository(sourcePath: string, remotePath: string): void {
   execFileSync("git", ["remote", "add", "origin", remotePath], { cwd: sourcePath, stdio: "ignore" });
   execFileSync("git", ["add", "README.md"], { cwd: sourcePath, stdio: "ignore" });
   execFileSync("git", ["commit", "-m", "Initial source commit"], { cwd: sourcePath, stdio: "ignore" });
+  execFileSync("git", ["push", "origin", "main"], { cwd: sourcePath, stdio: "ignore" });
+}
+
+function advanceSourceRepository(sourcePath: string, fileName: string, contents: string, message: string): void {
+  writeFileSync(join(sourcePath, fileName), contents);
+  execFileSync("git", ["add", fileName], { cwd: sourcePath, stdio: "ignore" });
+  execFileSync("git", ["commit", "-m", message], { cwd: sourcePath, stdio: "ignore" });
   execFileSync("git", ["push", "origin", "main"], { cwd: sourcePath, stdio: "ignore" });
 }
 

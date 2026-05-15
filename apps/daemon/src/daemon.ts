@@ -2152,6 +2152,14 @@ export class SymphoniaDaemon {
 
     const diff = comparePreflightChangedFiles(inspection?.diff.files ?? [], evidence.changedFiles);
     const disallowedFiles = disallowedPreflightFiles(diff.liveChangedFiles.map((file) => file.path));
+    const branchFreshness = await checkPreflightBranchFreshness({
+      workspacePath: workspacePath && workspaceExists && isGitRepository ? workspacePath : null,
+      remoteName: runtime.config.github.remoteName,
+      baseBranch,
+      storedBaseCommit: ownership?.baseCommit ?? null,
+      approvalChangedFiles: diff.evidenceChangedFiles,
+      checkedAt,
+    });
     const previewPayloadMatches = requestedPayloadHash ? requestedPayloadHash === expectedPayloadHash : Boolean(expectedPayloadHash);
     const baseIsProtectedOrDefault = Boolean(
       baseBranch &&
@@ -2245,6 +2253,8 @@ export class SymphoniaDaemon {
     if (disallowedFiles.length > 0) {
       blockers.push(`Workspace diff includes disallowed local files: ${disallowedFiles.slice(0, 8).join(", ")}.`);
     }
+    blockers.push(...branchFreshness.blockingReasons);
+    warnings.push(...branchFreshness.warnings);
     if (diff.liveChangedFiles.length > 0 && !runtime.config.github.write.allowPush) {
       blockers.push("Workspace has unpublished local changes and github.write.allow_push is false.");
     }
@@ -2337,6 +2347,7 @@ export class SymphoniaDaemon {
         allowPush: runtime.config.github.write.allowPush,
         allowPrCreate: runtime.config.github.write.allowCreatePr,
       },
+      branchFreshness,
       blockingReasons: uniqueBlockers,
       warnings: uniqueWarnings,
       requiredConfirmation: previewContract?.confirmationPhrase ?? policy.confirmationPhrase,
@@ -4195,6 +4206,170 @@ function comparePreflightChangedFiles(liveChangedFiles: ChangedFile[], evidenceC
     hasUnrelatedDirtyFiles: extraInLiveDiff.length > 0,
     matchesApprovalEvidence: evidencePaths.size > 0 && missingFromLiveDiff.length === 0 && extraInLiveDiff.length === 0,
   };
+}
+
+async function checkPreflightBranchFreshness(input: {
+  workspacePath: string | null;
+  remoteName: string;
+  baseBranch: string | null;
+  storedBaseCommit: string | null;
+  approvalChangedFiles: ChangedFile[];
+  checkedAt: string;
+}): Promise<GitHubPrPreflightResult["branchFreshness"]> {
+  const blockingReasons: string[] = [];
+  const warnings: string[] = [];
+  const approvalChangedFiles = uniqueStrings(input.approvalChangedFiles.flatMap(preflightChangedFilePaths)).sort();
+
+  if (!input.workspacePath) blockingReasons.push("Branch freshness could not be verified because the run workspace is unavailable.");
+  if (!input.baseBranch) blockingReasons.push("Branch freshness could not be verified because the base branch is unavailable.");
+  if (!input.storedBaseCommit) blockingReasons.push("Branch freshness could not be verified because workspace ownership has no stored base commit.");
+
+  if (blockingReasons.length > 0) {
+    return {
+      status: "unknown",
+      baseBranch: input.baseBranch,
+      storedBaseCommit: input.storedBaseCommit,
+      currentRemoteBaseCommit: null,
+      baseHasAdvanced: null,
+      upstreamChangedFiles: [],
+      approvalChangedFiles,
+      overlappingChangedFiles: [],
+      checkedAt: input.checkedAt,
+      blockingReasons,
+      warnings,
+    };
+  }
+
+  const remoteBaseRef = `refs/heads/${input.baseBranch}`;
+  const remoteBase = await preflightGit(input.workspacePath!, ["ls-remote", input.remoteName, remoteBaseRef]);
+  const currentRemoteBaseCommit = remoteBase.ok ? parseLsRemoteCommit(remoteBase.stdout) : null;
+  if (!currentRemoteBaseCommit) {
+    return {
+      status: "unknown",
+      baseBranch: input.baseBranch,
+      storedBaseCommit: input.storedBaseCommit,
+      currentRemoteBaseCommit: null,
+      baseHasAdvanced: null,
+      upstreamChangedFiles: [],
+      approvalChangedFiles,
+      overlappingChangedFiles: [],
+      checkedAt: input.checkedAt,
+      blockingReasons: [
+        remoteBase.error
+          ? `Branch freshness could not determine current remote base commit: ${remoteBase.error}`
+          : `Branch freshness could not determine current remote base commit for ${input.remoteName}/${input.baseBranch}.`,
+      ],
+      warnings,
+    };
+  }
+
+  if (input.storedBaseCommit === currentRemoteBaseCommit) {
+    return {
+      status: "fresh",
+      baseBranch: input.baseBranch,
+      storedBaseCommit: input.storedBaseCommit,
+      currentRemoteBaseCommit,
+      baseHasAdvanced: false,
+      upstreamChangedFiles: [],
+      approvalChangedFiles,
+      overlappingChangedFiles: [],
+      checkedAt: input.checkedAt,
+      blockingReasons: [],
+      warnings: [],
+    };
+  }
+
+  const currentCommitAvailable = await preflightGit(input.workspacePath!, ["cat-file", "-e", `${currentRemoteBaseCommit}^{commit}`]);
+  if (!currentCommitAvailable.ok) {
+    const fetch = await preflightGit(input.workspacePath!, ["fetch", "--no-tags", input.remoteName, input.baseBranch!]);
+    if (!fetch.ok) {
+      return {
+        status: "unknown",
+        baseBranch: input.baseBranch,
+        storedBaseCommit: input.storedBaseCommit,
+        currentRemoteBaseCommit,
+        baseHasAdvanced: true,
+        upstreamChangedFiles: [],
+        approvalChangedFiles,
+        overlappingChangedFiles: [],
+        checkedAt: input.checkedAt,
+        blockingReasons: [`Branch freshness could not fetch current remote base commit: ${fetch.error ?? "git fetch failed."}`],
+        warnings,
+      };
+    }
+  }
+
+  const upstreamDiff = await preflightGit(input.workspacePath!, [
+    "diff",
+    "--name-only",
+    `${input.storedBaseCommit}..${currentRemoteBaseCommit}`,
+    "--",
+  ]);
+  if (!upstreamDiff.ok) {
+    return {
+      status: "unknown",
+      baseBranch: input.baseBranch,
+      storedBaseCommit: input.storedBaseCommit,
+      currentRemoteBaseCommit,
+      baseHasAdvanced: true,
+      upstreamChangedFiles: [],
+      approvalChangedFiles,
+      overlappingChangedFiles: [],
+      checkedAt: input.checkedAt,
+      blockingReasons: [`Branch freshness could not compare stored base with current remote base: ${upstreamDiff.error ?? "git diff failed."}`],
+      warnings,
+    };
+  }
+
+  const upstreamChangedFiles = uniqueStrings(
+    upstreamDiff.stdout
+      .split(/\r?\n/u)
+      .map(normalizePreflightPath)
+      .filter(isPreflightString),
+  ).sort();
+  const approvalChangedFileSet = new Set(approvalChangedFiles);
+  const overlappingChangedFiles = upstreamChangedFiles.filter((path) => approvalChangedFileSet.has(path)).sort();
+
+  if (overlappingChangedFiles.length > 0) {
+    return {
+      status: "stale_overlap",
+      baseBranch: input.baseBranch,
+      storedBaseCommit: input.storedBaseCommit,
+      currentRemoteBaseCommit,
+      baseHasAdvanced: true,
+      upstreamChangedFiles,
+      approvalChangedFiles,
+      overlappingChangedFiles,
+      checkedAt: input.checkedAt,
+      blockingReasons: [
+        `Target base branch ${input.baseBranch} advanced and upstream changed approval evidence files: ${overlappingChangedFiles.slice(0, 8).join(", ")}.`,
+      ],
+      warnings,
+    };
+  }
+
+  return {
+    status: "stale_no_overlap",
+    baseBranch: input.baseBranch,
+    storedBaseCommit: input.storedBaseCommit,
+    currentRemoteBaseCommit,
+    baseHasAdvanced: true,
+    upstreamChangedFiles,
+    approvalChangedFiles,
+    overlappingChangedFiles,
+    checkedAt: input.checkedAt,
+    blockingReasons: [],
+    warnings: [`Target base branch ${input.baseBranch} advanced without overlapping approval evidence files.`],
+  };
+}
+
+function parseLsRemoteCommit(stdout: string): string | null {
+  const [firstLine] = stdout
+    .split(/\r?\n/u)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  const [sha] = firstLine?.split(/\s+/u) ?? [];
+  return sha && /^[a-f0-9]{40}$/iu.test(sha) ? sha : null;
 }
 
 function preflightChangedFilePaths(file: ChangedFile): string[] {

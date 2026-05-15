@@ -45,6 +45,8 @@ Preflight checks:
 - disallowed local files such as secret/env/database artifacts are not included;
 - existing remote branch state is unambiguous;
 - existing PR state is unambiguous;
+- branch freshness against the current target base is known;
+- stale base changes do not overlap approval-evidence changed files;
 - GitHub write posture is explicitly manual-enabled before execution;
 - idempotency records do not conflict.
 
@@ -114,6 +116,20 @@ Preflight checks:
 
 Branch creation and broad branch management remain deferred. 15C-F uses the current safe workspace branch or blocks.
 
+## Branch Freshness
+
+Preflight compares the workspace ownership stored base commit with the current remote base branch commit. It reports `fresh`, `stale_no_overlap`, `stale_overlap`, or `unknown`.
+
+`fresh` means the run workspace was prepared from the current remote base.
+
+`stale_no_overlap` means the base advanced, but upstream changes do not touch approval-evidence changed files. This is a warning.
+
+`stale_overlap` means the base advanced and upstream touched approval-evidence changed files. This blocks execution.
+
+`unknown` means freshness could not be verified. Unknown is blocking.
+
+The check is read-only. It may fetch base-branch commit objects to compare file paths, but it must not push, create branches, create PRs, or change the worktree.
+
 ## Remote Branch And PR Idempotency
 
 Preflight checks remote branch and PR state without mutating GitHub.
@@ -147,6 +163,8 @@ Blocking failures include:
 - unrelated dirty files;
 - disallowed local files in the diff;
 - preview payload hash mismatch;
+- branch freshness is `stale_overlap`;
+- branch freshness is `unknown`;
 - GitHub read-only or writes disabled;
 - existing branch/PR ambiguity;
 - conflicting idempotency record.
@@ -157,6 +175,7 @@ Warnings may include:
 
 - preflight could not verify an optional remote detail because credentials are unavailable;
 - branch publication would be needed when push is disabled;
+- target base advanced without overlapping approval-evidence files;
 - preflight passed local checks but write mode still requires manual enablement.
 
 Warnings must never override blockers.
@@ -176,6 +195,7 @@ The run proof/write preview UI should show:
 - preview hash status;
 - write mode status;
 - remote branch/PR ambiguity;
+- branch freshness status;
 - blocking reasons and warnings.
 
 When preflight fails, `Create draft PR` must remain hidden or disabled.
