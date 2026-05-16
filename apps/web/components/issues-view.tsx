@@ -24,6 +24,7 @@ import {
 } from "lucide-react";
 import {
   createGithubDraftPr,
+  createLinearComment,
   getConnectedStatus,
   executeWorkspaceCleanup,
   getDaemonStatus,
@@ -72,6 +73,7 @@ import {
   type IntegrationWritePolicy,
   type IntegrationWritePreview,
   type IntegrationWriteResult,
+  type LinearCommentExecutionResponse,
   type LocalWriteExecutionRecord,
   type ProviderHealth,
   type ProviderId,
@@ -1711,7 +1713,7 @@ function WriteActionsPanel({
   const [busy, setBusy] = useState(false);
   const [executingPreviewId, setExecutingPreviewId] = useState<string | null>(null);
   const [confirmationByPreview, setConfirmationByPreview] = useState<Record<string, string>>({});
-  const [executionResult, setExecutionResult] = useState<GitHubPrExecutionResponse | null>(null);
+  const [executionResult, setExecutionResult] = useState<GitHubPrExecutionResponse | LinearCommentExecutionResponse | null>(null);
   const [preflightByPreview, setPreflightByPreview] = useState<Record<string, GitHubPrPreflightResult>>({});
 
   const loadWriteActions = useCallback(async () => {
@@ -1800,6 +1802,36 @@ function WriteActionsPanel({
     [confirmationByPreview, loadWriteActions, run],
   );
 
+  const handleCreateLinearComment = useCallback(
+    async (preview: WriteActionPreviewContract) => {
+      if (!run || preview.kind !== "linear_comment_create" || !preview.payload.linearComment?.issueId || !preview.payload.linearComment.issueIdentifier) {
+        return;
+      }
+      try {
+        setExecutingPreviewId(preview.id);
+        setError(null);
+        const result = await createLinearComment(run.id, {
+          runId: run.id,
+          previewId: preview.id,
+          actionKind: "linear_comment_create",
+          payloadHash: preview.writePayloadHash ?? preview.payloadHash,
+          idempotencyKey: preview.idempotencyKey,
+          confirmationText: confirmationByPreview[preview.id] ?? "",
+          targetIssueId: preview.payload.linearComment.issueId,
+          targetIssueIdentifier: preview.payload.linearComment.issueIdentifier,
+          commentBody: preview.payload.linearComment.body,
+        });
+        setExecutionResult(result);
+        await loadWriteActions();
+      } catch (caught) {
+        setError(caught instanceof Error ? caught.message : "Linear comment creation failed.");
+      } finally {
+        setExecutingPreviewId(null);
+      }
+    },
+    [confirmationByPreview, loadWriteActions, run],
+  );
+
   const previews = writeActionResponse?.previews ?? [];
   const availability = writeActionResponse?.availability ?? approvalEvidence?.writeActionAvailability ?? [];
 
@@ -1811,7 +1843,7 @@ function WriteActionsPanel({
             External write previews
           </h3>
           <p className="mt-1 text-xs text-muted-foreground">
-            GitHub draft PR creation is manual and confirmation-gated for {issue.key}. Linear writes remain disabled.
+            GitHub draft PR creation and Linear comment writeback are manual and confirmation-gated for {issue.key}. Linear status updates remain disabled.
           </p>
         </div>
         {run && (
@@ -1862,6 +1894,7 @@ function WriteActionsPanel({
                   preflight={preflightByPreview[preview.id] ?? null}
                   onConfirmationChange={(value) => setConfirmationByPreview((current) => ({ ...current, [preview.id]: value }))}
                   onCreateDraftPr={() => void handleCreateDraftPr(preview)}
+                  onCreateLinearComment={() => void handleCreateLinearComment(preview)}
                 />
               ))}
             </div>
@@ -1967,14 +2000,16 @@ function WritePreviewContractCard({
   executionResult,
   onConfirmationChange,
   onCreateDraftPr,
+  onCreateLinearComment,
   preflight,
   preview,
 }: {
   confirmationValue: string;
   executing: boolean;
-  executionResult: GitHubPrExecutionResponse | null;
+  executionResult: GitHubPrExecutionResponse | LinearCommentExecutionResponse | null;
   onConfirmationChange: (value: string) => void;
   onCreateDraftPr: () => void;
+  onCreateLinearComment: () => void;
   preflight: GitHubPrPreflightResult | null;
   preview: WriteActionPreviewContract;
 }) {
@@ -1985,6 +2020,12 @@ function WritePreviewContractCard({
     preflight?.canExecute === true &&
     confirmationValue === preview.confirmationPhrase;
   const isGithubPr = preview.kind === "github_pr_create";
+  const isLinearComment = preview.kind === "linear_comment_create";
+  const canPostLinearComment =
+    isLinearComment &&
+    preview.status === "preview_available" &&
+    preview.blockingReasons.length === 0 &&
+    confirmationValue === preview.confirmationPhrase;
   const preflightBlocks = preflight?.blockingReasons ?? [];
   return (
     <article className="rounded-md border p-3">
@@ -2024,6 +2065,17 @@ function WritePreviewContractCard({
             label="Changed"
             value={`${preview.payload.githubPr.changedFilesSummary.filesChanged} files, +${preview.payload.githubPr.changedFilesSummary.additions} -${preview.payload.githubPr.changedFilesSummary.deletions}`}
           />
+        </dl>
+      )}
+
+      {preview.payload.linearComment?.prState && (
+        <dl className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
+          <PreviewKeyValue label="GitHub PR" value={preview.payload.linearComment.prState.prNumber ? `#${preview.payload.linearComment.prState.prNumber}` : "unknown"} />
+          <PreviewKeyValue label="PR state" value={preview.payload.linearComment.prState.state.replaceAll("_", " ")} />
+          <PreviewKeyValue label="Draft" value={preview.payload.linearComment.prState.isDraft === null ? "unknown" : preview.payload.linearComment.prState.isDraft ? "yes" : "no"} />
+          <PreviewKeyValue label="Comment intent" value={preview.payload.linearComment.commentIntent.replaceAll("_", " ")} />
+          {preview.payload.linearComment.prState.prUrl && <PreviewKeyValue label="PR URL" value={preview.payload.linearComment.prState.prUrl} />}
+          <PreviewKeyValue label="Verified" value={formatTime(preview.payload.linearComment.prState.verifiedAt)} />
         </dl>
       )}
 
@@ -2087,6 +2139,33 @@ function WritePreviewContractCard({
         </div>
       )}
 
+      {isLinearComment && preview.blockingReasons.length === 0 && preview.status === "preview_available" && (
+        <div className="mt-3 rounded-md border p-3">
+          <label className="text-xs font-medium" htmlFor={`${preview.id}-confirmation`}>
+            Type {preview.confirmationPhrase} to post one Linear comment
+          </label>
+          <input
+            id={`${preview.id}-confirmation`}
+            value={confirmationValue}
+            onChange={(event) => onConfirmationChange(event.target.value)}
+            className="mt-2 w-full rounded-md border bg-background px-2 py-1.5 font-mono text-xs"
+            placeholder={preview.confirmationPhrase}
+          />
+          <button
+            type="button"
+            disabled={!canPostLinearComment || executing}
+            onClick={onCreateLinearComment}
+            className="mt-2 inline-flex items-center gap-1.5 rounded-md bg-primary px-3 py-1.5 text-xs font-medium text-primary-foreground hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <CheckCircle2 className="h-3.5 w-3.5" />
+            {executing ? "Posting Linear comment..." : "Post Linear comment"}
+          </button>
+          <p className="mt-2 text-xs text-muted-foreground">
+            This writes one Linear comment only after local approval/audit persistence. Linear status updates and GitHub writes remain unavailable.
+          </p>
+        </div>
+      )}
+
       {isGithubPr && (preview.blockingReasons.length > 0 || preview.status !== "preview_available" || preflight?.canExecute !== true) && (
         <p className="mt-3 rounded-md border p-3 text-xs text-muted-foreground">
           Draft PR creation is unavailable until preflight, GitHub write gate, evidence, repository, branch, and confirmation requirements are satisfied.
@@ -2094,12 +2173,18 @@ function WritePreviewContractCard({
         </p>
       )}
 
+      {isLinearComment && (preview.blockingReasons.length > 0 || preview.status !== "preview_available") && (
+        <p className="mt-3 rounded-md border p-3 text-xs text-muted-foreground">
+          Linear comment creation is unavailable until the PR result, Linear comment gate, evidence, target issue, idempotency, and confirmation requirements are satisfied.
+        </p>
+      )}
+
       {executionResult && (
         <div className="mt-3 rounded-md border border-emerald-500/30 bg-emerald-500/10 p-3 text-xs text-emerald-700 dark:text-emerald-300">
-          <p className="font-medium">GitHub PR execution: {executionResult.status.replaceAll("_", " ")}</p>
-          {executionResult.githubPrUrl ? (
-            <a href={executionResult.githubPrUrl} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 hover:underline">
-              PR #{executionResult.githubPrNumber} <ExternalLink className="h-3 w-3" />
+          <p className="font-medium">{executionResultLabel(executionResult)}: {executionResult.status.replaceAll("_", " ")}</p>
+          {executionResultUrl(executionResult) ? (
+            <a href={executionResultUrl(executionResult) ?? ""} target="_blank" rel="noreferrer" className="mt-1 inline-flex items-center gap-1 hover:underline">
+              {executionResultLinkLabel(executionResult)} <ExternalLink className="h-3 w-3" />
             </a>
           ) : (
             <p className="mt-1">{executionResult.errorSummary ?? executionResult.blockingReasons.join(" ")}</p>
@@ -2117,6 +2202,19 @@ function PreviewKeyValue({ label, value }: { label: string; value: string }) {
       <dd className="mt-1 break-all font-medium">{value}</dd>
     </div>
   );
+}
+
+function executionResultLabel(result: GitHubPrExecutionResponse | LinearCommentExecutionResponse): string {
+  return "githubPrUrl" in result ? "GitHub PR execution" : "Linear comment execution";
+}
+
+function executionResultUrl(result: GitHubPrExecutionResponse | LinearCommentExecutionResponse): string | null {
+  return "githubPrUrl" in result ? result.githubPrUrl : result.linearCommentUrl;
+}
+
+function executionResultLinkLabel(result: GitHubPrExecutionResponse | LinearCommentExecutionResponse): string {
+  if ("githubPrUrl" in result) return result.githubPrNumber ? `PR #${result.githubPrNumber}` : "GitHub PR";
+  return result.linearCommentId ? "Linear comment" : "Linear result";
 }
 
 function GitHubPrPreflightPanel({ preflight }: { preflight: GitHubPrPreflightResult }) {
@@ -2204,7 +2302,9 @@ function writePolicyText(policy: IntegrationWritePolicy | null): string {
 
 function writeActionLabel(action: IntegrationWritePreview | IntegrationWriteResult | LocalWriteExecutionRecord): string {
   if ("recordType" in action) {
-    return action.githubPrUrl ? "GitHub draft PR execution" : "GitHub draft PR attempt";
+    if (action.githubPrUrl) return "GitHub draft PR execution";
+    if (action.linearCommentUrl) return "Linear comment execution";
+    return action.kind === "linear_comment_create" ? "Linear comment attempt" : "GitHub draft PR attempt";
   }
   if ("executedAt" in action) {
     return action.externalUrl ? `${action.kind.replaceAll("_", " ")} result` : `${action.kind.replaceAll("_", " ")} attempt`;
@@ -2222,7 +2322,7 @@ function writeActionTimestamp(action: IntegrationWritePreview | IntegrationWrite
 }
 
 function writeActionUrl(action: IntegrationWritePreview | IntegrationWriteResult | LocalWriteExecutionRecord): string | null {
-  if ("recordType" in action) return action.githubPrUrl;
+  if ("recordType" in action) return action.githubPrUrl ?? action.linearCommentUrl;
   return "externalUrl" in action ? action.externalUrl : null;
 }
 

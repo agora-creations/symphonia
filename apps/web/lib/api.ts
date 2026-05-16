@@ -41,6 +41,9 @@ import {
   HealthResponseSchema,
   IntegrationWriteActionsResponse,
   IntegrationWriteActionsResponseSchema,
+  LinearCommentExecutionRequest,
+  LinearCommentExecutionResponse,
+  LinearCommentExecutionResultResponseSchema,
   RunApprovalEvidence,
   RunApprovalEvidenceResponseSchema,
   IssuesResponseSchema,
@@ -307,6 +310,15 @@ export async function createGithubDraftPr(runId: string, input: GitHubPrExecutio
     body: JSON.stringify(input),
   });
   return GitHubPrExecutionResultResponseSchema.parse(response).result;
+}
+
+export async function createLinearComment(runId: string, input: LinearCommentExecutionRequest): Promise<LinearCommentExecutionResponse> {
+  const response = await request(`/runs/${runId}/linear/comment/create`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(input),
+  });
+  return LinearCommentExecutionResultResponseSchema.parse(response).result;
 }
 
 export async function getWorkflowStatus(): Promise<WorkflowStatus> {

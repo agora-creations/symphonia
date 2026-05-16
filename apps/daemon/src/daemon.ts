@@ -26,6 +26,7 @@ import {
   getWorkflowStatus,
   createLinearTrackerAdapter,
   executeGitHubPrCreate,
+  executeLinearCommentCreate,
   githubWritePolicy,
   GitHubFetch,
   HarnessApplyError,
@@ -98,9 +99,16 @@ import {
   IntegrationWritePreviewSchema,
   IntegrationWriteResult,
   IntegrationWriteResultSchema,
+  LinearCommentExecutionRequest,
+  LinearCommentExecutionRequestSchema,
+  LinearCommentExecutionResponse,
+  LinearCommentExecutionResponseSchema,
+  LinearCommentIntent,
+  LinearCommentPrState,
   LocalWriteApprovalRecordSchema,
   LocalWriteExecutionRecord,
   LocalWriteExecutionRecordSchema,
+  PullRequestSummary,
   ReviewArtifactSnapshot,
   Run,
   RunApprovalEvidence,
@@ -735,8 +743,8 @@ export class SymphoniaDaemon {
 
       const linearCommentCreateMatch = path.match(/^\/runs\/([^/]+)\/linear\/comment\/create$/);
       if (request.method === "POST" && linearCommentCreateMatch) {
-        this.requireRun(linearCommentCreateMatch[1]!);
-        throw new ApiError(405, "Linear comments are disabled in Milestone 15C; use preview-only Linear contracts.");
+        const result = await this.createLinearComment(linearCommentCreateMatch[1]!, await readJsonBody(request));
+        return sendJson(response, 200, { result });
       }
 
       const runPromptMatch = path.match(/^\/runs\/([^/]+)\/prompt$/);
@@ -1875,11 +1883,29 @@ export class SymphoniaDaemon {
       credential: githubCredential,
       githubClient: null,
     });
-    const linearCommentPreview = buildLinearCommentPreview({
+    const githubPrExecution = this.latestSuccessfulGithubPrExecution(runId);
+    const prContext = await this.resolveLinearCommentPrContext(runtime, githubPrExecution);
+    const linearCommentBody = this.linearCommentWritebackBody(record, evidence, prContext);
+    const rawLinearCommentPreview = buildLinearCommentPreview({
       run: record.run,
       issue: record.issue,
       workflowConfig: runtime.config,
       credential: linearCredential,
+      bodyOverride: linearCommentBody,
+    });
+    const linearCommentBlockers = prContext.blockingReasons;
+    const linearCommentPreview = IntegrationWritePreviewSchema.parse({
+      ...rawLinearCommentPreview,
+      blockers: uniqueStrings([...rawLinearCommentPreview.blockers, ...linearCommentBlockers]),
+      linearComment: rawLinearCommentPreview.linearComment
+        ? {
+            ...rawLinearCommentPreview.linearComment,
+            prState: prContext.prState,
+            commentIntent: prContext.commentIntent,
+            blockers: uniqueStrings([...rawLinearCommentPreview.linearComment.blockers, ...linearCommentBlockers]),
+            warnings: uniqueStrings([...rawLinearCommentPreview.linearComment.warnings, ...prContext.warnings]),
+          }
+        : null,
     });
     const linearStatusPreview = this.buildLinearStatusUpdatePreview(record, runtime, evidence, linearCredential?.source ?? "unavailable");
 
@@ -1906,6 +1932,182 @@ export class SymphoniaDaemon {
         generatedBy: "local-daemon",
       }),
     ];
+  }
+
+  private latestSuccessfulGithubPrExecution(runId: string): LocalWriteExecutionRecord | null {
+    return (
+      this.eventStore
+        .listIntegrationWriteActionsForRun(runId)
+        .find(
+          (action): action is LocalWriteExecutionRecord =>
+            "recordType" in action &&
+            action.recordType === "local_write_execution" &&
+            action.kind === "github_pr_create" &&
+            action.status === "succeeded" &&
+            Boolean(action.githubPrUrl || action.githubPrNumber),
+        ) ?? null
+    );
+  }
+
+  private async resolveLinearCommentPrContext(
+    runtime: WorkflowRuntime,
+    githubExecution: LocalWriteExecutionRecord | null,
+  ): Promise<{ prState: LinearCommentPrState | null; commentIntent: LinearCommentIntent; blockingReasons: string[]; warnings: string[] }> {
+    const verifiedAt = nowIso();
+    if (!githubExecution) {
+      return {
+        prState: null,
+        commentIntent: "unavailable",
+        blockingReasons: ["Successful GitHub draft PR execution record is required before Linear comment writeback."],
+        warnings: [],
+      };
+    }
+    const blockers: string[] = [];
+    const warnings: string[] = [];
+    if (!githubExecution.githubPrUrl) blockers.push("GitHub PR execution record does not include a PR URL.");
+    if (!githubExecution.githubPrNumber) blockers.push("GitHub PR execution record does not include a PR number.");
+    const localPrState: LinearCommentPrState = {
+      prNumber: githubExecution.githubPrNumber,
+      prUrl: githubExecution.githubPrUrl,
+      state: "unknown",
+      isDraft: null,
+      mergedAt: null,
+      closedAt: null,
+      title: null,
+      headBranch: githubExecution.headBranch,
+      baseBranch: githubExecution.baseBranch,
+      targetRepository: githubExecution.targetRepository,
+      verifiedAt,
+      source: "local_record",
+      blockingReasons: [],
+      warnings: [],
+    };
+    if (!githubExecution.githubPrNumber) {
+      return {
+        prState: { ...localPrState, state: "unavailable", blockingReasons: uniqueStrings(blockers) },
+        commentIntent: "unavailable",
+        blockingReasons: uniqueStrings(blockers),
+        warnings,
+      };
+    }
+
+    const credential = await this.resolveGithubCredential();
+    const githubClient = this.githubClientForRuntime(runtime, credential?.token ?? null);
+    if (!credential || !githubClient) {
+      blockers.push("Live GitHub PR verification is unavailable.");
+      return {
+        prState: { ...localPrState, state: "unavailable", blockingReasons: uniqueStrings(blockers) },
+        commentIntent: "unavailable",
+        blockingReasons: uniqueStrings(blockers),
+        warnings,
+      };
+    }
+
+    try {
+      const pr = await githubClient.getPullRequest(githubExecution.githubPrNumber);
+      const prState = this.linearCommentPrStateFromPullRequest(runtime, githubExecution, pr, verifiedAt);
+      if (githubExecution.baseBranch && pr.baseBranch !== githubExecution.baseBranch) {
+        blockers.push(`GitHub PR #${githubExecution.githubPrNumber} base branch changed from ${githubExecution.baseBranch} to ${pr.baseBranch}.`);
+      }
+      if (githubExecution.headBranch && pr.headBranch !== githubExecution.headBranch) {
+        blockers.push(`GitHub PR #${githubExecution.githubPrNumber} head branch changed from ${githubExecution.headBranch} to ${pr.headBranch}.`);
+      }
+      const intent = linearCommentIntentFromPrState(prState);
+      if (intent === "pr_closed_unmerged") {
+        blockers.push(`GitHub PR #${githubExecution.githubPrNumber} is closed without merge; Linear comment writeback for closed-unmerged PRs is not enabled.`);
+      }
+      if (intent === "unavailable") {
+        blockers.push(`GitHub PR #${githubExecution.githubPrNumber} state is unavailable or unsupported.`);
+      }
+      return {
+        prState: {
+          ...prState,
+          blockingReasons: uniqueStrings([...prState.blockingReasons, ...blockers]),
+          warnings: uniqueStrings([...prState.warnings, ...warnings]),
+        },
+        commentIntent: blockers.length > 0 && intent !== "pr_closed_unmerged" ? "unavailable" : intent,
+        blockingReasons: uniqueStrings(blockers),
+        warnings,
+      };
+    } catch (error) {
+      blockers.push(error instanceof Error ? `GitHub PR #${githubExecution.githubPrNumber} could not be verified live: ${error.message}` : `GitHub PR #${githubExecution.githubPrNumber} could not be verified live.`);
+      return {
+        prState: { ...localPrState, state: "unavailable", source: "local_record", blockingReasons: uniqueStrings(blockers) },
+        commentIntent: "unavailable",
+        blockingReasons: uniqueStrings(blockers),
+        warnings,
+      };
+    }
+  }
+
+  private linearCommentPrStateFromPullRequest(
+    runtime: WorkflowRuntime,
+    githubExecution: LocalWriteExecutionRecord,
+    pr: PullRequestSummary,
+    verifiedAt: string,
+  ): LinearCommentPrState {
+    const targetRepository =
+      runtime.config.github.owner && runtime.config.github.repo ? `${runtime.config.github.owner}/${runtime.config.github.repo}` : githubExecution.targetRepository;
+    return {
+      prNumber: pr.number,
+      prUrl: pr.url,
+      state: pr.merged ? "merged" : pr.state === "open" ? "open" : pr.state === "closed" ? "closed" : "unknown",
+      isDraft: pr.draft,
+      mergedAt: null,
+      closedAt: pr.state === "closed" ? pr.updatedAt : null,
+      title: pr.title,
+      headBranch: pr.headBranch,
+      baseBranch: pr.baseBranch,
+      targetRepository,
+      verifiedAt,
+      source: "both",
+      blockingReasons: [],
+      warnings: [],
+    };
+  }
+
+  private linearCommentWritebackBody(
+    record: RunRecord,
+    evidence: RunApprovalEvidence,
+    prContext: { prState: LinearCommentPrState | null; commentIntent: LinearCommentIntent },
+  ): string {
+    const pr = prContext.prState;
+    const prLabel = pr?.prNumber ? `#${pr.prNumber}` : "PR";
+    const prReference = pr?.prUrl ? `${prLabel}: ${pr.prUrl}` : prLabel;
+    const changedFiles = evidence.changedFiles.length > 0
+      ? evidence.changedFiles.map((file) => `- ${file.path}`).join("\n")
+      : "- unavailable";
+    const evidenceStatus = evidence.missingEvidenceReasons.length === 0 ? "ready" : "incomplete";
+    const opening =
+      prContext.commentIntent === "pr_merged"
+        ? `Symphonia completed a Codex run for ${record.issue.identifier}, and the resulting GitHub PR has been merged.`
+        : prContext.commentIntent === "pr_ready_for_review"
+          ? `Symphonia completed a Codex run for ${record.issue.identifier}, and the resulting GitHub PR is open and ready for review.`
+          : prContext.commentIntent === "draft_pr_ready_for_review"
+            ? `Symphonia completed a Codex run for ${record.issue.identifier}, and the resulting draft GitHub PR is ready for review.`
+            : prContext.commentIntent === "pr_closed_unmerged"
+              ? `Symphonia completed a Codex run for ${record.issue.identifier}, but the resulting GitHub PR was closed without merge.`
+              : `Symphonia completed a Codex run for ${record.issue.identifier}, but the GitHub PR state is unavailable.`;
+    const prLine = prContext.commentIntent === "pr_merged" ? `Merged PR: ${prReference}` : `PR: ${prReference}`;
+    const reviewLine =
+      prContext.commentIntent === "pr_merged"
+        ? null
+        : prContext.commentIntent === "pr_closed_unmerged" || prContext.commentIntent === "unavailable"
+          ? "No Linear write should proceed until the PR state is resolved."
+          : "Human review is required before merge.";
+
+    return [
+      opening,
+      "",
+      prLine,
+      `Run ID: ${record.run.id}`,
+      "Changed files:",
+      changedFiles,
+      "",
+      `Review artifact: ${evidence.reviewArtifactStatus}.`,
+      `Approval evidence: ${evidenceStatus}.`,
+      reviewLine,
+    ].filter((line): line is string => line !== null).join("\n");
   }
 
   private buildLinearStatusUpdatePreview(
@@ -2749,8 +2951,312 @@ export class SymphoniaDaemon {
   }
 
   async createLinearComment(runId: string, _input: unknown) {
-    this.requireRun(runId);
-    throw new ApiError(405, "Linear comments are disabled in Milestone 15B; use preview-only write contracts.");
+    const record = this.requireRecord(runId);
+    const runtime = this.workflowRuntime ?? this.loadWorkflowRuntime();
+    const request = LinearCommentExecutionRequestSchema.parse({ ...objectBody(_input), runId });
+    const generatedAt = nowIso();
+    const existingExecution = this.eventStore.findLocalWriteExecutionByIdempotencyKey(request.idempotencyKey);
+    const existingConflict =
+      existingExecution && (existingExecution.payloadHash !== request.payloadHash || existingExecution.kind !== "linear_comment_create")
+        ? `Idempotency key already exists for a different write execution: ${existingExecution.kind} ${existingExecution.payloadHash}.`
+        : null;
+
+    if (existingConflict) {
+      return linearCommentExecutionResponse({
+        status: "blocked",
+        request,
+        payloadHashVerification: {
+          status: "mismatched",
+          expectedPayloadHash: existingExecution?.payloadHash ?? null,
+          receivedPayloadHash: request.payloadHash,
+        },
+        idempotency: {
+          status: "conflict",
+          idempotencyKey: request.idempotencyKey,
+          existingExecutionRecordId: existingExecution?.id ?? null,
+          existingExternalUrl: existingExecution?.linearCommentUrl ?? existingExecution?.githubPrUrl ?? null,
+          blockingReason: existingConflict,
+        },
+        blockingReasons: [existingConflict],
+        errorSummary: existingConflict,
+        executionRecord: existingExecution ?? null,
+      });
+    }
+
+    if (existingExecution?.status === "succeeded" && existingExecution.kind === "linear_comment_create" && (existingExecution.linearCommentId || existingExecution.linearCommentUrl)) {
+      return linearCommentExecutionResponse({
+        status: "already_executed",
+        request,
+        payloadHashVerification: {
+          status: "matched",
+          expectedPayloadHash: existingExecution.payloadHash,
+          receivedPayloadHash: request.payloadHash,
+        },
+        idempotency: {
+          status: "already_executed",
+          idempotencyKey: request.idempotencyKey,
+          existingExecutionRecordId: existingExecution.id,
+          existingExternalUrl: existingExecution.linearCommentUrl,
+          blockingReason: null,
+        },
+        blockingReasons: [],
+        errorSummary: null,
+        executionRecord: existingExecution,
+      });
+    }
+
+    if (existingExecution && (existingExecution.status === "pending" || existingExecution.status === "in_progress")) {
+      const reason = "A Linear comment execution with this idempotency key is already in progress.";
+      return linearCommentExecutionResponse({
+        status: "blocked",
+        request,
+        payloadHashVerification: {
+          status: "matched",
+          expectedPayloadHash: existingExecution.payloadHash,
+          receivedPayloadHash: request.payloadHash,
+        },
+        idempotency: {
+          status: "in_progress",
+          idempotencyKey: request.idempotencyKey,
+          existingExecutionRecordId: existingExecution.id,
+          existingExternalUrl: existingExecution.linearCommentUrl,
+          blockingReason: reason,
+        },
+        blockingReasons: [reason],
+        errorSummary: reason,
+        executionRecord: existingExecution,
+      });
+    }
+
+    const previews = await this.getWriteActionPreviews(runId);
+    const previewContract = previews.find((preview) => preview.id === request.previewId && preview.kind === "linear_comment_create") ?? null;
+    if (!previewContract) {
+      const reason = "Linear comment preview was not found for this run.";
+      return linearCommentExecutionResponse({
+        status: "blocked",
+        request,
+        payloadHashVerification: { status: "missing_preview", expectedPayloadHash: null, receivedPayloadHash: request.payloadHash },
+        idempotency: {
+          status: existingExecution?.status === "failed" ? "retry_allowed" : "new",
+          idempotencyKey: request.idempotencyKey,
+          existingExecutionRecordId: existingExecution?.id ?? null,
+          existingExternalUrl: existingExecution?.linearCommentUrl ?? null,
+          blockingReason: reason,
+        },
+        blockingReasons: [reason],
+        errorSummary: reason,
+        executionRecord: existingExecution ?? null,
+      });
+    }
+
+    const evidence = this.getRunApprovalEvidence(runId);
+    const githubExecution = this.latestSuccessfulGithubPrExecution(runId);
+    const prContext = await this.resolveLinearCommentPrContext(runtime, githubExecution);
+    const blockers = this.linearCommentExecutionBlockers(request, previewContract, evidence, runtime, githubExecution, prContext);
+    const credential = await this.resolveLinearCredential();
+    const linearClient = this.linearClientForRuntime(runtime, credential?.authorizationHeader ?? null);
+    if (!credential) blockers.push("Linear credentials are unavailable.");
+    if (!linearClient) blockers.push("Linear client is unavailable.");
+
+    if (linearClient && blockers.length === 0) {
+      try {
+        await linearClient.healthCheck();
+      } catch (error) {
+        blockers.push(error instanceof Error ? error.message : "Linear issue validation failed.");
+      }
+    }
+
+    const expectedPayloadHash = previewContract.writePayloadHash ?? previewContract.payloadHash;
+    const payloadHashVerification = {
+      status: expectedPayloadHash === request.payloadHash ? ("matched" as const) : ("mismatched" as const),
+      expectedPayloadHash,
+      receivedPayloadHash: request.payloadHash,
+    };
+    if (payloadHashVerification.status === "mismatched") {
+      blockers.push("Preview payload hash does not match the current Linear comment preview.");
+    }
+
+    if (blockers.length > 0) {
+      return linearCommentExecutionResponse({
+        status: "blocked",
+        request,
+        payloadHashVerification,
+        idempotency: {
+          status: existingExecution?.status === "failed" ? "retry_allowed" : "new",
+          idempotencyKey: request.idempotencyKey,
+          existingExecutionRecordId: existingExecution?.id ?? null,
+          existingExternalUrl: existingExecution?.linearCommentUrl ?? null,
+          blockingReason: blockers[0] ?? null,
+        },
+        blockingReasons: uniqueStrings(blockers),
+        errorSummary: uniqueStrings(blockers).join("; "),
+        executionRecord: existingExecution ?? null,
+      });
+    }
+
+    const integrationPreview = buildLinearCommentPreview({
+      run: record.run,
+      issue: record.issue,
+      workflowConfig: runtime.config,
+      credential,
+      bodyOverride: request.commentBody,
+    });
+    const executablePreview = IntegrationWritePreviewSchema.parse({
+      ...integrationPreview,
+      id: request.previewId,
+      target: {
+        ...integrationPreview.target,
+        issueId: request.targetIssueId,
+        issueIdentifier: request.targetIssueIdentifier,
+      },
+      linearComment: integrationPreview.linearComment
+        ? {
+            ...integrationPreview.linearComment,
+            issueId: request.targetIssueId,
+            issueIdentifier: request.targetIssueIdentifier,
+            body: request.commentBody,
+            prState: previewContract.payload.linearComment?.prState ?? null,
+            commentIntent: previewContract.payload.linearComment?.commentIntent ?? "unavailable",
+          }
+        : null,
+    });
+
+    const approvalRecord = LocalWriteApprovalRecordSchema.parse({
+      id: `write-approval-${sha256(request.idempotencyKey).slice(0, 24)}`,
+      runId,
+      issueId: record.issue.id,
+      issueIdentifier: record.issue.identifier,
+      kind: "linear_comment_create",
+      targetSystem: "linear",
+      targetIssueId: request.targetIssueId,
+      targetIssueIdentifier: request.targetIssueIdentifier,
+      githubPrNumber: githubExecution?.githubPrNumber ?? null,
+      githubPrUrl: githubExecution?.githubPrUrl ?? null,
+      payloadHash: request.payloadHash,
+      approvalEvidenceSource: previewContract.approvalEvidenceSource,
+      reviewArtifactSource: previewContract.reviewArtifactId,
+      changedFiles: previewContract.changedFiles,
+      title: "Linear run comment",
+      bodySummary: truncateText(request.commentBody, 1200),
+      confirmationType: "typed_phrase",
+      confirmationPhrase: previewContract.confirmationPhrase,
+      approvedAt: generatedAt,
+      status: "approved",
+      idempotencyKey: request.idempotencyKey,
+    });
+    let executionRecord = LocalWriteExecutionRecordSchema.parse({
+      recordType: "local_write_execution",
+      id: `write-execution-${sha256(request.idempotencyKey).slice(0, 24)}`,
+      approvalRecordId: approvalRecord.id,
+      runId,
+      issueId: record.issue.id,
+      issueIdentifier: record.issue.identifier,
+      previewId: request.previewId,
+      kind: "linear_comment_create",
+      targetSystem: "linear",
+      targetIssueId: request.targetIssueId,
+      targetIssueIdentifier: request.targetIssueIdentifier,
+      payloadHash: request.payloadHash,
+      idempotencyKey: request.idempotencyKey,
+      status: "in_progress",
+      approvalRecord,
+      startedAt: generatedAt,
+      completedAt: null,
+      externalWriteId: null,
+      githubPrNumber: githubExecution?.githubPrNumber ?? null,
+      githubPrUrl: githubExecution?.githubPrUrl ?? null,
+      linearCommentId: null,
+      linearCommentUrl: null,
+      errorSummary: null,
+      blockingReasons: [],
+    });
+    this.eventStore.saveLocalWriteExecutionRecord(executionRecord);
+    this.appendWriteStartedEvent(executablePreview);
+
+    const writeResult = await executeLinearCommentCreate({
+      preview: executablePreview,
+      request: {
+        previewId: request.previewId,
+        confirmation: request.confirmationText,
+        dryRun: false,
+        idempotencyKey: request.idempotencyKey,
+      },
+      workflowConfig: runtime.config,
+      credential,
+      linearClient,
+    });
+    executionRecord = LocalWriteExecutionRecordSchema.parse({
+      ...executionRecord,
+      status: writeResult.status === "succeeded" ? "succeeded" : "failed",
+      completedAt: writeResult.executedAt,
+      externalWriteId: writeResult.externalId,
+      linearCommentId: writeResult.linearComment?.id ?? null,
+      linearCommentUrl: writeResult.linearComment?.url ?? null,
+      errorSummary: writeResult.errors[0] ?? null,
+      blockingReasons: writeResult.errors,
+    });
+    this.eventStore.saveLocalWriteExecutionRecord(executionRecord);
+    this.appendWriteResultEvents(executablePreview, writeResult);
+
+    return linearCommentExecutionResponse({
+      status: writeResult.status === "succeeded" ? "succeeded" : "failed",
+      request,
+      payloadHashVerification,
+      idempotency: {
+        status: writeResult.status === "succeeded" ? "already_executed" : "retry_allowed",
+        idempotencyKey: request.idempotencyKey,
+        existingExecutionRecordId: executionRecord.id,
+        existingExternalUrl: executionRecord.linearCommentUrl,
+        blockingReason: writeResult.errors[0] ?? null,
+      },
+      blockingReasons: writeResult.errors,
+      errorSummary: writeResult.errors[0] ?? null,
+      executionRecord,
+    });
+  }
+
+  private linearCommentExecutionBlockers(
+    request: LinearCommentExecutionRequest,
+    preview: WriteActionPreviewContract,
+    evidence: RunApprovalEvidence,
+    runtime: WorkflowRuntime,
+    githubExecution: LocalWriteExecutionRecord | null,
+    prContext: { prState: LinearCommentPrState | null; commentIntent: LinearCommentIntent; blockingReasons: string[] },
+  ): string[] {
+    const blockers: string[] = [];
+    const policy = linearWritePolicy(runtime.config.tracker);
+    const comment = preview.payload.linearComment;
+
+    if (preview.kind !== "linear_comment_create") blockers.push("Preview is not a Linear comment creation preview.");
+    if (preview.targetSystem !== "linear") blockers.push("Preview does not target Linear.");
+    if (request.actionKind !== "linear_comment_create") blockers.push("Request action kind must be linear_comment_create.");
+    if (preview.idempotencyKey !== request.idempotencyKey) blockers.push("Idempotency key does not match the current preview.");
+    if (comment?.issueId !== request.targetIssueId) blockers.push("Target Linear issue id does not match the current preview.");
+    if (comment?.issueIdentifier !== request.targetIssueIdentifier) blockers.push("Target Linear issue identifier does not match the current preview.");
+    if (comment?.body !== request.commentBody) blockers.push("Comment body does not match the current preview.");
+    if (request.confirmationText !== preview.confirmationPhrase) blockers.push(`Confirmation phrase must be: ${preview.confirmationPhrase}`);
+    if (runtime.config.tracker.kind !== "linear") blockers.push("Tracker is not Linear.");
+    if (runtime.config.tracker.readOnly) blockers.push("Linear tracker read_only is true.");
+    if (!policy.enabled) blockers.push("Linear writes are disabled.");
+    if (!policy.allowedKinds.includes("linear_comment_create")) blockers.push("Linear comment creation is not enabled in WORKFLOW.md.");
+    if (!policy.requireConfirmation) blockers.push("Linear comment creation must require manual confirmation.");
+    if (!runtime.config.tracker.write.allowComments) blockers.push("Linear comments are disabled.");
+    if (runtime.config.tracker.write.allowStateTransitions) blockers.push("Linear status updates must remain disabled for Milestone 15D.");
+    if (preview.status !== "preview_available") blockers.push(...preview.blockingReasons);
+    if (evidence.finalRunState !== "succeeded") blockers.push(`Run must be succeeded before posting a Linear comment; current state is ${evidence.finalRunState}.`);
+    if (evidence.missingEvidenceReasons.length > 0) blockers.push(...evidence.missingEvidenceReasons);
+    if (evidence.reviewArtifactStatus !== "ready") blockers.push("Review artifact must be ready before posting a Linear comment.");
+    if (!githubExecution || githubExecution.kind !== "github_pr_create" || githubExecution.status !== "succeeded") {
+      blockers.push("Successful GitHub draft PR execution record is required before Linear comment writeback.");
+    }
+    if (githubExecution && !githubExecution.githubPrUrl) blockers.push("GitHub PR execution record does not include a PR URL.");
+    if (comment?.commentIntent !== prContext.commentIntent) blockers.push("Linear comment intent does not match the current live PR state.");
+    if (comment?.prState?.state !== prContext.prState?.state) blockers.push("Linear comment PR state does not match the current live PR state.");
+    blockers.push(...prContext.blockingReasons);
+    if (!request.targetIssueId || !request.targetIssueIdentifier) blockers.push("Target Linear issue is unavailable.");
+    if (!request.commentBody.trim()) blockers.push("Linear comment body is empty.");
+
+    return uniqueStrings(blockers);
   }
 
   listWorkspaces(): WorkspaceInfo[] {
@@ -3701,6 +4207,15 @@ export class SymphoniaDaemon {
     return credential;
   }
 
+  private async resolveLinearCredential() {
+    let credential = this.authManager.resolveCredential("linear");
+    if (!credential || credential.connection.status === "expired") {
+      const refresh = await this.authManager.refreshConnection("linear");
+      if (refresh.status === "connected") credential = this.authManager.resolveCredential("linear");
+    }
+    return credential;
+  }
+
   private githubClientForRuntime(runtime: WorkflowRuntime, token: string | null) {
     return createGitHubClient(
       {
@@ -3987,6 +4502,8 @@ function canonicalWritePayloadForPreview(input: {
         issueId: input.preview.linearComment.issueId,
         issueIdentifier: input.preview.linearComment.issueIdentifier,
         issueUrl: input.preview.linearComment.issueUrl,
+        prState: canonicalLinearCommentPrState(input.preview.linearComment.prState),
+        commentIntent: input.preview.linearComment.commentIntent,
         body: input.preview.linearComment.body,
         duplicateMarker: input.preview.linearComment.duplicateMarker,
       }
@@ -4040,6 +4557,23 @@ function canonicalChangedFiles(files: ChangedFile[]): ChangedFile[] {
     .sort((left, right) => left.path.localeCompare(right.path) || (left.oldPath ?? "").localeCompare(right.oldPath ?? ""));
 }
 
+function canonicalLinearCommentPrState(prState: LinearCommentPrState | null): Omit<LinearCommentPrState, "verifiedAt" | "blockingReasons" | "warnings"> | null {
+  if (!prState) return null;
+  return {
+    prNumber: prState.prNumber,
+    prUrl: prState.prUrl,
+    state: prState.state,
+    isDraft: prState.isDraft,
+    mergedAt: prState.mergedAt,
+    closedAt: prState.closedAt,
+    title: prState.title,
+    headBranch: prState.headBranch,
+    baseBranch: prState.baseBranch,
+    targetRepository: prState.targetRepository,
+    source: prState.source,
+  };
+}
+
 function isProviderEvent(event: AgentEvent): boolean {
   return event.type.startsWith("codex.") || event.type.startsWith("claude.") || event.type.startsWith("cursor.") || event.type === "provider.started" || event.type === "provider.stderr";
 }
@@ -4085,7 +4619,9 @@ function previewContractFromIntegrationPreview(input: {
     ...input.preview.warnings,
     input.preview.kind === "github_pr_create"
       ? "GitHub draft PR creation requires Milestone 15C manual confirmation; no automatic GitHub write occurs."
-      : "Preview-only in Milestone 15C; no Linear write endpoint will execute this action.",
+      : input.preview.kind === "linear_comment_create"
+        ? "Linear comment creation requires Milestone 15D manual confirmation; Linear status updates remain disabled."
+        : "Preview-only; no Linear status write endpoint will execute this action.",
   ]);
   const status = writePreviewStatus(input.availability, blockingReasons, input.evidence);
   const previewStateHash = sha256(
@@ -4233,7 +4769,7 @@ function linearStatusPreviewContract(input: {
     riskWarnings: uniqueStrings([
       ...input.preview.warnings,
       `Credential source would be ${input.credentialSource}.`,
-      "Preview-only in Milestone 15C; no Linear write endpoint will execute this action.",
+      "Preview-only; no Linear status write endpoint will execute this action.",
     ]),
     idempotencyKey: previewIdempotencyKey(input.run.id, "linear_status_update", payloadHash),
     payloadHash,
@@ -4309,6 +4845,14 @@ function nonConfirmationReasons(reasons: string[]): string[] {
 
 function previewIdempotencyKey(runId: string, kind: IntegrationWriteKind, payloadHash: string): string {
   return `preview:${kind}:${runId}:${payloadHash.slice(0, 24)}`;
+}
+
+function linearCommentIntentFromPrState(prState: LinearCommentPrState): LinearCommentIntent {
+  if (prState.state === "merged") return "pr_merged";
+  if (prState.state === "open" && prState.isDraft === true) return "draft_pr_ready_for_review";
+  if (prState.state === "open" && prState.isDraft === false) return "pr_ready_for_review";
+  if (prState.state === "closed") return "pr_closed_unmerged";
+  return "unavailable";
 }
 
 function proposedLinearStatusForRun(config: WorkflowRuntime["config"]["tracker"], status: Run["status"]): string | null {
@@ -4647,6 +5191,38 @@ function githubPrExecutionResponse(input: {
     approvalRecord: execution?.approvalRecord ?? null,
     executionRecord: execution,
     preflight: input.preflight ?? null,
+    createdAt: execution?.startedAt ?? null,
+    completedAt: execution?.completedAt ?? null,
+  });
+}
+
+function linearCommentExecutionResponse(input: {
+  status: LinearCommentExecutionResponse["status"];
+  request: LinearCommentExecutionRequest;
+  payloadHashVerification: LinearCommentExecutionResponse["payloadHashVerification"];
+  idempotency: LinearCommentExecutionResponse["idempotency"];
+  blockingReasons: string[];
+  errorSummary: string | null;
+  executionRecord: LocalWriteExecutionRecord | null;
+}): LinearCommentExecutionResponse {
+  const execution = input.executionRecord;
+  return LinearCommentExecutionResponseSchema.parse({
+    status: input.status,
+    runId: input.request.runId,
+    previewId: input.request.previewId,
+    approvalRecordId: execution?.approvalRecordId ?? null,
+    executionRecordId: execution?.id ?? null,
+    idempotencyKey: input.request.idempotencyKey,
+    linearCommentId: execution?.linearCommentId ?? null,
+    linearCommentUrl: execution?.linearCommentUrl ?? null,
+    targetIssueId: execution?.targetIssueId ?? input.request.targetIssueId,
+    targetIssueIdentifier: execution?.targetIssueIdentifier ?? input.request.targetIssueIdentifier,
+    blockingReasons: uniqueStrings(input.blockingReasons),
+    errorSummary: input.errorSummary,
+    payloadHashVerification: input.payloadHashVerification,
+    idempotency: input.idempotency,
+    approvalRecord: execution?.approvalRecord ?? null,
+    executionRecord: execution,
     createdAt: execution?.startedAt ?? null,
     completedAt: execution?.completedAt ?? null,
   });

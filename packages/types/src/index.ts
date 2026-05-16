@@ -1253,12 +1253,41 @@ export const GitHubBranchPushPreviewSchema = z.object({
 });
 export type GitHubBranchPushPreview = z.infer<typeof GitHubBranchPushPreviewSchema>;
 
+export const LinearCommentPrStateSchema = z.object({
+  prNumber: z.number().int().positive().nullable(),
+  prUrl: z.string().url().nullable(),
+  state: z.enum(["open", "closed", "merged", "unavailable", "unknown"]),
+  isDraft: z.boolean().nullable(),
+  mergedAt: isoDateTime.nullable(),
+  closedAt: isoDateTime.nullable(),
+  title: z.string().min(1).nullable(),
+  headBranch: z.string().min(1).nullable(),
+  baseBranch: z.string().min(1).nullable(),
+  targetRepository: z.string().min(1).nullable(),
+  verifiedAt: isoDateTime,
+  source: z.enum(["local_record", "live_github", "both"]),
+  blockingReasons: z.array(z.string().min(1)),
+  warnings: z.array(z.string().min(1)),
+});
+export type LinearCommentPrState = z.infer<typeof LinearCommentPrStateSchema>;
+
+export const LinearCommentIntentSchema = z.enum([
+  "draft_pr_ready_for_review",
+  "pr_ready_for_review",
+  "pr_merged",
+  "pr_closed_unmerged",
+  "unavailable",
+]);
+export type LinearCommentIntent = z.infer<typeof LinearCommentIntentSchema>;
+
 export const LinearCommentPreviewSchema = z.object({
   runId: z.string().min(1),
   issueId: z.string().min(1).nullable(),
   issueIdentifier: z.string().min(1).nullable(),
   issueUrl: z.string().url().nullable(),
   body: z.string(),
+  prState: LinearCommentPrStateSchema.nullable().default(null),
+  commentIntent: LinearCommentIntentSchema.default("unavailable"),
   existingCommentHint: z.string().min(1).nullable(),
   duplicateMarker: z.string().min(1),
   blockers: z.array(z.string().min(1)),
@@ -1540,16 +1569,23 @@ export const WriteExecutionStatusSchema = z.enum([
 ]);
 export type WriteExecutionStatus = z.infer<typeof WriteExecutionStatusSchema>;
 
+export const LocalExecutableWriteKindSchema = z.enum(["github_pr_create", "linear_comment_create"]);
+export type LocalExecutableWriteKind = z.infer<typeof LocalExecutableWriteKindSchema>;
+
 export const LocalWriteApprovalRecordSchema = z.object({
   id: z.string().min(1),
   runId: z.string().min(1),
   issueId: z.string().min(1).nullable(),
   issueIdentifier: z.string().min(1).nullable(),
-  kind: z.literal("github_pr_create"),
-  targetSystem: z.literal("github"),
-  targetRepository: z.string().min(1),
-  baseBranch: z.string().min(1),
-  headBranch: z.string().min(1),
+  kind: LocalExecutableWriteKindSchema,
+  targetSystem: IntegrationWriteProviderSchema,
+  targetRepository: z.string().min(1).nullable().default(null),
+  baseBranch: z.string().min(1).nullable().default(null),
+  headBranch: z.string().min(1).nullable().default(null),
+  targetIssueId: z.string().min(1).nullable().default(null),
+  targetIssueIdentifier: z.string().min(1).nullable().default(null),
+  githubPrNumber: z.number().int().positive().nullable().default(null),
+  githubPrUrl: z.string().url().nullable().default(null),
   payloadHash: z.string().min(1),
   approvalEvidenceSource: z.string().min(1),
   reviewArtifactSource: z.string().min(1).nullable(),
@@ -1572,11 +1608,13 @@ export const LocalWriteExecutionRecordSchema = z.object({
   issueId: z.string().min(1).nullable(),
   issueIdentifier: z.string().min(1).nullable(),
   previewId: z.string().min(1),
-  kind: z.literal("github_pr_create"),
-  targetSystem: z.literal("github"),
-  targetRepository: z.string().min(1),
-  baseBranch: z.string().min(1),
-  headBranch: z.string().min(1),
+  kind: LocalExecutableWriteKindSchema,
+  targetSystem: IntegrationWriteProviderSchema,
+  targetRepository: z.string().min(1).nullable().default(null),
+  baseBranch: z.string().min(1).nullable().default(null),
+  headBranch: z.string().min(1).nullable().default(null),
+  targetIssueId: z.string().min(1).nullable().default(null),
+  targetIssueIdentifier: z.string().min(1).nullable().default(null),
   payloadHash: z.string().min(1),
   idempotencyKey: z.string().min(1),
   status: WriteExecutionStatusSchema,
@@ -1586,6 +1624,8 @@ export const LocalWriteExecutionRecordSchema = z.object({
   externalWriteId: z.string().min(1).nullable(),
   githubPrNumber: z.number().int().positive().nullable(),
   githubPrUrl: z.string().url().nullable(),
+  linearCommentId: z.string().min(1).nullable().default(null),
+  linearCommentUrl: z.string().url().nullable().default(null),
   errorSummary: z.string().min(1).nullable(),
   blockingReasons: z.array(z.string().min(1)),
 });
@@ -1621,6 +1661,49 @@ export const GitHubPrExecutionResultResponseSchema = z.object({
   result: GitHubPrExecutionResponseSchema,
 });
 export type GitHubPrExecutionResultResponse = z.infer<typeof GitHubPrExecutionResultResponseSchema>;
+
+export const LinearCommentExecutionRequestSchema = z.object({
+  runId: z.string().min(1),
+  previewId: z.string().min(1),
+  actionKind: z.literal("linear_comment_create"),
+  payloadHash: z.string().min(1),
+  idempotencyKey: z.string().min(1),
+  confirmationText: z.string().min(1),
+  targetIssueId: z.string().min(1),
+  targetIssueIdentifier: z.string().min(1),
+  commentBody: z.string(),
+});
+export type LinearCommentExecutionRequest = z.infer<typeof LinearCommentExecutionRequestSchema>;
+
+export const LinearCommentExecutionStatusSchema = z.enum(["succeeded", "blocked", "failed", "already_executed"]);
+export type LinearCommentExecutionStatus = z.infer<typeof LinearCommentExecutionStatusSchema>;
+
+export const LinearCommentExecutionResponseSchema = z.object({
+  status: LinearCommentExecutionStatusSchema,
+  runId: z.string().min(1),
+  previewId: z.string().min(1),
+  approvalRecordId: z.string().min(1).nullable(),
+  executionRecordId: z.string().min(1).nullable(),
+  idempotencyKey: z.string().min(1),
+  linearCommentId: z.string().min(1).nullable(),
+  linearCommentUrl: z.string().url().nullable(),
+  targetIssueId: z.string().min(1).nullable(),
+  targetIssueIdentifier: z.string().min(1).nullable(),
+  blockingReasons: z.array(z.string().min(1)),
+  errorSummary: z.string().min(1).nullable(),
+  payloadHashVerification: PayloadHashVerificationResultSchema,
+  idempotency: IdempotencyResultSchema,
+  approvalRecord: LocalWriteApprovalRecordSchema.nullable(),
+  executionRecord: LocalWriteExecutionRecordSchema.nullable(),
+  createdAt: isoDateTime.nullable(),
+  completedAt: isoDateTime.nullable(),
+});
+export type LinearCommentExecutionResponse = z.infer<typeof LinearCommentExecutionResponseSchema>;
+
+export const LinearCommentExecutionResultResponseSchema = z.object({
+  result: LinearCommentExecutionResponseSchema,
+});
+export type LinearCommentExecutionResultResponse = z.infer<typeof LinearCommentExecutionResultResponseSchema>;
 
 export const IntegrationWriteExecutionRequestSchema = z.object({
   previewId: z.string().min(1),
