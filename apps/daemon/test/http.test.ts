@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { EventStore } from "@symphonia/db";
 import { AuthFetch, createQueuedRun, GitHubFetch, LinearFetch } from "@symphonia/core";
-import { AgentEvent, ApprovalState, GitHubPrExecutionResultResponse, GitHubPrPreflightResponse, IntegrationWriteActionsResponse, RunApprovalEvidenceResponse, WorkflowStatus, WriteActionPreviewContract } from "@symphonia/types";
+import { AgentEvent, ApprovalState, GitHubPrExecutionResultResponse, GitHubPrPreflightResponse, IntegrationWriteActionsResponse, LinearCommentExecutionResultResponse, RunApprovalEvidenceResponse, WorkflowStatus, WriteActionPreviewContract } from "@symphonia/types";
 import { createDaemonServer, SymphoniaDaemon } from "../src/daemon";
 
 let directory: string;
@@ -333,13 +333,18 @@ describe("daemon API", () => {
     expect(rejectedPr.statusCode).toBe(200);
     expect(JSON.parse(rejectedPr.body)).toMatchObject({ result: { status: "blocked" } });
 
-    const rejectedLinear = await requestRaw("POST", `/runs/${run.id}/linear/comment/create`, {
-      previewId: linearComment.id,
-      confirmation: "POST LINEAR COMMENT",
-      dryRun: false,
-      idempotencyKey: "linear-comment-test",
-    });
-    expect(rejectedLinear.statusCode).toBe(405);
+    const rejectedLinear = await requestJson<LinearCommentExecutionResultResponse>(
+      "POST",
+      `/runs/${run.id}/linear/comment/create`,
+      linearCommentExecutionBody(run.id, linearComment),
+    );
+    expect(rejectedLinear.result.status).toBe("blocked");
+    expect(rejectedLinear.result.blockingReasons).toEqual(
+      expect.arrayContaining([
+        "Successful GitHub draft PR execution record is required before Linear comment writeback.",
+        "Linear status updates must remain disabled for Milestone 15D.",
+      ]),
+    );
     expect(githubPrCreateCalls).toBe(0);
     expect(linearMutationCalls).toBe(0);
     expect(getEvents(run.id).map((event) => event.type)).not.toEqual(
@@ -600,6 +605,234 @@ describe("daemon API", () => {
     expect(mismatch.result.status).toBe("blocked");
     expect(mismatch.result.idempotency.status).toBe("conflict");
     expect(githubPrCreateCalls).toBe(1);
+  });
+
+  it("creates one manual Linear comment after a GitHub draft PR with audit-first persistence and idempotency", async () => {
+    process.env.GITHUB_TOKEN = "ghu_write_secret";
+    process.env.LINEAR_API_KEY = "lin_write_secret";
+    const store = new EventStore(join(directory, "manual-linear-comment.sqlite"));
+    let githubPrCreateCalls = 0;
+    let linearCommentCreateCalls = 0;
+    let linearStatusUpdateCalls = 0;
+    let expectedLinearIdempotencyKey = "";
+    let auditExistedBeforeLinearCreate = false;
+    const githubBaseFetch = fakeGitHubWriteFetch();
+    const githubFetch: GitHubFetch = async (input, init) => {
+      const url = new URL(input);
+      if (url.pathname === "/repos/agora-creations/symphonia/pulls" && init?.method === "POST") githubPrCreateCalls += 1;
+      return githubBaseFetch(input, init);
+    };
+    const linearBaseFetch = fakeLinearFetch({ state: "Todo" });
+    const linearFetch: LinearFetch = async (input, init) => {
+      const body = JSON.parse(String(init?.body)) as { query: string };
+      if (body.query.includes("commentCreate")) {
+        linearCommentCreateCalls += 1;
+        auditExistedBeforeLinearCreate = Boolean(
+          expectedLinearIdempotencyKey && store.findLocalWriteExecutionByIdempotencyKey(expectedLinearIdempotencyKey),
+        );
+      }
+      if (body.query.includes("issueUpdate")) linearStatusUpdateCalls += 1;
+      return linearBaseFetch(input, init);
+    };
+    const sourceRepoPath = join(directory, "source-repo");
+    const remotePath = join(directory, "agora-creations", "symphonia.git");
+    prepareSourceRepository(sourceRepoPath, remotePath);
+    const created = createDaemonServer(store, {
+      workflowPath,
+      cwd: sourceRepoPath,
+      githubFetch,
+      linearFetch,
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeWorkflow({
+      codexCommand: fakeCodexCommand("success-change"),
+      githubEnabled: true,
+      githubReadOnly: false,
+      githubWriteEnabled: true,
+      githubAllowCreatePr: true,
+      githubAllowPush: true,
+      linearReadOnly: false,
+      linearWriteEnabled: true,
+      linearAllowComments: true,
+      linearAllowStateTransitions: false,
+      workspaceRoot: join(directory, "isolated-workspaces"),
+    });
+    await daemon.refreshIssueCache();
+
+    const run = await daemon.startRun("linear-issue-101", "codex");
+    await waitForTerminal(run.id, "succeeded");
+    const isolatedWorkspacePath = daemon.requireRun(run.id).workspacePath!;
+    writeFileSync(join(isolatedWorkspacePath, "change.txt"), "write-action validation\n");
+    await requestJson("POST", `/runs/${run.id}/review-artifacts/refresh`);
+
+    const beforePrActions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
+    const beforePrLinear = beforePrActions.previews.find((preview) => preview.kind === "linear_comment_create")!;
+    expect(beforePrLinear.status).toBe("blocked");
+    expect(beforePrLinear.blockingReasons).toEqual(
+      expect.arrayContaining(["Successful GitHub draft PR execution record is required before Linear comment writeback."]),
+    );
+
+    const githubPreview = beforePrActions.previews.find((preview) => preview.kind === "github_pr_create")!;
+    const githubResult = await requestJson<GitHubPrExecutionResultResponse>(
+      "POST",
+      `/runs/${run.id}/github/pr/create`,
+      githubExecutionBody(run.id, githubPreview),
+    );
+    expect(githubResult.result.status).toBe("succeeded");
+    expect(githubPrCreateCalls).toBe(1);
+
+    const afterPrActions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
+    const linearPreview = afterPrActions.previews.find((preview) => preview.kind === "linear_comment_create")!;
+    expect(linearPreview.status).toBe("preview_available");
+    expect(linearPreview.payload.linearComment?.commentIntent).toBe("draft_pr_ready_for_review");
+    expect(linearPreview.payload.linearComment?.prState).toMatchObject({ state: "open", isDraft: true });
+    expect(linearPreview.bodyPreview).toContain("draft GitHub PR is ready for review");
+    expect(linearPreview.bodyPreview).toContain("PR: #42: https://github.com/agora-creations/symphonia/pull/42");
+    expect(linearPreview.bodyPreview).toContain(`Run ID: ${run.id}`);
+    expect(linearPreview.bodyPreview).toContain("Human review is required before merge.");
+    expectedLinearIdempotencyKey = linearPreview.idempotencyKey;
+
+    const result = await requestJson<LinearCommentExecutionResultResponse>(
+      "POST",
+      `/runs/${run.id}/linear/comment/create`,
+      linearCommentExecutionBody(run.id, linearPreview),
+    );
+    expect(result.result).toMatchObject({
+      status: "succeeded",
+      linearCommentId: "comment-1",
+      linearCommentUrl: "https://linear.app/acme/issue/ENG-101#comment-1",
+      targetIssueIdentifier: "ENG-101",
+    });
+    expect(auditExistedBeforeLinearCreate).toBe(true);
+    expect(githubPrCreateCalls).toBe(1);
+    expect(linearCommentCreateCalls).toBe(1);
+    expect(linearStatusUpdateCalls).toBe(0);
+    expect(store.findLocalWriteExecutionByIdempotencyKey(linearPreview.idempotencyKey)).toMatchObject({
+      status: "succeeded",
+      kind: "linear_comment_create",
+      linearCommentId: "comment-1",
+      payloadHash: linearPreview.payloadHash,
+      approvalRecord: {
+        githubPrNumber: 42,
+        githubPrUrl: "https://github.com/agora-creations/symphonia/pull/42",
+      },
+    });
+    expect(getEvents(run.id).map((event) => event.type)).toEqual(
+      expect.arrayContaining(["integration.write.started", "integration.write.succeeded", "linear.comment.created"]),
+    );
+
+    const retry = await requestJson<LinearCommentExecutionResultResponse>(
+      "POST",
+      `/runs/${run.id}/linear/comment/create`,
+      linearCommentExecutionBody(run.id, linearPreview),
+    );
+    expect(retry.result.status).toBe("already_executed");
+    expect(linearCommentCreateCalls).toBe(1);
+
+    const mismatch = await requestJson<LinearCommentExecutionResultResponse>("POST", `/runs/${run.id}/linear/comment/create`, {
+      ...linearCommentExecutionBody(run.id, linearPreview),
+      payloadHash: "different-payload-hash",
+    });
+    expect(mismatch.result.status).toBe("blocked");
+    expect(mismatch.result.idempotency.status).toBe("conflict");
+    expect(linearCommentCreateCalls).toBe(1);
+    expect(linearStatusUpdateCalls).toBe(0);
+  });
+
+  it("generates PR-state-aware Linear comment previews for merged and closed PRs", async () => {
+    process.env.GITHUB_TOKEN = "ghu_write_secret";
+    process.env.LINEAR_API_KEY = "lin_write_secret";
+    const store = new EventStore(join(directory, "linear-comment-pr-state.sqlite"));
+    let liveMode: "draft" | "merged" | "closed" = "draft";
+    let linearCommentCreateCalls = 0;
+    const githubFetch = fakeGitHubWriteFetch({
+      livePullRequest: (created) => {
+        const base = created ?? fakePullRequest();
+        if (liveMode === "merged") return { ...base, state: "closed", draft: false, merged: true };
+        if (liveMode === "closed") return { ...base, state: "closed", draft: false, merged: false };
+        return { ...base, state: "open", draft: true, merged: false };
+      },
+    });
+    const linearFetch: LinearFetch = async (input, init) => {
+      const body = JSON.parse(String(init?.body)) as { query: string };
+      if (body.query.includes("commentCreate")) linearCommentCreateCalls += 1;
+      return fakeLinearFetch({ state: "Todo" })(input, init);
+    };
+    const sourceRepoPath = join(directory, "source-repo");
+    const remotePath = join(directory, "agora-creations", "symphonia.git");
+    prepareSourceRepository(sourceRepoPath, remotePath);
+    const created = createDaemonServer(store, {
+      workflowPath,
+      cwd: sourceRepoPath,
+      githubFetch,
+      linearFetch,
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeWorkflow({
+      codexCommand: fakeCodexCommand("success-change"),
+      githubEnabled: true,
+      githubReadOnly: false,
+      githubWriteEnabled: true,
+      githubAllowCreatePr: true,
+      githubAllowPush: true,
+      linearReadOnly: false,
+      linearWriteEnabled: true,
+      linearAllowComments: true,
+      workspaceRoot: join(directory, "isolated-workspaces"),
+    });
+    await daemon.refreshIssueCache();
+
+    const run = await daemon.startRun("linear-issue-101", "codex");
+    await waitForTerminal(run.id, "succeeded");
+    writeFileSync(join(daemon.requireRun(run.id).workspacePath!, "change.txt"), "write-action validation\n");
+    await requestJson("POST", `/runs/${run.id}/review-artifacts/refresh`);
+
+    const actions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
+    const githubPreview = actions.previews.find((preview) => preview.kind === "github_pr_create")!;
+    const githubResult = await requestJson<GitHubPrExecutionResultResponse>(
+      "POST",
+      `/runs/${run.id}/github/pr/create`,
+      githubExecutionBody(run.id, githubPreview),
+    );
+    expect(githubResult.result.status).toBe("succeeded");
+
+    liveMode = "draft";
+    const draftActions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
+    const draftPreview = draftActions.previews.find((preview) => preview.kind === "linear_comment_create")!;
+    expect(draftPreview.status).toBe("preview_available");
+    expect(draftPreview.payload.linearComment?.commentIntent).toBe("draft_pr_ready_for_review");
+
+    liveMode = "merged";
+    const mergedActions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
+    const mergedPreview = mergedActions.previews.find((preview) => preview.kind === "linear_comment_create")!;
+    expect(mergedPreview.status).toBe("preview_available");
+    expect(mergedPreview.payload.linearComment?.commentIntent).toBe("pr_merged");
+    expect(mergedPreview.payload.linearComment?.prState).toMatchObject({ state: "merged", isDraft: false });
+    expect(mergedPreview.bodyPreview).toContain("has been merged");
+    expect(mergedPreview.bodyPreview).toContain("Merged PR: #42: https://github.com/agora-creations/symphonia/pull/42");
+    expect(mergedPreview.bodyPreview).not.toContain("requires human review before merge");
+    expect(mergedPreview.payloadHash).not.toBe(draftPreview.payloadHash);
+    expect(mergedPreview.idempotencyKey).not.toBe(draftPreview.idempotencyKey);
+
+    const staleDraftRequest = await requestJson<LinearCommentExecutionResultResponse>(
+      "POST",
+      `/runs/${run.id}/linear/comment/create`,
+      linearCommentExecutionBody(run.id, draftPreview),
+    );
+    expect(staleDraftRequest.result.status).toBe("blocked");
+    expect(staleDraftRequest.result.payloadHashVerification.status).toBe("missing_preview");
+
+    liveMode = "closed";
+    const closedActions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
+    const closedPreview = closedActions.previews.find((preview) => preview.kind === "linear_comment_create")!;
+    expect(closedPreview.status).toBe("blocked");
+    expect(closedPreview.payload.linearComment?.commentIntent).toBe("pr_closed_unmerged");
+    expect(closedPreview.blockingReasons).toEqual(
+      expect.arrayContaining(["GitHub PR #42 is closed without merge; Linear comment writeback for closed-unmerged PRs is not enabled."]),
+    );
+    expect(linearCommentCreateCalls).toBe(0);
   });
 
   it("blocks GitHub PR preflight for main checkout workspaces before audit or transport calls", async () => {
@@ -2058,17 +2291,26 @@ function fakeGitHubFetch(): GitHubFetch {
   };
 }
 
-function fakeGitHubWriteFetch(): GitHubFetch {
-  let created = false;
+function fakeGitHubWriteFetch(options: { livePullRequest?: (created: ReturnType<typeof fakePullRequest> | null) => ReturnType<typeof fakePullRequest> } = {}): GitHubFetch {
+  let createdPr: ReturnType<typeof fakePullRequest> | null = null;
   return async (input, init) => {
     const url = new URL(input);
     const method = init?.method ?? "GET";
     if (url.pathname === "/repos/agora-creations/symphonia/pulls" && method === "POST") {
-      created = true;
-      return jsonResponse(fakePullRequest(), 201);
+      const body = JSON.parse(String(init?.body ?? "{}")) as { title?: string; head?: string; base?: string; draft?: boolean };
+      createdPr = fakePullRequest({
+        title: body.title,
+        headBranch: body.head,
+        baseBranch: body.base,
+        draft: body.draft,
+      });
+      return jsonResponse(createdPr, 201);
+    }
+    if (url.pathname === "/repos/agora-creations/symphonia/pulls/42") {
+      return jsonResponse(options.livePullRequest ? options.livePullRequest(createdPr) : createdPr ?? fakePullRequest());
     }
     if (url.pathname === "/repos/agora-creations/symphonia/pulls") {
-      return jsonResponse(created ? [fakePullRequest()] : []);
+      return jsonResponse(createdPr ? [createdPr] : []);
     }
     if (url.pathname.includes("/files")) {
       return jsonResponse([]);
@@ -2094,18 +2336,20 @@ function fakeGitHubWriteFetch(): GitHubFetch {
   };
 }
 
-function fakePullRequest() {
+function fakePullRequest(
+  options: { title?: string; headBranch?: string; baseBranch?: string; draft?: boolean; state?: string; merged?: boolean } = {},
+) {
   return {
     id: 42,
     number: 42,
-    title: "ENG-101: Linear-backed daemon test",
+    title: options.title ?? "ENG-101: Linear-backed daemon test",
     html_url: "https://github.com/agora-creations/symphonia/pull/42",
-    state: "open",
-    draft: true,
-    merged: false,
+    state: options.state ?? "open",
+    draft: options.draft ?? true,
+    merged: options.merged ?? false,
     mergeable: null,
-    head: { ref: "feature/eng-101-write-test", sha: "abc123" },
-    base: { ref: "main", sha: "base123" },
+    head: { ref: options.headBranch ?? "feature/eng-101-write-test", sha: "abc123" },
+    base: { ref: options.baseBranch ?? "main", sha: "base123" },
     user: { login: "octocat" },
     created_at: "2026-05-13T08:12:00.000Z",
     updated_at: "2026-05-13T08:12:00.000Z",
@@ -2191,6 +2435,20 @@ function githubExecutionBody(runId: string, preview: WriteActionPreviewContract)
     baseBranch: preview.baseBranch ?? "main",
     headBranch: preview.targetBranch ?? "feature/eng-101-write-test",
     draft: true,
+  };
+}
+
+function linearCommentExecutionBody(runId: string, preview: WriteActionPreviewContract) {
+  return {
+    runId,
+    previewId: preview.id,
+    actionKind: "linear_comment_create" as const,
+    payloadHash: preview.payloadHash,
+    idempotencyKey: preview.idempotencyKey,
+    confirmationText: preview.confirmationPhrase,
+    targetIssueId: preview.payload.linearComment?.issueId ?? "linear-issue-101",
+    targetIssueIdentifier: preview.payload.linearComment?.issueIdentifier ?? "ENG-101",
+    commentBody: preview.payload.linearComment?.body ?? preview.bodyPreview,
   };
 }
 

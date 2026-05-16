@@ -826,7 +826,7 @@ export class EventStore {
         issueId: parsed.issueId,
         status: parsed.status,
         externalId: parsed.externalWriteId,
-        externalUrl: parsed.githubPrUrl,
+        externalUrl: parsed.githubPrUrl ?? parsed.linearCommentUrl,
         idempotencyKey: parsed.idempotencyKey,
         createdAt: parsed.startedAt,
         executedAt: parsed.completedAt,
