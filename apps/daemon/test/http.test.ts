@@ -310,7 +310,11 @@ describe("daemon API", () => {
 
     const linearStatus = actions.previews.find((preview) => preview.kind === "linear_status_update")!;
     expect(linearStatus.payload.linearStatusUpdate?.currentStatus).toBe("Todo");
-    expect(linearStatus.payload.linearStatusUpdate?.proposedStatus).toBe("Done");
+    expect(linearStatus.payload.linearStatusUpdate?.proposedStatus).toBeNull();
+    expect(linearStatus.payload.linearStatusUpdate?.transitionIntent).toBe("unknown");
+    expect(linearStatus.blockingReasons).toEqual(
+      expect.arrayContaining(["Successful GitHub PR execution record is required before Linear status transition preview can become future-executable."]),
+    );
     expect(linearStatus.requiredPermissions).toContain("Linear issueUpdate");
     expect(actions.previews.flatMap((preview) => preview.riskWarnings)).toEqual(
       expect.arrayContaining(["GitHub draft PR creation requires Milestone 15C manual confirmation; no automatic GitHub write occurs."]),
@@ -803,6 +807,9 @@ describe("daemon API", () => {
     const draftPreview = draftActions.previews.find((preview) => preview.kind === "linear_comment_create")!;
     expect(draftPreview.status).toBe("preview_available");
     expect(draftPreview.payload.linearComment?.commentIntent).toBe("draft_pr_ready_for_review");
+    const draftStatusPreview = draftActions.previews.find((preview) => preview.kind === "linear_status_update")!;
+    expect(draftStatusPreview.payload.linearStatusUpdate?.transitionIntent).toBe("pr_draft");
+    expect(draftStatusPreview.payload.linearStatusUpdate?.proposedStatus).toBeNull();
 
     liveMode = "merged";
     const mergedActions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
@@ -815,6 +822,10 @@ describe("daemon API", () => {
     expect(mergedPreview.bodyPreview).not.toContain("requires human review before merge");
     expect(mergedPreview.payloadHash).not.toBe(draftPreview.payloadHash);
     expect(mergedPreview.idempotencyKey).not.toBe(draftPreview.idempotencyKey);
+    const mergedStatusPreview = mergedActions.previews.find((preview) => preview.kind === "linear_status_update")!;
+    expect(mergedStatusPreview.payload.linearStatusUpdate?.transitionIntent).toBe("pr_merged");
+    expect(mergedStatusPreview.payload.linearStatusUpdate?.proposedStatus).toBe("Done");
+    expect(mergedStatusPreview.payload.linearStatusUpdate?.prState).toMatchObject({ state: "merged", isDraft: false });
 
     const staleDraftRequest = await requestJson<LinearCommentExecutionResultResponse>(
       "POST",
@@ -832,7 +843,111 @@ describe("daemon API", () => {
     expect(closedPreview.blockingReasons).toEqual(
       expect.arrayContaining(["GitHub PR #42 is closed without merge; Linear comment writeback for closed-unmerged PRs is not enabled."]),
     );
+    const closedStatusPreview = closedActions.previews.find((preview) => preview.kind === "linear_status_update")!;
+    expect(closedStatusPreview.payload.linearStatusUpdate?.transitionIntent).toBe("pr_closed_unmerged");
+    expect(closedStatusPreview.blockingReasons).toEqual(expect.arrayContaining(["Closed-unmerged PR status transitions are not enabled by policy."]));
     expect(linearCommentCreateCalls).toBe(0);
+  });
+
+  it("generates preview-only PR-state-aware Linear status transitions without mutation", async () => {
+    process.env.GITHUB_TOKEN = "ghu_write_secret";
+    process.env.LINEAR_API_KEY = "lin_write_secret";
+    const store = new EventStore(join(directory, "linear-status-preview.sqlite"));
+    let linearCommentCreateCalls = 0;
+    let linearStatusUpdateCalls = 0;
+    let linearState = "Todo";
+    const githubFetch = fakeGitHubWriteFetch({
+      livePullRequest: (created) => ({ ...(created ?? fakePullRequest()), state: "closed", draft: false, merged: true }),
+    });
+    const linearBaseFetch = fakeLinearFetch({ getState: () => linearState });
+    const linearFetch: LinearFetch = async (input, init) => {
+      const body = JSON.parse(String(init?.body)) as { query: string };
+      if (body.query.includes("commentCreate")) linearCommentCreateCalls += 1;
+      if (body.query.includes("issueUpdate")) linearStatusUpdateCalls += 1;
+      return linearBaseFetch(input, init);
+    };
+    const sourceRepoPath = join(directory, "source-repo");
+    const remotePath = join(directory, "agora-creations", "symphonia.git");
+    prepareSourceRepository(sourceRepoPath, remotePath);
+    const created = createDaemonServer(store, {
+      workflowPath,
+      cwd: sourceRepoPath,
+      githubFetch,
+      linearFetch,
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeWorkflow({
+      codexCommand: fakeCodexCommand("success-change"),
+      githubEnabled: true,
+      githubReadOnly: false,
+      githubWriteEnabled: true,
+      githubAllowCreatePr: true,
+      githubAllowPush: true,
+      linearReadOnly: false,
+      linearWriteEnabled: true,
+      linearAllowComments: true,
+      linearAllowStateTransitions: false,
+      workspaceRoot: join(directory, "isolated-workspaces"),
+    });
+    await daemon.refreshIssueCache();
+
+    const run = await daemon.startRun("linear-issue-101", "codex");
+    await waitForTerminal(run.id, "succeeded");
+    writeFileSync(join(daemon.requireRun(run.id).workspacePath!, "change.txt"), "write-action validation\n");
+    await requestJson("POST", `/runs/${run.id}/review-artifacts/refresh`);
+
+    const beforePrActions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
+    const githubPreview = beforePrActions.previews.find((preview) => preview.kind === "github_pr_create")!;
+    await requestJson<GitHubPrExecutionResultResponse>(
+      "POST",
+      `/runs/${run.id}/github/pr/create`,
+      githubExecutionBody(run.id, githubPreview),
+    );
+
+    const afterPrActions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
+    const mergedCommentPreview = afterPrActions.previews.find((preview) => preview.kind === "linear_comment_create")!;
+    expect(mergedCommentPreview.payload.linearComment?.commentIntent).toBe("pr_merged");
+    const commentResult = await requestJson<LinearCommentExecutionResultResponse>(
+      "POST",
+      `/runs/${run.id}/linear/comment/create`,
+      linearCommentExecutionBody(run.id, mergedCommentPreview),
+    );
+    expect(commentResult.result.status).toBe("succeeded");
+    expect(linearCommentCreateCalls).toBe(1);
+
+    const actionsBeforeStatusPreview = linearCommentCreateCalls + linearStatusUpdateCalls;
+    const statusActions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
+    const statusPreview = statusActions.previews.find((preview) => preview.kind === "linear_status_update")!;
+    expect(statusPreview.dryRunOnly).toBe(true);
+    expect(statusPreview.payloadHash).toBe(statusPreview.writePayloadHash);
+    expect(statusPreview.previewStateHash).toBeTruthy();
+    expect(statusPreview.status).toBe("blocked");
+    expect(statusPreview.bodyPreview).toContain("PR #42 is merged");
+    expect(statusPreview.bodyPreview).not.toContain("draft");
+    expect(statusPreview.payload.linearStatusUpdate).toMatchObject({
+      transitionIntent: "pr_merged",
+      currentStatus: "Todo",
+      proposedStatus: "Done",
+      proposedLinearStatusName: "Done",
+      prNumber: 42,
+      prIsDraft: false,
+      linkedCommentExecutionId: commentResult.result.executionRecordId,
+    });
+    expect(statusPreview.payload.linearStatusUpdate?.prState).toMatchObject({ state: "merged", isDraft: false });
+    expect(statusPreview.blockingReasons).toEqual(expect.arrayContaining(["Linear state transitions are disabled."]));
+    expect(linearCommentCreateCalls + linearStatusUpdateCalls).toBe(actionsBeforeStatusPreview);
+    expect(linearStatusUpdateCalls).toBe(0);
+
+    linearState = "Done";
+    const satisfiedActions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
+    const satisfiedPreview = satisfiedActions.previews.find((preview) => preview.kind === "linear_status_update")!;
+    expect(satisfiedPreview.status).toBe("already_satisfied");
+    expect(satisfiedPreview.payload.linearStatusUpdate?.currentStatus).toBe("Done");
+    expect(satisfiedPreview.payload.linearStatusUpdate?.transitionIntent).toBe("pr_merged");
+    expect(satisfiedPreview.writePayloadHash).toBe(statusPreview.writePayloadHash);
+    expect(satisfiedPreview.previewStateHash).not.toBe(statusPreview.previewStateHash);
+    expect(linearStatusUpdateCalls).toBe(0);
   });
 
   it("blocks GitHub PR preflight for main checkout workspaces before audit or transport calls", async () => {

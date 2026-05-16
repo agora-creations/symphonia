@@ -495,11 +495,9 @@ export function resolveWorkflowConfig(definition: WorkflowDefinition): WorkflowC
         commentOnRunStart: trackerAllowAutomatic && trackerAllowComments && readBoolean(writeRaw, false, "commentOnRunStart", "comment_on_run_start"),
         commentOnRunComplete:
           trackerAllowAutomatic && trackerAllowComments && readBoolean(writeRaw, false, "commentOnRunComplete", "comment_on_run_complete"),
-        moveToStateOnStart: trackerAllowStateTransitions ? readString(writeRaw, "moveToStateOnStart", "move_to_state_on_start") ?? null : null,
-        moveToStateOnSuccess:
-          trackerAllowStateTransitions ? readString(writeRaw, "moveToStateOnSuccess", "move_to_state_on_success") ?? null : null,
-        moveToStateOnFailure:
-          trackerAllowStateTransitions ? readString(writeRaw, "moveToStateOnFailure", "move_to_state_on_failure") ?? null : null,
+        moveToStateOnStart: readString(writeRaw, "moveToStateOnStart", "move_to_state_on_start") ?? null,
+        moveToStateOnSuccess: readString(writeRaw, "moveToStateOnSuccess", "move_to_state_on_success") ?? null,
+        moveToStateOnFailure: readString(writeRaw, "moveToStateOnFailure", "move_to_state_on_failure") ?? null,
         runCommentTemplate: readString(writeRaw, "runCommentTemplate", "run_comment_template") ?? defaultLinearCommentTemplate,
         confirmationPhrase: readString(writeRaw, "confirmationPhrase", "confirmation_phrase") ?? defaultLinearConfirmationPhrase,
         maxBodyLength: readPositiveInteger(writeRaw, 12_000, "maxBodyLength", "max_body_length"),

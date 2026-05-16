@@ -2083,7 +2083,13 @@ function WritePreviewContractCard({
         <dl className="mt-3 grid gap-2 text-xs sm:grid-cols-2">
           <PreviewKeyValue label="Current" value={preview.payload.linearStatusUpdate.currentStatus ?? "unknown"} />
           <PreviewKeyValue label="Proposed" value={preview.payload.linearStatusUpdate.proposedStatus ?? "not configured"} />
+          <PreviewKeyValue label="Intent" value={preview.payload.linearStatusUpdate.transitionIntent.replaceAll("_", " ")} />
           <PreviewKeyValue label="Run state" value={preview.payload.linearStatusUpdate.finalRunState} />
+          <PreviewKeyValue label="State source" value={preview.payload.linearStatusUpdate.currentLinearStatus?.source.replaceAll("_", " ") ?? "unavailable"} />
+          <PreviewKeyValue label="Target state ID" value={preview.payload.linearStatusUpdate.proposedLinearStatusId ?? "not configured"} />
+          <PreviewKeyValue label="PR state" value={preview.payload.linearStatusUpdate.prState?.state.replaceAll("_", " ") ?? "unavailable"} />
+          <PreviewKeyValue label="PR" value={preview.payload.linearStatusUpdate.prNumber ? `#${preview.payload.linearStatusUpdate.prNumber}` : "missing"} />
+          <PreviewKeyValue label="Linked comment" value={preview.payload.linearStatusUpdate.linkedCommentExecutionId ?? "missing"} />
         </dl>
       )}
 
@@ -2176,6 +2182,12 @@ function WritePreviewContractCard({
       {isLinearComment && (preview.blockingReasons.length > 0 || preview.status !== "preview_available") && (
         <p className="mt-3 rounded-md border p-3 text-xs text-muted-foreground">
           Linear comment creation is unavailable until the PR result, Linear comment gate, evidence, target issue, idempotency, and confirmation requirements are satisfied.
+        </p>
+      )}
+
+      {preview.kind === "linear_status_update" && (
+        <p className="mt-3 rounded-md border p-3 text-xs text-muted-foreground">
+          Linear status transition is preview-only. No status update control is available in this milestone.
         </p>
       )}
 
@@ -2347,6 +2359,8 @@ function writePreviewStatusClass(status: WriteActionPreviewContract["status"]) {
       return "border-blue-500/30 bg-blue-500/10 text-blue-600 dark:text-blue-300";
     case "read_only":
       return "border-amber-500/30 bg-amber-500/10 text-amber-700 dark:text-amber-300";
+    case "already_satisfied":
+      return "border-emerald-500/30 bg-emerald-500/10 text-emerald-600 dark:text-emerald-300";
     case "evidence_missing":
     case "blocked":
       return "border-red-500/30 bg-red-500/10 text-red-600 dark:text-red-300";

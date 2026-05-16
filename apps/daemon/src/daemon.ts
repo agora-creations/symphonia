@@ -105,6 +105,7 @@ import {
   LinearCommentExecutionResponseSchema,
   LinearCommentIntent,
   LinearCommentPrState,
+  LinearIssueStatusSnapshot,
   LocalWriteApprovalRecordSchema,
   LocalWriteExecutionRecord,
   LocalWriteExecutionRecordSchema,
@@ -131,6 +132,7 @@ import {
   WriteActionPreviewContractSchema,
   LinearStatusUpdatePreview,
   LinearStatusUpdatePreviewSchema,
+  LinearStatusTransitionIntent,
 } from "@symphonia/types";
 import {
   AuthDisconnectRequestSchema,
@@ -1885,6 +1887,7 @@ export class SymphoniaDaemon {
     });
     const githubPrExecution = this.latestSuccessfulGithubPrExecution(runId);
     const prContext = await this.resolveLinearCommentPrContext(runtime, githubPrExecution);
+    const linearCommentExecution = this.latestSuccessfulLinearCommentExecution(runId);
     const linearCommentBody = this.linearCommentWritebackBody(record, evidence, prContext);
     const rawLinearCommentPreview = buildLinearCommentPreview({
       run: record.run,
@@ -1907,7 +1910,15 @@ export class SymphoniaDaemon {
           }
         : null,
     });
-    const linearStatusPreview = this.buildLinearStatusUpdatePreview(record, runtime, evidence, linearCredential?.source ?? "unavailable");
+    const linearStatusPreview = await this.buildLinearStatusUpdatePreview(
+      record,
+      runtime,
+      evidence,
+      linearCredential?.source ?? "unavailable",
+      prContext,
+      githubPrExecution,
+      linearCommentExecution,
+    );
 
     return [
       previewContractFromIntegrationPreview({
@@ -1945,6 +1956,21 @@ export class SymphoniaDaemon {
             action.kind === "github_pr_create" &&
             action.status === "succeeded" &&
             Boolean(action.githubPrUrl || action.githubPrNumber),
+        ) ?? null
+    );
+  }
+
+  private latestSuccessfulLinearCommentExecution(runId: string): LocalWriteExecutionRecord | null {
+    return (
+      this.eventStore
+        .listIntegrationWriteActionsForRun(runId)
+        .find(
+          (action): action is LocalWriteExecutionRecord =>
+            "recordType" in action &&
+            action.recordType === "local_write_execution" &&
+            action.kind === "linear_comment_create" &&
+            action.status === "succeeded" &&
+            Boolean(action.linearCommentId || action.linearCommentUrl),
         ) ?? null
     );
   }
@@ -2110,17 +2136,30 @@ export class SymphoniaDaemon {
     ].filter((line): line is string => line !== null).join("\n");
   }
 
-  private buildLinearStatusUpdatePreview(
+  private async buildLinearStatusUpdatePreview(
     record: RunRecord,
     runtime: WorkflowRuntime,
     evidence: RunApprovalEvidence,
     credentialSource: IntegrationWritePreview["credentialSource"],
-  ) {
+    prContext: { prState: LinearCommentPrState | null; commentIntent: LinearCommentIntent; blockingReasons: string[]; warnings: string[] },
+    githubExecution: LocalWriteExecutionRecord | null,
+    linearCommentExecution: LocalWriteExecutionRecord | null,
+  ): Promise<LinearStatusUpdatePreview> {
     const config = runtime.config.tracker;
     const policy = linearWritePolicy(config);
-    const proposedStatus = proposedLinearStatusForRun(config, record.run.status);
+    const currentLinearStatus = await this.resolveLinearIssueStatusSnapshot(record, runtime);
+    const transitionIntent = linearStatusTransitionIntentFor({
+      runState: evidence.finalRunState,
+      evidenceMissing: evidence.missingEvidenceReasons.length > 0,
+      commentIntent: prContext.commentIntent,
+      prState: prContext.prState,
+    });
+    const proposedStatus = proposedLinearStatusForIntent(config, transitionIntent);
     const blockers: string[] = [];
-    const warnings: string[] = [];
+    const warnings: string[] = [...currentLinearStatus.warnings, ...prContext.warnings];
+    const approvalEvidenceId = `approval-evidence:${record.run.id}`;
+    const reviewArtifactId = evidence.reviewArtifactIdentifier;
+    const currentStatusName = currentLinearStatus.name ?? record.issue.state ?? null;
 
     if (config.kind !== "linear") blockers.push("Tracker is not Linear.");
     if (config.readOnly) blockers.push("Linear tracker read_only is true.");
@@ -2129,10 +2168,23 @@ export class SymphoniaDaemon {
     if (!policy.allowedKinds.includes("linear_status_update")) blockers.push("Linear status updates are not enabled in WORKFLOW.md.");
     if (credentialSource === "unavailable") blockers.push("Linear credentials are unavailable.");
     if (!record.issue.id) blockers.push("Linear issue id is unavailable.");
-    if (!proposedStatus) blockers.push("No Linear target status is configured for this run result.");
+    if (!githubExecution) blockers.push("Successful GitHub PR execution record is required before Linear status transition preview can become future-executable.");
+    if (!prContext.prState || prContext.commentIntent === "unavailable") {
+      blockers.push("Live GitHub PR state is unavailable or unsupported for Linear status transition preview.");
+    }
+    if (prContext.commentIntent === "pr_closed_unmerged") {
+      blockers.push("Closed-unmerged PR status transitions are not enabled by policy.");
+    }
+    if (!linearCommentExecution) {
+      blockers.push("Successful Linear comment execution record is required before Linear status transition preview can become future-executable.");
+    }
+    if (!currentStatusName) blockers.push("Current Linear issue status is unavailable.");
+    blockers.push(...currentLinearStatus.blockingReasons);
+    blockers.push(...prContext.blockingReasons);
+    if (!proposedStatus) blockers.push(`No Linear target status is configured for ${transitionIntent}.`);
     if (evidence.missingEvidenceReasons.length > 0) blockers.push(...evidence.missingEvidenceReasons);
-    if (record.issue.state && proposedStatus && record.issue.state === proposedStatus) {
-      warnings.push(`Linear issue is already in ${proposedStatus}.`);
+    if (currentStatusName && proposedStatus?.name && sameStatusName(currentStatusName, proposedStatus.name)) {
+      warnings.push(`Linear issue is already in ${proposedStatus.name}.`);
     }
 
     return LinearStatusUpdatePreviewSchema.parse({
@@ -2140,12 +2192,78 @@ export class SymphoniaDaemon {
       issueId: record.issue.id,
       issueIdentifier: record.issue.identifier,
       issueUrl: record.issue.url,
-      currentStatus: record.issue.state,
-      proposedStatus,
+      currentStatus: currentStatusName,
+      proposedStatus: proposedStatus?.name ?? proposedStatus?.id ?? null,
+      currentLinearStatus,
+      proposedLinearStatusId: proposedStatus?.id ?? null,
+      proposedLinearStatusName: proposedStatus?.name ?? null,
+      transitionIntent,
+      reason: linearStatusTransitionReason(transitionIntent, prContext.prState, githubExecution, linearCommentExecution, proposedStatus?.name ?? proposedStatus?.id ?? null),
+      runState: record.run.status,
       finalRunState: record.run.status,
+      prState: prContext.prState,
+      prNumber: prContext.prState?.prNumber ?? githubExecution?.githubPrNumber ?? null,
+      prUrl: prContext.prState?.prUrl ?? githubExecution?.githubPrUrl ?? null,
+      prIsDraft: prContext.prState?.isDraft ?? null,
+      prMergedAt: prContext.prState?.mergedAt ?? null,
+      linkedCommentExecutionId: linearCommentExecution?.id ?? null,
+      linkedCommentUrl: linearCommentExecution?.linearCommentUrl ?? null,
+      approvalEvidenceId,
+      reviewArtifactId,
+      changedFiles: evidence.changedFiles,
+      requiredPermissions: ["Linear issueUpdate"],
+      confirmationRequired: true,
+      confirmationPrompt: "Future execution would require explicit confirmation: UPDATE LINEAR STATUS.",
+      dryRunOnly: true,
       blockers: [...new Set(blockers)],
-      warnings,
+      warnings: [...new Set(warnings)],
     });
+  }
+
+  private async resolveLinearIssueStatusSnapshot(record: RunRecord, runtime: WorkflowRuntime): Promise<LinearIssueStatusSnapshot> {
+    const cached: LinearIssueStatusSnapshot = {
+      id: record.issue.tracker?.stateId ?? null,
+      name: record.issue.state ?? null,
+      type: null,
+      source: record.issue.state ? "cached_issue" : "unavailable",
+      fetchedAt: record.issue.lastFetchedAt ?? record.issue.updatedAt ?? null,
+      blockingReasons: record.issue.state ? [] : ["Cached Linear issue status is unavailable."],
+      warnings: [],
+    };
+
+    if (runtime.config.tracker.kind !== "linear") return cached;
+
+    try {
+      const issue = await this.trackerAdapter(runtime.config.tracker.kind).fetchIssue(
+        await this.trackerContext(runtime),
+        record.issue.id || record.issue.identifier,
+      );
+      if (!issue) {
+        return {
+          ...cached,
+          blockingReasons: [...cached.blockingReasons, "Live Linear issue state could not be read."],
+        };
+      }
+      return {
+        id: issue.tracker?.stateId ?? null,
+        name: issue.state ?? null,
+        type: null,
+        source: "live_linear",
+        fetchedAt: issue.lastFetchedAt ?? issue.updatedAt ?? nowIso(),
+        blockingReasons: issue.state ? [] : ["Live Linear issue status is unavailable."],
+        warnings: [],
+      };
+    } catch (error) {
+      return {
+        ...cached,
+        warnings: [
+          ...cached.warnings,
+          error instanceof Error
+            ? `Live Linear issue state could not be read; using cached issue state: ${error.message}`
+            : "Live Linear issue state could not be read; using cached issue state.",
+        ],
+      };
+    }
   }
 
   private getFileSummaryEvidence(
@@ -4719,29 +4837,89 @@ function linearStatusPreviewContract(input: {
 }): WriteActionPreviewContract {
   const approvalEvidenceId = `approval-evidence:${input.run.id}`;
   const reviewArtifactId = input.evidence.reviewArtifactIdentifier;
+  const approvalEvidenceSource = `approval-evidence:${input.evidence.fileSummarySource}`;
+  const approvalEvidenceHash = approvalEvidenceHashFor({
+    runId: input.run.id,
+    approvalEvidenceId,
+    approvalEvidenceSource,
+    reviewArtifactId,
+    evidence: input.evidence,
+  });
   const bodyPreview = input.preview.proposedStatus
-    ? `Move ${input.issue.identifier} from ${input.preview.currentStatus ?? "unknown"} to ${input.preview.proposedStatus}.`
-    : `No Linear target status is configured for ${input.run.status}.`;
+    ? `Would move ${input.issue.identifier} from ${input.preview.currentStatus ?? "unknown"} to ${input.preview.proposedStatus}: ${input.preview.reason}`
+    : input.preview.reason;
   const payload = {
     githubPr: null,
     linearComment: null,
     linearStatusUpdate: input.preview,
   };
-  const immutablePayload = {
+  const writePayload = {
+    hashScope: "write_payload",
+    hashAlgorithm: "sha256",
+    payloadCanonicalVersion: 1,
+    payloadHashInputsVersion: 1,
     kind: "linear_status_update",
     runId: input.run.id,
     issueId: input.issue.id,
     issueIdentifier: input.issue.identifier,
-    target: { provider: "linear", issueId: input.issue.id, issueIdentifier: input.issue.identifier, url: input.issue.url },
-    bodyPreview,
+    target: {
+      provider: "linear",
+      issueId: input.issue.id,
+      issueIdentifier: input.issue.identifier,
+      url: input.issue.url,
+      proposedLinearStatusId: input.preview.proposedLinearStatusId,
+      proposedLinearStatusName: input.preview.proposedLinearStatusName,
+    },
+    transitionIntent: input.preview.transitionIntent,
+    prNumber: input.preview.prNumber,
+    prUrl: input.preview.prUrl,
+    linkedCommentExecutionId: input.preview.linkedCommentExecutionId,
+    linkedCommentUrl: input.preview.linkedCommentUrl,
     reviewArtifactId,
     approvalEvidenceId,
-    payload,
+    approvalEvidenceSource,
+    approvalEvidenceHash,
+    changedFiles: canonicalChangedFiles(input.evidence.changedFiles),
   };
-  const payloadHash = sha256(stableStringify(immutablePayload));
+  const writePayloadHash = sha256(stableStringify(writePayload));
+  const payloadHash = writePayloadHash;
   const availabilityReasons = nonConfirmationReasons(input.availability?.reasons ?? []);
   const blockingReasons = uniqueStrings([...input.preview.blockers, ...availabilityReasons]);
+  const alreadySatisfied =
+    input.preview.currentStatus &&
+    input.preview.proposedLinearStatusName &&
+    sameStatusName(input.preview.currentStatus, input.preview.proposedLinearStatusName);
+  const status = alreadySatisfied ? "already_satisfied" : writePreviewStatus(input.availability, blockingReasons, input.evidence);
   const generatedAt = nowIso();
+  const riskWarnings = uniqueStrings([
+    ...input.preview.warnings,
+    `Credential source would be ${input.credentialSource}.`,
+    "Preview-only; no Linear status write endpoint will execute this action.",
+    "Linear status updates remain disabled until a future manual execution milestone.",
+  ]);
+  const previewStateHash = sha256(
+    stableStringify({
+      hashScope: "preview_state",
+      hashAlgorithm: "sha256",
+      previewStateHashInputsVersion: 1,
+      runId: input.run.id,
+      kind: "linear_status_update",
+      writePayloadHash,
+      status,
+      availabilityStatus: input.availability?.status ?? null,
+      availabilityReasons,
+      blockingReasons,
+      riskWarnings,
+      currentLinearStatus: input.preview.currentLinearStatus,
+      prState: input.preview.prState,
+      transitionIntent: input.preview.transitionIntent,
+      linkedCommentExecutionId: input.preview.linkedCommentExecutionId,
+      requiredPermissions: input.preview.requiredPermissions,
+      confirmationRequired: true,
+      confirmationPhrase: confirmationPhraseFromAvailability(input.availability),
+      dryRunOnly: true,
+    }),
+  );
   const contract = WriteActionPreviewContractSchema.parse({
     id: `write-preview-${input.run.id}-linear_status_update-${payloadHash.slice(0, 12)}`,
     runId: input.run.id,
@@ -4750,7 +4928,7 @@ function linearStatusPreviewContract(input: {
     kind: "linear_status_update",
     targetSystem: "linear",
     targetLabel: input.issue.identifier,
-    status: writePreviewStatus(input.availability, blockingReasons, input.evidence),
+    status,
     title: "Linear status update",
     bodyPreview,
     targetRepository: null,
@@ -4760,19 +4938,22 @@ function linearStatusPreviewContract(input: {
     reviewArtifactId,
     reviewArtifactPath: input.evidence.reviewArtifactPath,
     approvalEvidenceId,
-    approvalEvidenceSource: `approval-evidence:${input.evidence.fileSummarySource}`,
-    requiredPermissions: ["Linear issueUpdate"],
+    approvalEvidenceSource,
+    requiredPermissions: input.preview.requiredPermissions,
     confirmationRequired: true,
     confirmationPhrase: confirmationPhraseFromAvailability(input.availability),
     confirmationPrompt: confirmationPrompt(true, confirmationPhraseFromAvailability(input.availability)),
     blockingReasons,
-    riskWarnings: uniqueStrings([
-      ...input.preview.warnings,
-      `Credential source would be ${input.credentialSource}.`,
-      "Preview-only; no Linear status write endpoint will execute this action.",
-    ]),
+    riskWarnings,
     idempotencyKey: previewIdempotencyKey(input.run.id, "linear_status_update", payloadHash),
     payloadHash,
+    writePayloadHash,
+    previewStateHash,
+    approvalEvidenceHash,
+    payloadCanonicalVersion: 1,
+    payloadHashInputsVersion: 1,
+    previewStateHashInputsVersion: 1,
+    hashAlgorithm: "sha256",
     generatedAt,
     expiresAt: null,
     dryRunOnly: true,
@@ -4784,7 +4965,10 @@ function linearStatusPreviewContract(input: {
       targetSystem: "linear",
       targetIdentifier: input.issue.identifier,
       payloadHash,
-      approvalEvidenceSource: `approval-evidence:${input.evidence.fileSummarySource}`,
+      writePayloadHash,
+      previewStateHash,
+      approvalEvidenceHash,
+      approvalEvidenceSource,
       reviewArtifactSource: reviewArtifactId,
       generatedAt,
       generatedBy: input.generatedBy,
@@ -4855,13 +5039,81 @@ function linearCommentIntentFromPrState(prState: LinearCommentPrState): LinearCo
   return "unavailable";
 }
 
-function proposedLinearStatusForRun(config: WorkflowRuntime["config"]["tracker"], status: Run["status"]): string | null {
-  if (!config.write.allowStateTransitions) return null;
-  if (status === "succeeded") return config.write.moveToStateOnSuccess;
-  if (status === "failed" || status === "timed_out" || status === "cancelled" || status === "interrupted" || status === "orphaned") {
-    return config.write.moveToStateOnFailure;
+function linearStatusTransitionIntentFor(input: {
+  runState: Run["status"];
+  evidenceMissing: boolean;
+  commentIntent: LinearCommentIntent;
+  prState: LinearCommentPrState | null;
+}): LinearStatusTransitionIntent {
+  if (input.evidenceMissing) return "evidence_missing";
+  if (input.runState === "failed" || input.runState === "timed_out" || input.runState === "cancelled" || input.runState === "interrupted" || input.runState === "orphaned") {
+    return "run_failed";
   }
-  return config.write.moveToStateOnStart;
+  if (input.commentIntent === "pr_merged") return "pr_merged";
+  if (input.commentIntent === "pr_ready_for_review") return "pr_ready_for_review";
+  if (input.commentIntent === "draft_pr_ready_for_review") return "pr_draft";
+  if (input.commentIntent === "pr_closed_unmerged") return "pr_closed_unmerged";
+  if (input.prState?.state === "merged") return "pr_merged";
+  if (input.prState?.state === "open" && input.prState.isDraft === true) return "pr_draft";
+  if (input.prState?.state === "open" && input.prState.isDraft === false) return "pr_ready_for_review";
+  if (input.prState?.state === "closed") return "pr_closed_unmerged";
+  return "unknown";
+}
+
+function proposedLinearStatusForIntent(
+  config: WorkflowRuntime["config"]["tracker"],
+  intent: LinearStatusTransitionIntent,
+): { id: string | null; name: string | null } | null {
+  const configured =
+    intent === "pr_merged"
+      ? config.write.moveToStateOnSuccess
+      : intent === "pr_draft"
+        ? config.write.moveToStateOnStart
+        : intent === "pr_closed_unmerged" || intent === "run_failed"
+          ? config.write.moveToStateOnFailure
+          : null;
+  return configuredLinearStatusTarget(configured);
+}
+
+function configuredLinearStatusTarget(value: string | null): { id: string | null; name: string | null } | null {
+  const trimmed = value?.trim();
+  if (!trimmed) return null;
+  if (/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(trimmed)) {
+    return { id: trimmed, name: null };
+  }
+  return { id: null, name: trimmed };
+}
+
+function linearStatusTransitionReason(
+  intent: LinearStatusTransitionIntent,
+  prState: LinearCommentPrState | null,
+  githubExecution: LocalWriteExecutionRecord | null,
+  linearCommentExecution: LocalWriteExecutionRecord | null,
+  proposedStatus: string | null,
+): string {
+  const prReference = prState?.prNumber ? `PR #${prState.prNumber}` : githubExecution?.githubPrNumber ? `PR #${githubExecution.githubPrNumber}` : "the linked PR";
+  const target = proposedStatus ? ` to ${proposedStatus}` : "";
+  const comment = linearCommentExecution?.linearCommentUrl ? " after the PR-state-aware Linear comment was posted" : "";
+  switch (intent) {
+    case "pr_merged":
+      return `${prReference} is merged${comment}; a future manual status transition would move the issue${target}.`;
+    case "pr_ready_for_review":
+      return `${prReference} is open and ready for review; no review-status target is configured unless policy defines one.`;
+    case "pr_draft":
+      return `${prReference} is still draft; a future transition may only target an in-progress state if configured.`;
+    case "pr_closed_unmerged":
+      return `${prReference} is closed without merge; the status transition policy blocks by default.`;
+    case "run_failed":
+      return `The run did not succeed; a future manual status transition would use the configured failure target${target}.`;
+    case "evidence_missing":
+      return "Approval evidence or review artifact data is missing, so no status transition should be proposed.";
+    case "unknown":
+      return "The PR or run state is unavailable, so no status transition should be proposed.";
+  }
+}
+
+function sameStatusName(left: string, right: string): boolean {
+  return left.trim().toLowerCase() === right.trim().toLowerCase();
 }
 
 function sha256(value: string): string {

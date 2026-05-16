@@ -1280,6 +1280,28 @@ export const LinearCommentIntentSchema = z.enum([
 ]);
 export type LinearCommentIntent = z.infer<typeof LinearCommentIntentSchema>;
 
+export const LinearStatusTransitionIntentSchema = z.enum([
+  "pr_merged",
+  "pr_ready_for_review",
+  "pr_draft",
+  "pr_closed_unmerged",
+  "run_failed",
+  "evidence_missing",
+  "unknown",
+]);
+export type LinearStatusTransitionIntent = z.infer<typeof LinearStatusTransitionIntentSchema>;
+
+export const LinearIssueStatusSnapshotSchema = z.object({
+  id: z.string().min(1).nullable(),
+  name: z.string().min(1).nullable(),
+  type: z.string().min(1).nullable().default(null),
+  source: z.enum(["live_linear", "cached_issue", "unavailable"]),
+  fetchedAt: isoDateTime.nullable(),
+  blockingReasons: z.array(z.string().min(1)).default([]),
+  warnings: z.array(z.string().min(1)).default([]),
+});
+export type LinearIssueStatusSnapshot = z.infer<typeof LinearIssueStatusSnapshotSchema>;
+
 export const LinearCommentPreviewSchema = z.object({
   runId: z.string().min(1),
   issueId: z.string().min(1).nullable(),
@@ -1302,7 +1324,27 @@ export const LinearStatusUpdatePreviewSchema = z.object({
   issueUrl: z.string().url().nullable(),
   currentStatus: z.string().min(1).nullable(),
   proposedStatus: z.string().min(1).nullable(),
+  currentLinearStatus: LinearIssueStatusSnapshotSchema.nullable().default(null),
+  proposedLinearStatusId: z.string().min(1).nullable().default(null),
+  proposedLinearStatusName: z.string().min(1).nullable().default(null),
+  transitionIntent: LinearStatusTransitionIntentSchema.default("unknown"),
+  reason: z.string().min(1),
+  runState: RunStatusSchema,
   finalRunState: RunStatusSchema,
+  prState: LinearCommentPrStateSchema.nullable().default(null),
+  prNumber: z.number().int().positive().nullable().default(null),
+  prUrl: z.string().url().nullable().default(null),
+  prIsDraft: z.boolean().nullable().default(null),
+  prMergedAt: isoDateTime.nullable().default(null),
+  linkedCommentExecutionId: z.string().min(1).nullable().default(null),
+  linkedCommentUrl: z.string().url().nullable().default(null),
+  approvalEvidenceId: z.string().min(1).nullable().default(null),
+  reviewArtifactId: z.string().min(1).nullable().default(null),
+  changedFiles: z.array(ChangedFileSchema).default([]),
+  requiredPermissions: z.array(z.string().min(1)).default(["Linear issueUpdate"]),
+  confirmationRequired: z.boolean().default(true),
+  confirmationPrompt: z.string().min(1).default("Future execution would require explicit confirmation."),
+  dryRunOnly: z.literal(true).default(true),
   blockers: z.array(z.string().min(1)),
   warnings: z.array(z.string().min(1)),
 });
@@ -1329,6 +1371,7 @@ export const WriteActionPreviewStatusSchema = z.enum([
   "unavailable",
   "read_only",
   "evidence_missing",
+  "already_satisfied",
 ]);
 export type WriteActionPreviewStatus = z.infer<typeof WriteActionPreviewStatusSchema>;
 
