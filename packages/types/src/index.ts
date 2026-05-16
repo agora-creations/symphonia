@@ -1310,6 +1310,9 @@ export const WriteActionPreviewAuditSchema = z.object({
   targetSystem: IntegrationWriteProviderSchema,
   targetIdentifier: z.string().min(1).nullable(),
   payloadHash: z.string().min(1),
+  writePayloadHash: z.string().min(1).nullable().default(null),
+  previewStateHash: z.string().min(1).nullable().default(null),
+  approvalEvidenceHash: z.string().min(1).nullable().default(null),
   approvalEvidenceSource: z.string().min(1),
   reviewArtifactSource: z.string().min(1).nullable(),
   generatedAt: isoDateTime,
@@ -1354,6 +1357,13 @@ export const WriteActionPreviewContractSchema = z.object({
   riskWarnings: z.array(z.string().min(1)),
   idempotencyKey: z.string().min(1),
   payloadHash: z.string().min(1),
+  writePayloadHash: z.string().min(1).nullable().default(null),
+  previewStateHash: z.string().min(1).nullable().default(null),
+  approvalEvidenceHash: z.string().min(1).nullable().default(null),
+  payloadCanonicalVersion: z.number().int().positive().default(1),
+  payloadHashInputsVersion: z.number().int().positive().default(1),
+  previewStateHashInputsVersion: z.number().int().positive().default(1),
+  hashAlgorithm: z.literal("sha256").default("sha256"),
   generatedAt: isoDateTime,
   expiresAt: isoDateTime.nullable(),
   dryRunOnly: z.literal(true),
@@ -1452,6 +1462,9 @@ export type GitHubPrPreflightReviewArtifact = z.infer<typeof GitHubPrPreflightRe
 export const GitHubPrPreflightPreviewSchema = z.object({
   payloadHash: z.string().min(1).nullable(),
   expectedPayloadHash: z.string().min(1).nullable(),
+  writePayloadHash: z.string().min(1).nullable().default(null),
+  expectedWritePayloadHash: z.string().min(1).nullable().default(null),
+  previewStateHash: z.string().min(1).nullable().default(null),
   matches: z.boolean(),
 });
 export type GitHubPrPreflightPreview = z.infer<typeof GitHubPrPreflightPreviewSchema>;

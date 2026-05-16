@@ -1731,7 +1731,7 @@ function WriteActionsPanel({
           preview.id,
           await getGithubPrPreflight(run.id, {
             previewId: preview.id,
-            payloadHash: preview.payloadHash,
+            payloadHash: preview.writePayloadHash ?? preview.payloadHash,
             idempotencyKey: preview.idempotencyKey,
             targetRepository: preview.targetRepository,
             baseBranch: preview.baseBranch,
@@ -1781,7 +1781,7 @@ function WriteActionsPanel({
           runId: run.id,
           previewId: preview.id,
           actionKind: "github_pr_create",
-          payloadHash: preview.payloadHash,
+          payloadHash: preview.writePayloadHash ?? preview.payloadHash,
           idempotencyKey: preview.idempotencyKey,
           confirmationText: confirmationByPreview[preview.id] ?? "",
           targetRepository: preview.targetRepository,
@@ -2002,7 +2002,9 @@ function WritePreviewContractCard({
         <PreviewKeyValue label="Mode" value={preview.dryRunOnly ? "preview only" : "execution unavailable"} />
         <PreviewKeyValue label="Evidence" value={preview.approvalEvidenceSource} />
         <PreviewKeyValue label="Review artifact" value={preview.reviewArtifactId ?? "missing"} />
-        <PreviewKeyValue label="Payload hash" value={preview.payloadHash.slice(0, 16)} />
+        <PreviewKeyValue label="Write payload hash" value={(preview.writePayloadHash ?? preview.payloadHash).slice(0, 16)} />
+        {preview.previewStateHash && <PreviewKeyValue label="Preview state hash" value={preview.previewStateHash.slice(0, 16)} />}
+        {preview.approvalEvidenceHash && <PreviewKeyValue label="Evidence hash" value={preview.approvalEvidenceHash.slice(0, 16)} />}
         <PreviewKeyValue label="Idempotency" value={preview.idempotencyKey} />
         {preview.targetRepository && <PreviewKeyValue label="Repository" value={preview.targetRepository} />}
         {preview.baseBranch && <PreviewKeyValue label="Base" value={preview.baseBranch} />}
@@ -2143,7 +2145,8 @@ function GitHubPrPreflightPanel({ preflight }: { preflight: GitHubPrPreflightRes
           value={`${preflight.diff.liveChangedFiles.length} live / ${preflight.diff.evidenceChangedFiles.length} evidence`}
         />
         <PreviewKeyValue label="Review" value={preflight.reviewArtifact.status} />
-        <PreviewKeyValue label="Preview hash" value={preflight.preview.matches ? "matches" : "mismatch"} />
+        <PreviewKeyValue label="Write payload hash" value={preflight.preview.matches ? "matches" : "mismatch"} />
+        {preflight.preview.previewStateHash && <PreviewKeyValue label="Preview state" value={shortCommit(preflight.preview.previewStateHash)} />}
         <PreviewKeyValue label="Remote state" value={preflight.remoteState.ambiguous ? "ambiguous" : "clear"} />
         <PreviewKeyValue label="Branch freshness" value={preflight.branchFreshness.status.replaceAll("_", " ")} />
         <PreviewKeyValue label="Base advanced" value={preflight.branchFreshness.baseHasAdvanced === null ? "unknown" : preflight.branchFreshness.baseHasAdvanced ? "yes" : "no"} />

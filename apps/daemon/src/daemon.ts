@@ -2049,7 +2049,7 @@ export class SymphoniaDaemon {
       (requestedPreviewId
         ? previews.find((preview) => preview.id === requestedPreviewId && preview.kind === "github_pr_create")
         : previews.find((preview) => preview.kind === "github_pr_create")) ?? null;
-    const expectedPayloadHash = previewContract?.payloadHash ?? null;
+    const expectedPayloadHash = previewContract?.writePayloadHash ?? previewContract?.payloadHash ?? null;
     const idempotencyKey = requestedIdempotencyKey ?? previewContract?.idempotencyKey ?? null;
     const existingExecution = idempotencyKey ? this.eventStore.findLocalWriteExecutionByIdempotencyKey(idempotencyKey) : null;
     const ownership = this.eventStore.getRunWorkspaceOwnership(runId) ?? record.workspaceOwnership ?? null;
@@ -2333,6 +2333,9 @@ export class SymphoniaDaemon {
       preview: {
         payloadHash: requestedPayloadHash ?? expectedPayloadHash,
         expectedPayloadHash,
+        writePayloadHash: requestedPayloadHash ?? expectedPayloadHash,
+        expectedWritePayloadHash: expectedPayloadHash,
+        previewStateHash: previewContract?.previewStateHash ?? null,
         matches: previewPayloadMatches,
       },
       remoteState: {
@@ -2474,8 +2477,8 @@ export class SymphoniaDaemon {
     }
 
     const payloadHashVerification = {
-      status: previewContract.payloadHash === request.payloadHash ? ("matched" as const) : ("mismatched" as const),
-      expectedPayloadHash: previewContract.payloadHash,
+      status: (previewContract.writePayloadHash ?? previewContract.payloadHash) === request.payloadHash ? ("matched" as const) : ("mismatched" as const),
+      expectedPayloadHash: previewContract.writePayloadHash ?? previewContract.payloadHash,
       receivedPayloadHash: request.payloadHash,
     };
     if (payloadHashVerification.status === "mismatched") {
@@ -3927,6 +3930,116 @@ function truncateText(value: string, maxLength: number): string {
   return `${value.slice(0, maxLength)}...`;
 }
 
+function approvalEvidenceHashFor(input: {
+  runId: string;
+  approvalEvidenceId: string;
+  approvalEvidenceSource: string;
+  reviewArtifactId: string | null;
+  evidence: RunApprovalEvidence;
+}): string {
+  return sha256(
+    stableStringify({
+      hashScope: "approval_evidence",
+      hashAlgorithm: "sha256",
+      approvalEvidenceHashInputsVersion: 1,
+      runId: input.runId,
+      approvalEvidenceId: input.approvalEvidenceId,
+      approvalEvidenceSource: input.approvalEvidenceSource,
+      reviewArtifactId: input.reviewArtifactId,
+      finalRunState: input.evidence.finalRunState,
+      reviewArtifactStatus: input.evidence.reviewArtifactStatus,
+      reviewArtifactIdentifier: input.evidence.reviewArtifactIdentifier,
+      fileSummarySource: input.evidence.fileSummarySource,
+      changedFiles: canonicalChangedFiles(input.evidence.changedFiles),
+      missingEvidenceReasons: input.evidence.missingEvidenceReasons,
+    }),
+  );
+}
+
+function canonicalWritePayloadForPreview(input: {
+  preview: IntegrationWritePreview;
+  evidence: RunApprovalEvidence;
+  reviewArtifactId: string | null;
+  approvalEvidenceId: string;
+  approvalEvidenceSource: string;
+  approvalEvidenceHash: string;
+}): JsonValue {
+  const targetRepository =
+    input.preview.target.owner && input.preview.target.repo ? `${input.preview.target.owner}/${input.preview.target.repo}` : null;
+  const githubPr = input.preview.githubPr
+    ? {
+        runId: input.preview.githubPr.runId,
+        owner: input.preview.githubPr.owner,
+        repo: input.preview.githubPr.repo,
+        targetRepository,
+        baseBranch: input.preview.githubPr.baseBranch,
+        headBranch: input.preview.githubPr.headBranch,
+        headSha: input.preview.githubPr.headSha,
+        title: input.preview.githubPr.title,
+        body: input.preview.githubPr.body,
+        draft: input.preview.githubPr.draft,
+        changedFiles: canonicalChangedFiles(input.evidence.changedFiles),
+      }
+    : null;
+  const linearComment = input.preview.linearComment
+    ? {
+        runId: input.preview.linearComment.runId,
+        issueId: input.preview.linearComment.issueId,
+        issueIdentifier: input.preview.linearComment.issueIdentifier,
+        issueUrl: input.preview.linearComment.issueUrl,
+        body: input.preview.linearComment.body,
+        duplicateMarker: input.preview.linearComment.duplicateMarker,
+      }
+    : null;
+
+  return {
+    hashScope: "write_payload",
+    hashAlgorithm: "sha256",
+    payloadCanonicalVersion: 1,
+    payloadHashInputsVersion: 1,
+    kind: input.preview.kind,
+    runId: input.preview.runId,
+    issueId: input.preview.issueId,
+    issueIdentifier: input.preview.issueIdentifier,
+    target: {
+      provider: input.preview.target.provider,
+      owner: input.preview.target.owner,
+      repo: input.preview.target.repo,
+      issueId: input.preview.target.issueId,
+      issueIdentifier: input.preview.target.issueIdentifier,
+      branch: input.preview.target.branch,
+      baseBranch: input.preview.target.baseBranch,
+      url: input.preview.target.url,
+    },
+    title: previewContractTitle(input.preview),
+    bodyPreview: input.preview.bodyPreview,
+    reviewArtifactId: input.reviewArtifactId,
+    approvalEvidenceId: input.approvalEvidenceId,
+    approvalEvidenceSource: input.approvalEvidenceSource,
+    approvalEvidenceHash: input.approvalEvidenceHash,
+    payload: {
+      githubPr,
+      linearComment,
+      linearStatusUpdate: null,
+    },
+  };
+}
+
+function canonicalChangedFiles(files: ChangedFile[]): ChangedFile[] {
+  return files
+    .map((file) => ({
+      path: file.path,
+      status: file.status,
+      additions: file.additions,
+      deletions: file.deletions,
+      isBinary: file.isBinary,
+      oldPath: file.oldPath,
+      patch: file.patch,
+      source: file.source,
+    }))
+    .sort((left, right) => left.path.localeCompare(right.path) || (left.oldPath ?? "").localeCompare(right.oldPath ?? ""));
+}
+
 function isProviderEvent(event: AgentEvent): boolean {
   return event.type.startsWith("codex.") || event.type.startsWith("claude.") || event.type.startsWith("cursor.") || event.type === "provider.started" || event.type === "provider.stderr";
 }
@@ -3948,19 +4061,24 @@ function previewContractFromIntegrationPreview(input: {
     linearComment: input.preview.linearComment,
     linearStatusUpdate: null,
   };
-  const immutablePayload = {
-    kind: input.preview.kind,
+  const approvalEvidenceSource = `approval-evidence:${input.evidence.fileSummarySource}`;
+  const approvalEvidenceHash = approvalEvidenceHashFor({
     runId: input.preview.runId,
-    issueId: input.preview.issueId,
-    issueIdentifier: input.preview.issueIdentifier,
-    target: input.preview.target,
-    title: input.preview.title,
-    bodyPreview: input.preview.bodyPreview,
+    approvalEvidenceId,
+    approvalEvidenceSource,
+    reviewArtifactId,
+    evidence: input.evidence,
+  });
+  const writePayload = canonicalWritePayloadForPreview({
+    preview: input.preview,
+    evidence: input.evidence,
     reviewArtifactId,
     approvalEvidenceId,
-    payload,
-  };
-  const payloadHash = sha256(stableStringify(immutablePayload));
+    approvalEvidenceSource,
+    approvalEvidenceHash,
+  });
+  const writePayloadHash = sha256(stableStringify(writePayload));
+  const payloadHash = writePayloadHash;
   const availabilityReasons = nonConfirmationReasons(input.availability?.reasons ?? []);
   const blockingReasons = uniqueStrings([...input.preview.blockers, ...availabilityReasons]);
   const riskWarnings = uniqueStrings([
@@ -3969,18 +4087,39 @@ function previewContractFromIntegrationPreview(input: {
       ? "GitHub draft PR creation requires Milestone 15C manual confirmation; no automatic GitHub write occurs."
       : "Preview-only in Milestone 15C; no Linear write endpoint will execute this action.",
   ]);
+  const status = writePreviewStatus(input.availability, blockingReasons, input.evidence);
+  const previewStateHash = sha256(
+    stableStringify({
+      hashScope: "preview_state",
+      hashAlgorithm: "sha256",
+      previewStateHashInputsVersion: 1,
+      runId: input.preview.runId,
+      kind: input.preview.kind,
+      writePayloadHash,
+      status,
+      availabilityStatus: input.availability?.status ?? null,
+      availabilityReasons,
+      blockingReasons,
+      riskWarnings,
+      requiredPermissions: input.preview.requiredPermissions,
+      confirmationRequired: input.preview.confirmationRequired,
+      confirmationPhrase: input.preview.confirmationPhrase,
+      dryRunOnly: true,
+    }),
+  );
   const generatedAt = nowIso();
   const targetRepository =
     input.preview.target.owner && input.preview.target.repo ? `${input.preview.target.owner}/${input.preview.target.repo}` : null;
+  const idempotencyKey = previewIdempotencyKey(input.preview.runId, input.preview.kind, writePayloadHash);
   const contract = WriteActionPreviewContractSchema.parse({
-    id: `write-preview-${input.preview.runId}-${input.preview.kind}-${payloadHash.slice(0, 12)}`,
+    id: `write-preview-${input.preview.runId}-${input.preview.kind}-${writePayloadHash.slice(0, 12)}`,
     runId: input.preview.runId,
     issueId: input.preview.issueId,
     issueIdentifier: input.preview.issueIdentifier,
     kind: input.preview.kind,
     targetSystem: input.preview.provider,
     targetLabel: writePreviewTargetLabel(input.preview),
-    status: writePreviewStatus(input.availability, blockingReasons, input.evidence),
+    status,
     title: previewContractTitle(input.preview),
     bodyPreview: input.preview.bodyPreview,
     targetRepository,
@@ -3990,15 +4129,22 @@ function previewContractFromIntegrationPreview(input: {
     reviewArtifactId,
     reviewArtifactPath: input.evidence.reviewArtifactPath,
     approvalEvidenceId,
-    approvalEvidenceSource: `approval-evidence:${input.evidence.fileSummarySource}`,
+    approvalEvidenceSource,
     requiredPermissions: input.preview.requiredPermissions,
     confirmationRequired: input.preview.confirmationRequired,
     confirmationPhrase: input.preview.confirmationPhrase,
     confirmationPrompt: confirmationPrompt(input.preview.confirmationRequired, input.preview.confirmationPhrase),
     blockingReasons,
     riskWarnings,
-    idempotencyKey: previewIdempotencyKey(input.preview.runId, input.preview.kind, payloadHash),
+    idempotencyKey,
     payloadHash,
+    writePayloadHash,
+    previewStateHash,
+    approvalEvidenceHash,
+    payloadCanonicalVersion: 1,
+    payloadHashInputsVersion: 1,
+    previewStateHashInputsVersion: 1,
+    hashAlgorithm: "sha256",
     generatedAt,
     expiresAt: input.preview.expiresAt,
     dryRunOnly: true,
@@ -4010,11 +4156,14 @@ function previewContractFromIntegrationPreview(input: {
       targetSystem: input.preview.provider,
       targetIdentifier: writePreviewTargetLabel(input.preview),
       payloadHash,
-      approvalEvidenceSource: `approval-evidence:${input.evidence.fileSummarySource}`,
+      writePayloadHash,
+      previewStateHash,
+      approvalEvidenceHash,
+      approvalEvidenceSource,
       reviewArtifactSource: reviewArtifactId,
       generatedAt,
       generatedBy: input.generatedBy,
-      idempotencyKey: previewIdempotencyKey(input.preview.runId, input.preview.kind, payloadHash),
+      idempotencyKey,
       status: "previewed",
       externalWriteId: null,
     },

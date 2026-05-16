@@ -347,6 +347,106 @@ describe("daemon API", () => {
     );
   });
 
+  it("keeps GitHub PR write payload hash stable when write gates are enabled", async () => {
+    process.env.GITHUB_TOKEN = "ghu_write_secret";
+    process.env.LINEAR_API_KEY = "lin_write_secret";
+    const store = new EventStore(join(directory, "payload-hash-stability.sqlite"));
+    let githubPrCreateCalls = 0;
+    let linearMutationCalls = 0;
+    const githubBaseFetch = fakeGitHubWriteFetch();
+    const githubFetch: GitHubFetch = async (input, init) => {
+      const url = new URL(input);
+      if (url.pathname === "/repos/agora-creations/symphonia/pulls" && init?.method === "POST") githubPrCreateCalls += 1;
+      return githubBaseFetch(input, init);
+    };
+    const linearFetch: LinearFetch = async (input, init) => {
+      const body = JSON.parse(String(init?.body)) as { query: string };
+      if (body.query.includes("commentCreate") || body.query.includes("issueUpdate")) linearMutationCalls += 1;
+      return fakeLinearFetch({ state: "Todo" })(input, init);
+    };
+    const sourceRepoPath = join(directory, "source-repo");
+    const remotePath = join(directory, "agora-creations", "symphonia.git");
+    prepareSourceRepository(sourceRepoPath, remotePath);
+    const created = createDaemonServer(store, {
+      workflowPath,
+      cwd: sourceRepoPath,
+      githubFetch,
+      linearFetch,
+    });
+    daemon.close();
+    daemon = created.daemon;
+    writeWorkflow({
+      codexCommand: fakeCodexCommand("success-change"),
+      githubEnabled: true,
+      githubReadOnly: true,
+      githubWriteEnabled: false,
+      githubAllowCreatePr: false,
+      githubAllowPush: false,
+      workspaceRoot: join(directory, "isolated-workspaces"),
+    });
+    await daemon.refreshIssueCache();
+
+    const run = await daemon.startRun("linear-issue-101", "codex");
+    await waitForTerminal(run.id, "succeeded");
+    const isolatedWorkspacePath = daemon.requireRun(run.id).workspacePath!;
+    writeFileSync(join(isolatedWorkspacePath, "change.txt"), "write-action validation\n");
+    await requestJson("POST", `/runs/${run.id}/review-artifacts/refresh`);
+
+    const readOnlyActions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
+    const readOnlyPreview = readOnlyActions.previews.find((preview) => preview.kind === "github_pr_create")!;
+    expect(readOnlyPreview.status).toBe("read_only");
+    expect(readOnlyPreview.writePayloadHash).toBe(readOnlyPreview.payloadHash);
+    expect(readOnlyPreview.previewStateHash).toBeTruthy();
+
+    writeWorkflow({
+      codexCommand: fakeCodexCommand("success-change"),
+      githubEnabled: true,
+      githubReadOnly: false,
+      githubWriteEnabled: true,
+      githubAllowCreatePr: true,
+      githubAllowPush: true,
+      workspaceRoot: join(directory, "isolated-workspaces"),
+    });
+    daemon.refreshWorkflowStatus();
+
+    const enabledActions = await requestJson<IntegrationWriteActionsResponse>("GET", `/runs/${run.id}/write-actions`);
+    const enabledPreview = enabledActions.previews.find((preview) => preview.kind === "github_pr_create")!;
+    expect(enabledPreview.status).toBe("preview_available");
+    expect(enabledPreview.id).toBe(readOnlyPreview.id);
+    expect(enabledPreview.payloadHash).toBe(readOnlyPreview.payloadHash);
+    expect(enabledPreview.writePayloadHash).toBe(readOnlyPreview.writePayloadHash);
+    expect(enabledPreview.idempotencyKey).toBe(readOnlyPreview.idempotencyKey);
+    expect(enabledPreview.previewStateHash).not.toBe(readOnlyPreview.previewStateHash);
+
+    const preflight = await requestJson<GitHubPrPreflightResponse>("GET", githubPreflightPath(run.id, readOnlyPreview));
+    expect(preflight.preflight).toMatchObject({
+      status: "passed",
+      canExecute: true,
+      preview: {
+        payloadHash: readOnlyPreview.payloadHash,
+        expectedPayloadHash: enabledPreview.payloadHash,
+        writePayloadHash: readOnlyPreview.payloadHash,
+        expectedWritePayloadHash: enabledPreview.payloadHash,
+        previewStateHash: enabledPreview.previewStateHash,
+        matches: true,
+      },
+      branchFreshness: { status: "fresh" },
+    });
+
+    const result = await requestJson<GitHubPrExecutionResultResponse>(
+      "POST",
+      `/runs/${run.id}/github/pr/create`,
+      githubExecutionBody(run.id, readOnlyPreview),
+    );
+    expect(result.result.status).toBe("succeeded");
+    expect(githubPrCreateCalls).toBe(1);
+    expect(linearMutationCalls).toBe(0);
+    expect(store.findLocalWriteExecutionByIdempotencyKey(readOnlyPreview.idempotencyKey)).toMatchObject({
+      payloadHash: readOnlyPreview.payloadHash,
+      status: "succeeded",
+    });
+  });
+
   it("creates one manual GitHub draft PR with audit-first persistence and idempotency", async () => {
     process.env.GITHUB_TOKEN = "ghu_write_secret";
     process.env.LINEAR_API_KEY = "lin_write_secret";
