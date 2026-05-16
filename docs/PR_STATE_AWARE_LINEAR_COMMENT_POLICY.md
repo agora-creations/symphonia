@@ -68,4 +68,3 @@ Execution requires:
 Execution blocks if the PR state is unavailable, ambiguous, closed-unmerged, or contradicts the approved comment body.
 
 Linear status updates remain disabled. GitHub writes remain disabled.
-
